@@ -687,6 +687,12 @@ MUTATIONS = [
     ('挂载候选只认 smbfs', FILES['MountDiscovery'],
      'guard fileSystem == "smbfs" || fileSystem == "afpfs" else { return nil }',
      'guard fileSystem == "smbfs" else { return nil }'),
+    # ---- 2026-10-19 界面只体现版本号（不带内部构建号）----
+    # 空串不是漏填：不传这一项，系统会把 Info.plist 里的内部序号填进括号，
+    # 面板变成「版本 1.0.1 (19)」。把它填成版本号本身也一样难看（变成 (1.0.1)）。
+    ('关于面板把内部序号塞回括号', FILES['FlashFind2App'],
+     '            .version: "",',
+     '            .version: version,'),
 ]
 
 EXPECTED = {
@@ -760,6 +766,8 @@ EXPECTED = {
     # 2026-10-19 真机报障：证书确认路径漏装挂载服务 / 只认 smbfs 导致 AFP 挂载不认。
     'testWizardBuildsEveryProviderThroughOneFactory',
     'testAFPMountCountsAsConnectedShare',
+    # 2026-10-19 界面只体现版本号：关于面板显式清空的 `.version` 不能被填回去。
+    'testAboutPanelAndSettingsShareOneVersionSource',
     'testOTPPromptActivatesAppBeforeRunModal',
     'testOpenReconnectWizardShowsWizardWindow',
     'testQuietConnectMarksNeedsOTPThroughCore',

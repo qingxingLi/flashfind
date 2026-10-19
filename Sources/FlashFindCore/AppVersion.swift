@@ -3,28 +3,27 @@ import Foundation
 /// 应用版本号的**唯一出处**。
 ///
 /// 「关于」面板和设置页「通用」都要显示版本。两边各自去读一次
-/// `Bundle.main.infoDictionary`，迟早会分叉——一处读了 `CFBundleShortVersionString`
-/// 忘了带构建号，另一处又用另一种格式拼出来，同一次安装里出现两个版本号说法。
+/// `Bundle.main.infoDictionary`，迟早会分叉——一处读了 `CFBundleShortVersionString`、
+/// 另一处又拼成别的说法，同一次安装里出现两个版本号。
 /// 所以读取与格式化都收在这里，`AboutPanel` 与 `SettingsView` 共用。
 ///
-/// 格式化刻意留成**纯函数** `displayText(short:build:)`：App 层拿不到可测的
+/// 界面只认短版本（`1.0.1`），**不带构建号**。构建号是内部序号：同一个 `1.0.1`
+/// 会为了修 bug 重打若干次（build 18、19…），摆进界面只会让用户看到一串对不上
+/// 任何东西的数字，还得有人解释它是什么。构建号仍留在 Info.plist 的
+/// `CFBundleVersion` 里，打包脚本与 CI 拿它比对，但**不进界面**。
+///
+/// 格式化刻意留成**纯函数** `displayText(short:)`：App 层拿不到可测的
 /// `Bundle.main`（`FlashFind2App` 是 executableTarget，测试跑在自有 bundle 里），
 /// 把拼装逻辑抽出来才测得到。
 public enum AppVersion {
 
-    /// 一行式展示：`1.0.0（1）`。
+    /// 一行式展示的版本号：`1.0.1`。
     ///
-    /// 缺值时降级而不是摆空占位——版本号读不到时显示 `—`，
-    /// 只有构建号时只显示构建号。短版本与构建号相同时不重复写两遍。
-    public static func displayText(short: String?, build: String?) -> String {
+    /// 缺值时降级而不是摆空占位——读不到版本就显示 `—`，
+    /// 两端的空白要剪掉，Info.plist 里多敲一个空格不该显示成 ` 1.0.1 `。
+    public static func displayText(short: String?) -> String {
         let s = (short ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let b = (build ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        switch (s.isEmpty, b.isEmpty) {
-        case (true, true): return "—"
-        case (false, true): return s
-        case (true, false): return b
-        case (false, false): return s == b ? s : "\(s)（\(b)）"
-        }
+        return s.isEmpty ? "—" : s
     }
 
     /// 短版本号（`CFBundleShortVersionString`）。源码直接跑的裸二进制没有
@@ -33,17 +32,10 @@ public enum AppVersion {
         value(for: "CFBundleShortVersionString") ?? "开发构建"
     }
 
-    /// 构建号（`CFBundleVersion`）。
-    public static var buildNumber: String {
-        value(for: "CFBundleVersion") ?? "-"
-    }
-
     /// 设置页显示的一行式文本。
     public static var current: String {
-        let short = value(for: "CFBundleShortVersionString")
-        let build = value(for: "CFBundleVersion")
-        if short == nil && build == nil { return "开发构建" }
-        return displayText(short: short, build: build)
+        guard let short = value(for: "CFBundleShortVersionString") else { return "开发构建" }
+        return displayText(short: short)
     }
 
     private static func value(for key: String) -> String? {

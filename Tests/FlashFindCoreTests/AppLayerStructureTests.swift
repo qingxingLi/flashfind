@@ -1416,10 +1416,13 @@ final class AppLayerStructureTests: XCTestCase {
                       "版本号按系统表单行呈现，不自绘")
     }
 
-    /// ★ 版本号只能有一个出处。
+    /// ★ 版本号只能有一个出处，且界面只写版本号、不写构建号。
     ///
     /// 设置页读一次 `Bundle.main`、关于面板再读一次，两处格式迟早分叉，
     /// 同一次安装里出现两个版本号说法。两边都必须走 `AppVersion`。
+    ///
+    /// `.version: ""` 这一行是**故意的空串**，删掉它系统就会把 Info.plist 里的
+    /// 内部序号填进括号，面板变成「版本 1.0.1 (19)」。三种写法都截图实测过。
     func testAboutPanelAndSettingsShareOneVersionSource() throws {
         let app = codeOnly(try appSource("FlashFind2App.swift"))
         guard let about = braceBlock(after: "static func show()", in: app) else {
@@ -1427,8 +1430,10 @@ final class AppLayerStructureTests: XCTestCase {
         }
         XCTAssertTrue(about.contains("AppVersion.shortVersion"),
                       "关于面板的短版本也要走 AppVersion")
-        XCTAssertTrue(about.contains("AppVersion.buildNumber"),
-                      "关于面板的构建号也要走 AppVersion")
+        XCTAssertFalse(about.contains("AppVersion.buildNumber"),
+                       "构建号不进界面")
+        XCTAssertTrue(about.contains(".version: \"\""),
+                      "必须显式把括号里那一段清空，否则系统会填上 CFBundleVersion")
         XCTAssertFalse(about.contains("CFBundleShortVersionString"),
                        "关于面板不该自己再读一次 Bundle 键名")
     }

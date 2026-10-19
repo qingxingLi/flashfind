@@ -215,14 +215,13 @@ private struct SearchMenuView: View {
 /// 标准「关于」面板。
 ///
 /// 用系统的 `orderFrontStandardAboutPanel` 而不是自绘：图标、版式、
-/// 「版本 / 构建」这些排版都由系统负责，最贴近 macOS 原生，
+/// 版本行的排版都由系统负责，最贴近 macOS 原生，
 /// 也省掉一整套要跟着系统外观走的自定义视图。
 enum AboutPanel {
     static func show() {
         // 版本号读取与格式化统一走 `FlashFindCore.AppVersion`：设置页「通用」
         // 也显示同一个值，两处各读一次 Bundle 迟早会出现两种说法。
         let version = AppVersion.shortVersion
-        let build = AppVersion.buildNumber
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
@@ -236,7 +235,11 @@ enum AboutPanel {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "闪寻",
             .applicationVersion: version,
-            .version: "构建 " + build,
+            // 空串是故意的，不是漏填：不传这一项，系统会把 Info.plist 里的
+            // 内部序号填进括号，面板显示成「版本 1.0.1 (19)」；传空串才会整段消失。
+            // （三种写法都截图实测过：不传 → (19)、空串 → 只有 1.0.1、
+            // 传同一个版本号 → (1.0.1)。）内部序号不进界面。
+            .version: "",
             .credits: credits,
         ])
     }

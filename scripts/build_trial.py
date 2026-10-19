@@ -435,7 +435,10 @@ if verify.returncode:
     save(); raise SystemExit('Signature verification failed; app retained for diagnosis, no installer generated')
 readme = out / '安装前说明.txt'
 if args.release:
-    readme.write_text(f'闪寻 {version}（构建 {build_number}）\n正式发布版。\n未Developer ID签名或公证；本包不安装或修改NAS服务。\n', encoding='utf-8')
+    # 正式版只写版本号：构建号是内部序号，同一个 1.0.1 会为修 bug 重打若干次，
+    # 写进交付给用户的说明里只会让人来问「19 是什么意思」。构建号仍在
+    # build-record.json 与 Info.plist 里，用于追溯。
+    readme.write_text(f'闪寻 {version}\n正式发布版。\n未Developer ID签名或公证；本包不安装或修改NAS服务。\n', encoding='utf-8')
 else:
     readme.write_text(f'闪寻 {version} / 客户端 build{build_number}\n真实试用候选，非稳定发布。受测范围及未测项目请阅读PM-CLI-004交付说明。\n未Developer ID签名或公证；本包不安装或修改NAS服务。\n', encoding='utf-8')
 zip_path = out / (file_stem + '-arm64.zip')
