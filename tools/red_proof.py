@@ -52,6 +52,7 @@ FILES = {
     'NASSearchProvider': CLIENT / 'Sources/FlashFindCore/NASSearchProvider.swift',
     'ConnectionFailureText': CLIENT / 'Sources/FlashFindCore/ConnectionFailureText.swift',
     'SearchQueryParser': CLIENT / 'Sources/FlashFindCore/SearchQueryParser.swift',
+    'SearchCoordinator': CLIENT / 'Sources/FlashFindCore/SearchCoordinator.swift',
     'AppSearchProvider': CLIENT / 'Sources/FlashFindCore/AppSearchProvider.swift',
     'SearchFieldView': CLIENT / 'Sources/FlashFind2App/SearchFieldView.swift',
     'BrandGlyphMetrics': CLIENT / 'Sources/FlashFindCore/BrandGlyphMetrics.swift',
@@ -693,6 +694,12 @@ MUTATIONS = [
     ('关于面板把内部序号塞回括号', FILES['FlashFind2App'],
      '            .version: "",',
      '            .version: version,'),
+    # ---- 2026-10-19 CI 首红复盘：取消之后才到的批次被放行 ----
+    # 取消把 queryID 置空，事件守卫里的 `self.queryID==id` 就是「这次查询还算数吗」的闸门。
+    # 去掉它，界面上会先显示结果、随后被一次取消的搜索覆盖。
+    ('取消后仍把迟到批次送到界面', FILES['SearchCoordinator'],
+     '                            guard let self, self.queryID==id, event.queryID==id else { return }',
+     '                            guard let self, event.queryID==id else { return }'),
 ]
 
 EXPECTED = {
@@ -768,6 +775,8 @@ EXPECTED = {
     'testAFPMountCountsAsConnectedShare',
     # 2026-10-19 界面只体现版本号：关于面板显式清空的 `.version` 不能被填回去。
     'testAboutPanelAndSettingsShareOneVersionSource',
+    # 2026-10-19 CI 首红复盘：取消之后的迟到批次必须被丢掉（原用例靠 sleep 赌顺序）。
+    'testCancelRejectsDelayedBatches',
     'testOTPPromptActivatesAppBeforeRunModal',
     'testOpenReconnectWizardShowsWizardWindow',
     'testQuietConnectMarksNeedsOTPThroughCore',

@@ -17,15 +17,39 @@ private func nasFixtureConfig() -> NASSourceConfig {
                     host: "192.168.1.96", port: 5001, username: "nasuser", scope: "/示例共享")
 }
 
+/// 测试闸门：让「取消发生在批次到达之前」变成**确定的顺序**，而不是靠 sleep 赌调度。
+///
+/// 为什么需要：CI 的 macOS runner 负载高，`sleep(10ms)` 完全可能拖到 60ms 之后才醒，
+/// 于是批次先到、取消后到，用例断言「迟到批次被丢掉」时看到非空事件就红了。
+/// 这类红跟产品无关，但会挡住发布——而且只在 CI 出现，本机永远复现不了。
+///
+/// 所以让假 Provider 在**发事件之前**停下来等人放行：测试先确认它已停在闸门前、
+/// 再取消、最后放行，迟到批次一定是在取消之后才发出的。
+@MainActor private final class ScriptGate {
+    private(set) var arrived = false
+    var open = false
+
+    func enterAndWait() async {
+        arrived = true
+        for _ in 0..<20_000 {
+            if open { return }
+            await Task.yield()          // 让出主线程，测试才能继续跑
+        }
+    }
+}
+
 @MainActor private final class ScriptProvider: SearchProvider {
     let source:SearchSource
     var delay:UInt64
     var fail:Bool
+    /// 给了闸门就等它放行再发事件（见 `ScriptGate` 的说明）。
+    var gate:ScriptGate?
     var cancelled=[UUID]()
     init(_ source:SearchSource,delay:UInt64=0,fail:Bool=false) { self.source=source;self.delay=delay;self.fail=fail }
     func cancel(queryID:UUID) { cancelled.append(queryID) }
     func search(_ text:String,queryID:UUID,emit:@escaping @MainActor(ProviderEvent)->Void) async {
         try? await Task.sleep(nanoseconds:delay)
+        if let gate { await gate.enterAndWait() }
         // Deliberately emit even after cancellation to challenge Coordinator guards.
         emit(ProviderEvent(queryID:queryID,sourceID:source.id,results:fail ? [] : [SearchResult(id:source.id+text,name:text,relativePath:"/fixture/"+text,sourceID:source.id,sourceName:source.name,kind:"file",size:nil,localURL:nil)],state:fail ? .failed : .completed,isComplete: !fail))
     }
@@ -138,10 +162,23 @@ final class NASSearchPipelineTests:XCTestCase {
                   "sourceID": nasFixtureSource.id, "fileType": "file", "size": 1318]
         XCTAssertNotNil(provider.result(ok), "正常结果必须保留")
     }
+    /// 取消之后才到的批次必须被丢掉。
+    ///
+    /// 顺序由闸门**保证**（见 `ScriptGate`），不再用 sleep 时长赌调度：
+    /// ① 假 Provider 停在闸门前 → ② 取消 → ③ 放行，批次此刻才发出。
     @MainActor func testCancelRejectsDelayedBatches() async {
-        let p=ScriptProvider(.local,delay:60_000_000),c=SearchCoordinator(providers:[p]);var events=[ProviderEvent]()
-        let id=c.search("odoo") { events.append($0) };try? await Task.sleep(nanoseconds:10_000_000);c.cancel()
-        try? await Task.sleep(nanoseconds:90_000_000);XCTAssertTrue(events.isEmpty);XCTAssertEqual(p.cancelled,[id])
+        let p=ScriptProvider(.local),gate=ScriptGate(),c=SearchCoordinator(providers:[p])
+        p.gate=gate
+        var events=[ProviderEvent]()
+        let id=c.search("odoo") { events.append($0) }
+        var spins=0
+        while !gate.arrived && spins<20_000 { spins+=1; await Task.yield() }
+        XCTAssertTrue(gate.arrived, "假 Provider 没有进到闸门前，用例前提不成立")
+        c.cancel()
+        gate.open=true                              // 迟到批次现在才发
+        try? await Task.sleep(nanoseconds:20_000_000)
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertEqual(p.cancelled,[id])
     }
     @MainActor func testSingleCharacterBlocksOnlyNAS() async throws {
         let bridge=FixtureBridge(),nas=NASSearchProvider(bridge:bridge,config:nasFixtureConfig(),port:5001),local=ScriptProvider(.local),c=SearchCoordinator(providers:[nas,local]);var events=[ProviderEvent]()
