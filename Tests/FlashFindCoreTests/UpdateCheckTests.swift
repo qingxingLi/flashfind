@@ -24,7 +24,7 @@ final class UpdateCheckTests: XCTestCase {
     }
 
     private func releaseJSON(tag: String,
-                             page: String? = "https://github.com/qingxingLi/nasuser/releases/tag/v1.0.2") -> Data {
+                             page: String? = "https://github.com/qingxingLi/flashfind/releases/tag/v1.0.2") -> Data {
         var object: [String: Any] = ["tag_name": tag]
         if let page { object["html_url"] = page }
         return try! JSONSerialization.data(withJSONObject: object)
@@ -100,7 +100,7 @@ final class UpdateCheckTests: XCTestCase {
         let parsed = try UpdateCheck.parseLatestRelease(releaseJSON(tag: "v1.0.2"))
         XCTAssertEqual(parsed.tag, "v1.0.2")
         XCTAssertEqual(parsed.page?.absoluteString,
-                       "https://github.com/qingxingLi/nasuser/releases/tag/v1.0.2")
+                       "https://github.com/qingxingLi/flashfind/releases/tag/v1.0.2")
     }
 
     /// ★ 没有 `html_url` 也要能解析出标签——页面地址只影响「点哪儿」，
@@ -139,7 +139,7 @@ final class UpdateCheckTests: XCTestCase {
         }
         XCTAssertEqual(outcome, .updateAvailable(
             latest: "1.0.2",
-            page: URL(string: "https://github.com/qingxingLi/nasuser/releases/tag/v1.0.2")))
+            page: URL(string: "https://github.com/qingxingLi/flashfind/releases/tag/v1.0.2")))
     }
 
     func testSameTagStaysUpToDate() async {
@@ -224,12 +224,12 @@ final class UpdateCheckTests: XCTestCase {
     ///
     /// 拼错用户名或仓名不会报错，只会永远 404 —— 表现成「检查更新坏了」。
     func testEndpointPointsAtThePublicRepository() {
-        XCTAssertEqual(UpdateCheck.repository, "qingxingLi/nasuser")
+        XCTAssertEqual(UpdateCheck.repository, "qingxingLi/flashfind")
         XCTAssertEqual(UpdateCheck.latestReleaseAPI.host, "api.github.com")
         XCTAssertEqual(UpdateCheck.latestReleaseAPI.path,
-                       "/repos/qingxingLi/nasuser/releases/latest")
+                       "/repos/qingxingLi/flashfind/releases/latest")
         XCTAssertEqual(UpdateCheck.releasesPage.absoluteString,
-                       "https://github.com/qingxingLi/nasuser/releases")
+                       "https://github.com/qingxingLi/flashfind/releases")
         XCTAssertEqual(UpdateCheck.latestReleaseAPI.scheme, "https")
     }
 
@@ -264,7 +264,7 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertNil(UpdateCheckText.link(for: .upToDate(current: "1.0.1")))
         XCTAssertNil(UpdateCheckText.link(for: .incomparable(current: "开发构建")))
 
-        let page = URL(string: "https://github.com/qingxingLi/nasuser/releases/tag/v1.0.2")!
+        let page = URL(string: "https://github.com/qingxingLi/flashfind/releases/tag/v1.0.2")!
         XCTAssertEqual(UpdateCheckText.link(for: .updateAvailable(latest: "1.0.2", page: page)), page)
         XCTAssertEqual(UpdateCheckText.link(for: .updateAvailable(latest: "1.0.2", page: nil)),
                        UpdateCheck.releasesPage,

@@ -24,7 +24,7 @@ public enum UpdateCheck {
 
     /// 公开仓。写死在这里、不读 Info.plist：它是产品行为的一部分，
     /// 跟着发行包走的话，某次打包漏了键就会静默变成「永远最新」。
-    public static let repository = "qingxingLi/nasuser"
+    public static let repository = "qingxingLi/flashfind"
 
     /// `/releases/latest` 只返回**已发布且非预发布**的最新一版，
     /// 正好是「要不要提示用户升级」想要的语义。
