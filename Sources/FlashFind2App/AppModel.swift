@@ -1,0 +1,519 @@
+import AppKit
+import SwiftUI
+import Combine
+import FlashFindCore
+
+@MainActor
+final class NASRuntime {
+    var coordinator: SyncCoordinator?
+    var connection: ServerConnection?
+    var password = ""
+    var epoch = UUID()
+    var permissionRevision: UInt64 = 0
+    var task: Task<Void, Never>?
+    var poll: Task<Void, Never>?
+    var blocked = false
+    var failures = 0
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    /// 全局快捷键（P2-05）：录制、保存、事件监视器的生命周期全部归
+    /// `ShortcutController`。这里只转发——设置界面与 App 入口一行都不用改。
+    ///
+    /// 为什么要桥接 `objectWillChange`：这些状态原本是 AppModel 自己的
+    /// `@Published`，界面直接观察 AppModel；搬走之后如果不转发变更通知，
+    /// 界面会「数据变了但界面不刷新」——这种缺陷编译期看不出来，只有手动录一次
+    /// 快捷键才会发现。所以桥接不是可选项。
+    private let shortcuts: ShortcutController
+    private var shortcutBridge: AnyCancellable?
+    var globalShortcut: GlobalShortcutSpec { shortcuts.spec }
+    var shortcutStatus: String { shortcuts.status }
+    var shortcutAvailable: Bool { shortcuts.available }
+    var isRecordingShortcut: Bool { shortcuts.isRecording }
+    /// 最近一次录制/注册失败属于「这个组合被占用」，而不是「组合本身不合法」。
+    /// 引导页据此说人话（不抖 OSStatus），设置页照旧显示原文。
+    var shortcutRegistrationRefused: Bool { shortcuts.registrationRefused }
+
+    /// 结果动作（打开 / 定位 / 快速查看 / 复制 / 失败提示）的实际持有者。
+    ///
+    /// 同样要桥接 `objectWillChange`：`openFailure` 是界面观察的状态，
+    /// 提示条出不出来取决于这条通知。
+    let resultActions = ResultActionController()
+    private var resultActionBridge: AnyCancellable?
+    /// 保持旧类型名：界面写的是 `model.openFailure`，不改动调用点。
+    typealias OpenFailure = ResultActionController.Failure
+    var openFailure: OpenFailure? {
+        get { resultActions.failure }
+        set { resultActions.failure = newValue }
+    }
+    @Published var query = ""
+    @Published var results: [SearchResult] = []
+    @Published var selected: String?
+    @Published var searchFailure: String?
+    @Published var searchWarnings: [String] = []
+    @Published var resultsAreCurrent = false
+    @Published var searching = false
+    @Published var syncing = false
+    @Published var connecting = false
+    @Published var status = ""
+    @Published var address = ""
+    @Published var username = ""
+    @Published var password = "" {
+        didSet {
+            if !loadingPassword { passwordDraftIdentity = draftIdentity }
+        }
+    }
+    @Published var pin = ""
+    @Published var connectionName = ""
+    @Published var rememberPassword = false
+    @Published var enabled = true
+    /// 总开关是否被用户**显式**设置过（R01）。
+    ///
+    /// 区分它才能既修好新装用户、又不违背关掉它的人：
+    /// 只有从未设置过（全新安装）时才允许自动打开；用户显式关过就永远尊重。
+    var masterSwitchIsExplicit = false
+    @Published var sources: [Source] = []
+    @Published var bindings: [String: MountBinding] = [:]
+    @Published var selectedSourceIDs: Set<String>? = []
+    @Published var nasConnections: [NASConnectionProfile] = []
+    @Published var selectedConnectionID: String?
+    @Published var connectionStates: [String: NASConnectionState] = [:]
+    @Published var scope: SearchScope = .all
+    /// 本机这一侧的来源（本机搜索方式、已挂载 SMB 共享、文件夹选择）。
+    ///
+    /// 状态搬走之后，界面观察的仍是 AppModel —— 所以和前几轮一样必须桥接
+    /// `objectWillChange`：不桥接的话「设置里改了搜索方式但说明文字不更新」
+    /// 这种缺陷编译期看不出来，只有手动点一遍才发现。
+    let localSources: LocalSourceController
+    private var localSourcesBridge: AnyCancellable?
+    /// 界面外观（浅色 / 深色 / 跟随系统）。
+    ///
+    /// 判定在 Core 的 `AppearanceChoice`，落盘与应用在 `AppearanceController`，
+    /// 这里只转发——和前几个 controller 一样的边界。
+    private let appearance: AppearanceController
+    private var appearanceBridge: AnyCancellable?
+    /// 设置页「外观」读写的就是这个值。
+    var appearanceChoice: AppearanceChoice {
+        get { appearance.choice }
+        set { appearance.set(newValue) }
+    }
+    /// 启动时把上次选的外观应用上：用户选了深色，重启后必须还是深色。
+    func applyAppearance() { appearance.apply() }
+    var localEnabled: Bool {
+        get { localSources.localEnabled }
+        set { localSources.localEnabled = newValue }
+    }
+    var localFolders: [URL] { localSources.localFolders }
+    var localSearchMode: LocalSearchMode { localSources.localSearchMode }
+    var localSearchAvailabilityMessage: String { localSources.localSearchAvailabilityMessage }
+    var mountedSMBShares: [SMBMountCandidate] { localSources.mountedSMBShares }
+    var importedSMBShare: SMBMountCandidate? { localSources.importedSMBShare }
+    var mountedSMBDiscoveryCompleted: Bool { localSources.mountedSMBDiscoveryCompleted }
+    var mountedSMBDiscoveryError: String? { localSources.mountedSMBDiscoveryError }
+    var storedCredentialRequests = Set<String>()
+    let preferences: any ClientPreferences
+    /// 首次启动引导的痕迹（走没走完、停在哪一步）。
+    ///
+    /// 只存这两件事：「这台机器配好了没有」每次都现算（`onboardingState`），
+    /// 因为用户可能早就在系统设置里授过权、或已经加过 NAS。
+    let onboardingStore: OnboardingStore
+    let credentialAccessAllowed: Bool
+    let fixtureMode: Bool
+    var fixtureConnectedIDs = Set<String>()
+    var runtimes: [String: NASRuntime] = [:]
+    let cacheRoot: URL
+    var searchTask: Task<Void, Never>?
+    var spotlight: SpotlightProvider?
+    let localProvider = LocalSearchProvider()
+    /// 应用搜索：与 localProvider 并列，同属「本机」一侧——
+    /// 立即出结果，不走 NAS 那条 600ms 防抖。
+    let appProvider = AppSearchProvider()
+    var providerCoordinator: SearchCoordinator?
+    @Published var nativeSearchTimeoutSeconds = 60
+    /// 「显示实验性搜索来源」（高级页）。
+    ///
+    /// 默认**关**：关着的时候向导只给群晖，把「适配器在、但没在真机上验证过」
+    /// 的那几条路收起来（见 `ExperimentalSources`）。开关本身是可测逻辑，
+    /// 放在 Core；这里只负责持久化与广播。
+    @Published private(set) var showExperimentalSources = false
+    /// 向导里当前可选的来源类型。
+    var selectableVendors: [NASSourceConfig.Vendor] {
+        ExperimentalSources.vendors(includingExperimental: showExperimentalSources)
+    }
+    func setShowExperimentalSources(_ value: Bool) {
+        guard !AppEnvironment.isPreview || fixtureMode else { status = "UI 预览不修改真实设置"; return }
+        showExperimentalSources = value
+        preferences.set(value, forKey: ExperimentalSources.storageKey)
+    }
+
+    // MARK: 登录时启动（实现在 AppModel+LaunchAtLogin.swift）
+    //
+    // 动作在 `AppModel+LaunchAtLogin.swift`；下面两个是存储属性，
+    // 留在主文件——Swift 的 extension 不能含存储属性。
+
+
+    /// 「登录时启动闪寻」。真值来自系统（`SMAppService`），不是本地偏好——
+    /// 用户可能在「系统设置 ▸ 通用 ▸ 登录项」里直接改掉，这里必须以系统的为准。
+    @Published var launchAtLogin = LaunchAtLogin.isEnabled
+    /// 注册失败时系统给的原因。界面如实显示，不假装成功。
+    @Published var launchAtLoginMessage: String?
+
+    // MARK: - 原生 NAS 来源（实现在 AppModel+NativeSources.swift）
+    //
+    // 桥接层装配、Provider 重建、向导状态转发都在 `AppModel+NativeSources.swift`。
+    // 下面留下的是**存储**状态：Swift 的 extension 不能含存储属性，
+    // 这是分文件 extension 的硬约束，不是设计取舍。
+    //
+    // 桥接层装配、Provider 重建、向导状态转发：产品主路径上与 NAS 直接
+    // 打交道的部分都在这里，随 Stage 3A 搬走。
+
+
+    /// NAS 连接管理（P2-02）：桥接层与 Provider 的生死归它管。
+    let nasConnectionManager = NASConnectionManager()
+    /// 诊断落盘（P2-01）：从本类里分出去，规则只留一处。
+    let diagnostics = NASDiagnosticsController()
+    @Published var nativeNASStatus = "尚未添加 NAS"
+    /// 添加 / 编辑 NAS 来源的向导（P2 续）：草稿、连接尝试、证书确认、搜索位置
+    /// 全部归 `NASSourceWizardController`，本类只保留转发属性与转发方法。
+    ///
+    /// ★ 这一轮**连状态一起搬了**（`nasSources` / `nativeProviders` / `draftSource` …），
+    /// 因为向导的二十来个状态彼此咬合，只搬动作会换来一堆互相引用的回调。
+    /// 界面写的是 `model.xxx`，所以这里的转发属性必须保留同名，且**必须桥接
+    /// `objectWillChange`** —— 不桥接的表现是「向导里点了连接，界面一点反应都没有」，
+    /// 编译能过、也不报错。
+    /// 不写 private：向导转发已搬到 `AppModel+Wizard.swift`，跨文件 extension
+    /// 看不到本文件的 private。同一模块内 internal 已是最小可见范围。
+    let wizard: NASSourceWizardController
+    var wizardBridge: AnyCancellable?
+    /// 共享的后台挂载服务。跨来源复用，避免每台 NAS 各挂一次。
+    let mountService = SMBMountService()
+    /// 逐来源的「连接意图」登记。
+    ///
+    /// 静默自动连接与向导都是「先建 Provider → discover → login → selectScopes → 最后才
+    /// install」。用户在连接进行中点「断开」时，只关掉管理器里当前那个 Provider 是**不够**的：
+    /// 那条在飞的连接握着另一个实例，它晚到的成功照样会 install —— 而 install 会发布
+    /// 「Provider 集合变化」，上层据此整体重建搜索协调器，于是刚断开的来源复活、
+    /// **其它来源在飞的查询被一起取消**（用户看到的就是「断开一台，全部断开」）。
+    ///
+    /// 与向导**共用同一个实例**（`wizard.connectIntent`）：两边各持一份就会漏作废。
+    let connectIntent = SourceConnectIntent()
+    /// 每个来源正在跑的静默连接任务。断开时连同意图一起取消。
+    var connectTasks: [String: Task<Void, Never>] = [:]
+
+
+    // MARK: - 向导转发（实现在 AppModel+Wizard.swift）
+    //
+    // 这一块随 Stage 3A 搬到同目录的 `AppModel+Wizard.swift`：它只依赖 `wizard`，
+    // 不碰搜索与连接状态，是 AppModel 里最容易先分出去的一块。
+    // 这里只留指路，实现与注释都在那边（行为未改，调用点未动）。
+    // MARK: - 来源操作：诊断、重连、断开（实现在 AppModel+SourceActions.swift）
+    //
+    // 这一组原本挂在「向导转发」MARK 下面，标注与内容对不上；
+    // 随 Stage 3A 搬到 `AppModel+SourceActions.swift`。
+
+    // MARK: - 窗口与 Provider 收尾
+
+    /// 打开独立设置窗口。菜单栏、搜索浮窗的空状态按钮都走这里。
+    func openSettingsWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        SettingsWindow.shared.show(model: self, page: .search)
+    }
+
+    func closeSearchProviders() {
+        providerCoordinator?.cancel()
+        wizard.discardPendingProvider()
+        sharedBridge?.shutdown()
+    }
+
+    // MARK: - 搜索会话状态与可用性判定
+    //
+    // 一次搜索「当前看到的是不是还能用的结果」全靠这一组判定：
+    // 查询词、范围、启用的来源、显示隐藏文件，任何一项变了，旧结果就不再对应
+    // 当前状态，由 `canUseDisplayedResults` 拦下，不拿过期结果冒充。
+
+    var queryID = UUID()
+    var hiddenAt: Date?
+    /// 把搜索浮窗从屏幕上收起来的回调，由 `SearchPanelController` 注入。
+    ///
+    /// AppModel 不持有面板实例，所以不能自己 `orderOut`。此前它拿
+    /// `NSApplication.shared.keyWindow` 顶替，可是点在**其它应用**上时
+    /// 闪寻已失去前台、keyWindow 常常是 nil —— 于是出现「点了外面，
+    /// 浮窗还杵在那儿」。收哪个窗口只有面板自己确定，这件事交回给它。
+    var hidePanel: (() -> Void)?
+    var contextRevision: UInt64 = 0
+    var displayedRevision: UInt64?
+    var displayedQuery = ""
+    var displayedScope: SearchScope = .all
+    let profilesKey = "ff2.multiNAS.v1"
+    var configurationBlocked = false
+    var loadingPassword = false
+    var passwordDraftIdentity: String?
+    var draftIdentity: String { AccountProfile.key(address: address.trimmingCharacters(in: .whitespacesAndNewlines), username: username.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    var canUseDisplayedResults: Bool {
+        resultsAreCurrent && displayedRevision == contextRevision && displayedQuery == query && displayedScope == scope
+    }
+    /// 至少有一个 NAS 来源可以真正参与搜索。旧的索引服务连接仍算可用来源。
+    var hasSelectedNASSource: Bool { enabled && (hasUsableNativeSource || connectionStates.values.contains { $0.canSearch }) }
+    var canRefresh: Bool { enabled && nasConnections.contains { $0.enabled && connectionCanSync($0.id) } }
+    var nasSearchAvailabilityMessage: String {
+        if nasSources.isEmpty && nasConnections.isEmpty {
+            return "还没有添加 NAS。到「搜索来源」里添加一台，就可以连它上面的文件一起搜。"
+        }
+        if nasSources.allSatisfy({ !$0.isConnectConfigured }) {
+            return "请先填写 NAS 的地址和账号。"
+        }
+        if nasSources.allSatisfy({ !$0.enabled }) {
+            return "NAS 搜索来源已全部关闭，可在「搜索来源」里重新启用。"
+        }
+        // 顺序很重要：先说「正在连」，再说缺什么。
+        // 反过来会把「已配置好、正在连接」误报成「请选择搜索位置」——
+        // 用户明明选过了，却被反复要求再选一次。
+        // 用状态记录判断而不是问 Provider：要区分「正在连」与「连不上」，
+        // 只有前者是等待中、值得让用户稍候。
+        if nasSourceStatus.values.contains(where: { $0.health == .connecting }) {
+            return "正在连接 NAS，本地搜索结果不受影响。"
+        }
+        // 「启用 + 已填地址 + 但没选位置」才提示选位置。
+        // 这里必须用 scopes（多选）而不是 scope：单值在多选下会漏判。
+        if nasSources.contains(where: { $0.enabled && $0.isConnectConfigured && $0.scopes.isEmpty }) {
+            return "请为已添加的 NAS 选择搜索位置。"
+        }
+        if !hasUsableNativeSource && !connectionStates.values.contains(where: { $0.canSearch }) {
+            // 已配置完整却连不上——多半是没连，不是没配。
+            if nasSources.contains(where: { $0.enabled && $0.isConnectConfigured }) {
+                return "还没有连上的 NAS。请在「搜索来源」里点「重新连接」。"
+            }
+            return "还没有可搜索的 NAS。"
+        }
+        return "请启用已配置 NAS 并勾选已有缓存的搜索来源"
+    }
+    func connectionCanConnect(_ id: String) -> Bool {
+        guard let profile = nasConnections.first(where: { $0.id == id }) else { return false }
+        return profile.isConfigured && !profile.syncPaused && runtimes[id]?.task == nil
+    }
+    func connectionCanSync(_ id: String) -> Bool { connectionStates[id]?.canSync == true }
+    func connectionCanPause(_ id: String) -> Bool {
+        guard let profile = nasConnections.first(where: { $0.id == id }) else { return false }
+        return profile.syncPaused || runtimes[id]?.connection != nil || runtimes[id]?.task != nil || runtimes[id]?.poll != nil || fixtureConnectedIDs.contains(id)
+    }
+    func connectionCanParticipate(_ id: String) -> Bool {
+        guard let profile = nasConnections.first(where: { $0.id == id }), profile.isConfigured,
+              let state = connectionStates[id], runtimes[id]?.blocked != true else { return false }
+        return !state.cachedSourceIDs.intersection(profile.selectedSourceIDs).isEmpty
+    }
+    var searchStatusMessage: String { searchWarnings.isEmpty ? status : searchWarnings.joined(separator: "；") }
+
+    // MARK: - 构造与启动加载
+
+    init(preferences: (any ClientPreferences)? = nil, cacheDirectory: URL? = nil, credentialAccessAllowed: Bool = true,
+         mountDiscovery: @escaping @Sendable () throws -> [SMBMountCandidate] = { try SMBMountCandidate.discover() }) {
+        fixtureMode = AppEnvironment.isPreview && ProcessInfo.processInfo.environment["FF_UI_INTERACTIVE"] == "1"
+        self.preferences = fixtureMode ? InMemoryClientPreferences() : (preferences ?? AppEnvironment.defaults)
+        self.credentialAccessAllowed = credentialAccessAllowed && !AppEnvironment.isPreview
+        // ★ wizard 必须在下面任何捕获 self 的闭包之前构造好：
+        // Swift 的初始化分析把「闭包捕获 self」也算作使用 self，
+        // 晚一步就会报 used before being initialized。
+        wizard = NASSourceWizardController(preferences: self.preferences)
+        localSources = LocalSourceController(preferences: self.preferences, mountDiscovery: mountDiscovery,
+                                             isPreview: AppEnvironment.isPreview, fixtureMode: fixtureMode)
+        appearance = AppearanceController(preferences: self.preferences,
+                                          isPreview: AppEnvironment.isPreview, fixtureMode: fixtureMode)
+        cacheRoot = cacheDirectory ?? (AppEnvironment.isPreview ? AppEnvironment.previewRoot : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/FlashFind2"))
+        // 快捷键的读取与恢复在 ShortcutController 里（连同「已存数据无效」的提示），
+        // 装配放在 preferences 确定之后立刻做，保证界面首次渲染时状态已就位。
+        shortcuts = ShortcutController(preferences: self.preferences)
+        // 与 wizard 同理：下面 `shortcutBridge` 的闭包捕获了 self，
+        // 所有存储属性必须在它之前初始化完，否则报 used before being initialized。
+        onboardingStore = OnboardingStore(preferences: self.preferences)
+        shortcutBridge = shortcuts.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // 动作要用的三个入口都由宿主提供：解析当前行（要读权限/来源开关）、
+        // 解析文件 URL（要读 provider 与挂载绑定）、状态与浮窗收起。
+        resultActions.resolveRow = { [weak self] row in self?.currentResult(row) }
+        resultActions.fileURL = { [weak self] row in
+            guard let self else { throw FlashFindError.message("已退出") }
+            return try await self.fileURL(row)
+        }
+        resultActions.fileURLWithoutMounting = { [weak self] row in
+            guard let self else { throw FlashFindError.message("已退出") }
+            return try self.fileURLWithoutMounting(row)
+        }
+        resultActions.onStatus = { [weak self] text in self?.status = text }
+        resultActions.onHidePanel = { [weak self] in self?.hideSearch() }
+        resultActionBridge = resultActions.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // 本机来源：表单字段、挂载绑定、来源端点这几个入口由本类回答，
+        // 其余（偏好读写、挂载表、文案）都在 controller 内部。
+        localSources.onStatus = { [weak self] text in self?.status = text }
+        localSources.onSearchReset = { [weak self] in self?.invalidate(); self?.changedQuery() }
+        localSources.createConnection = { [weak self] in
+            guard let self, self.addConnection() else { return nil }
+            return self.selectedConnectionID
+        }
+        localSources.applyImportedIdentity = { [weak self] name, user in
+            self?.connectionName = name; self?.username = user
+        }
+        localSources.clearAddressAndPassword = { [weak self] in self?.address = ""; self?.password = "" }
+        localSources.currentConnectionID = { [weak self] in self?.selectedConnectionID }
+        localSources.endpointForSource = { [weak self] sourceID in
+            self?.sources.first(where: { $0.id == sourceID })?.smbEndpoint
+        }
+        localSources.applyBinding = { [weak self] connectionID, sourceID, root in
+            self?.updateProfile(connectionID, { $0.bindings[sourceID] = MountBinding(root: root) }) ?? false
+        }
+        localSources.onBindingsChanged = { [weak self] in
+            self?.updateCompatibility(); self?.invalidate(); self?.changedQuery()
+        }
+        localSourcesBridge = localSources.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        localSources.loadFromPreferences()
+        // 外观：预览态下拒绝修改要说一句，所以接上 onStatus；桥接同前几个 controller。
+        appearance.onStatus = { [weak self] text in self?.status = text }
+        appearanceBridge = appearance.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        appearance.loadFromPreferences()
+        // 向导要用的入口：桥接层、挂载服务、超时预算、Provider 装配、
+        // 核心来源清理、搜索重置。其余（凭据读写、连接尝试闸门、Provider 字典）
+        // 都在 controller 内部。
+        wizard.makeBridge = { [weak self] in self?.sharedBridge }
+        wizard.resolveMountService = { [weak self] in self?.mountService ?? SMBMountService() }
+        wizard.queryBudgetSeconds = { [weak self] in self?.nativeSearchTimeoutSeconds ?? 60 }
+        wizard.ensureCoordinator = { [weak self] in self?.ensureProviderCoordinator() }
+        wizard.rebuildProviders = { [weak self] in self?.rebuildNativeProviders() }
+        wizard.onInvalidate = { [weak self] in self?.invalidate() }
+        wizard.onSearch = { [weak self] in self?.changedQuery() }
+        wizard.attachAutoReconnect = { [weak self] provider in self?.attachAutoReconnect(provider) }
+        wizard.resetCore = { [weak self] sourceID in
+            await self?.nasConnectionManager.resetCoreSource(sourceID)
+        }
+        wizard.installProvider = { [weak self] provider in self?.nasConnectionManager.install(provider) }
+        wizard.ensureNASSearchEnabled = { [weak self] in self?.ensureNASSearchEnabled() }
+        // ★ 向导与 AppModel **共用同一个**连接意图登记表：
+        // 两边各持一份的话，「断开」只作废了自己那一份，向导手里那份照样能把
+        // 刚断开的来源 install 回来。共享一个实例之后，`disconnectSource` 一次
+        // 作废对两条连接路径同时生效。
+        wizard.connectIntent = self.connectIntent
+        wizardBridge = wizard.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        if AppEnvironment.isPreview {
+            enabled = false; localSources.applyPreviewBaseline()
+            if fixtureMode {
+                enabled = true; localSources.applyFixtureBaseline()
+                query = ProcessInfo.processInfo.environment["FF_UI_QUERY"] ?? ""
+                if ProcessInfo.processInfo.environment["FF_UI_FIXTURE_EMPTY"] != "1" {
+                    _ = addConnection()
+                }
+                changedQuery(); return
+            }
+            if ProcessInfo.processInfo.environment["FF_UI_MULTI_NAS"] == "1" {
+                enabled = true
+                nasConnections = [NASConnectionProfile(id: "preview-nas-a", name: "团队 NAS", address: "https://nas-a.example", username: "样例账号", enabled: true, selectedSourceIDs: ["preview"]),
+                                  NASConnectionProfile(id: "preview-nas-b", name: "备份 NAS", address: "https://nas-b.example", username: "样例账号", enabled: true, selectedSourceIDs: ["preview"])]
+                let data = Data("""
+                [{"source_id":"preview","name":"团队共享","generation":"fixture","smb_endpoint":"smb://nas-a.example/team","share_relative_root":"","index_state":"ready","min_valid_cursor":"0","max_change_id":"0","snapshot_id":"fixture","snapshot_change_id":"0"}]
+                """.utf8)
+                let fixtureSources = (try? JSONDecoder().decode([Source].self, from: data)) ?? []
+                for profile in nasConnections {
+                    var state = NASConnectionState(); state.sources = fixtureSources
+                    state.phase = profile.id == "preview-nas-a" ? .online : .offline
+                    state.message = profile.id == "preview-nas-a" ? "UI 样例 · 已同步" : "UI 样例 · 离线缓存"
+                    state.cachedSourceIDs = ["preview"]; state.hasCache = true; state.canSearch = true; state.canSync = true
+                    connectionStates[profile.id] = state
+                }
+                selectConnection("preview-nas-a")
+            }
+            query = ProcessInfo.processInfo.environment["FF_UI_QUERY"] ?? ""
+            changedQuery(); return
+        }
+        let defaults = self.preferences
+        // ★ R01：全新安装时下面两个 key 都不存在，而 `bool(forKey:)` 对**不存在**的 key
+        // 返回 false —— 总开关会被初始化成关闭，于是用户走完向导、来源卡片显示已连接，
+        // 搜索却一次都不请求 NAS，而那个开关在设置页还点不动。
+        // 「从未写过」与「显式关过」必须分开：只有 `object(forKey:)` 的 nil 能区分二者。
+        let storedMaster = defaults.object(forKey: NASMasterSwitch.storageKey) as? Bool
+        let legacyMaster = defaults.object(forKey: NASMasterSwitch.legacyKey) as? Bool
+        masterSwitchIsExplicit = storedMaster != nil || legacyMaster != nil
+        enabled = NASMasterSwitch.resolve(stored: storedMaster, legacy: legacyMaster)
+        do {
+            if let data = defaults.data(forKey: profilesKey) {
+                let decoded = try JSONDecoder().decode([NASConnectionProfile].self, from: data)
+                guard Set(decoded.map(\.id)).count == decoded.count else { throw FlashFindError.message("NAS 配置 ID 重复；请保留原配置并重新导入") }
+                let configured = decoded.filter { !$0.address.isEmpty }.map(\.cacheProfile)
+                guard Set(configured).count == configured.count else { throw FlashFindError.message("NAS 配置含重复服务器账号；原配置已保留") }
+                nasConnections = decoded
+                let needsNormalization = nasConnections.contains { !$0.isConfigured && $0.enabled }
+                if needsNormalization {
+                    if defaults.data(forKey: "ff2.multiNAS.v1.beforeTrial7") == nil { defaults.set(data, forKey: "ff2.multiNAS.v1.beforeTrial7") }
+                    for index in nasConnections.indices where !nasConnections[index].isConfigured { nasConnections[index].enabled = false }
+                    try persist(nasConnections)
+                    status = "旧版未配置 NAS 已改为不参与搜索；原配置备份已保留，请补全索引地址和账号"
+                }
+            } else if let legacyAddress = defaults.string(forKey: "ff2.address"), !legacyAddress.isEmpty {
+                let user = defaults.string(forKey: "ff2.username") ?? ""
+                let profile = AccountProfile.key(address: legacyAddress, username: user)
+                let oldBindings = defaults.data(forKey: "ff2.bindings." + profile).flatMap { try? JSONDecoder().decode([String: MountBinding].self, from: $0) } ?? [:]
+                nasConnections = [NASConnectionProfile(name: "原 NAS", address: legacyAddress, username: user,
+                    certificateSHA256: defaults.string(forKey: "ff2.pin") ?? "", enabled: defaults.bool(forKey: "ff2.enabled"),
+                    rememberPassword: defaults.bool(forKey: "ff2.rememberPassword." + profile),
+                    selectedSourceIDs: Set(defaults.stringArray(forKey: "ff2.selectedSources." + profile) ?? []), bindings: oldBindings,
+                    legacyCredentialAccount: legacyAddress + "|" + user)]
+                try persist(nasConnections) // Legacy keys and cache directories remain untouched.
+            }
+            for profile in nasConnections { initialize(profile) }
+            if let first = nasConnections.first { selectConnection(first.id) }
+        } catch {
+            configurationBlocked = true
+            status = "无法读取 NAS 配置：\(error.localizedDescription)。原配置已保留；本机搜索仍可使用，请恢复配置备份后重启。"
+        }
+        showExperimentalSources = ExperimentalSources.resolve(
+            stored: defaults.object(forKey: ExperimentalSources.storageKey) as? Bool)
+        loadNativeSources()
+        ensureProviderCoordinator()
+        // 启动即连已保存的来源：用户打开就能直接搜，不必每次手动走向导输密码。
+        // 没记住密码的来源会被跳过（状态里说明原因），不会弹窗打扰。
+        autoConnectSavedSources()
+    }
+
+    // MARK: - 静默自动连接（实现在 AppModel+QuietConnect.swift）
+    //
+    // 启动后自动连接、以及连接进行中用户改主意时的作废判定，
+    // 随 Stage 3A 搬走。
+
+    // 「读取已保存的原生 NAS 来源」随 Stage 3A 并入 `AppModel+NativeSources.swift`。
+
+    // MARK: - 全局快捷键转发（实现在 ShortcutController）
+
+    func configureShortcutRegistrar(_ register: @escaping (GlobalShortcutSpec) -> String?) {
+        shortcuts.configureRegistrar(register)
+    }
+    @discardableResult
+    func applyGlobalShortcut(_ spec: GlobalShortcutSpec) -> Bool { shortcuts.apply(spec) }
+    @discardableResult
+    func resetGlobalShortcut() -> Bool { shortcuts.reset() }
+    func beginShortcutRecording() { shortcuts.beginRecording() }
+    func cancelShortcutRecording() { shortcuts.cancelRecording() }
+
+    // MARK: - NAS 连接生命周期（实现在 AppModel+NASConnections.swift）
+    //
+    // 577 行随 Stage 3A 搬到同目录的 `AppModel+NASConnections.swift`。
+    // 搬走之后主文件的分区标注才对得上实际内容。行为未改，调用点未动。
+    // MARK: - 本机来源转发（实现在 AppModel+LocalSources.swift）
+
+    // MARK: - 首次启动引导（动作在 AppModel+Onboarding.swift，状态留在主文件）
+
+    /// 由引导窗口在展示时装配（存储属性，extension 放不下，所以留在主文件）。
+    var pushOnboardingShortcutPressed: (() -> Void)?
+
+    // 「首次搜索的键位提示」的动作随 Stage 3A 并入 `AppModel+SearchSession.swift`；
+    // 状态留在这里——Swift 的 extension 不能含存储属性。
+
+    /// 主搜索窗首次出现时那行键位提示是否可见。
+    @Published var searchHintsVisible = false
+
+    // 「用已存凭据连接」与轮询重试属于连接生命周期，已随 Stage 3A 并入
+    // `AppModel+NASConnections.swift`。
+    // MARK: - 浮窗会话（实现在 AppModel+SearchSession.swift）
+    //
+    // 关闭再打开时保留多久旧结果、什么时候必须清空、键位提示显示几次，
+    // 是一组关于「这一次会话」的判定，随 Stage 3A 搬走。
+    // MARK: - 结果定位与打开（实现在 AppModel+ResultActions.swift）
+    //
+    // 「搜到了但打不开」是这类工具最容易丢分的地方：结果解析、挂载、
+    // Finder 定位、快速查看、复制路径全在这一块，随 Stage 3A 搬走。
+}

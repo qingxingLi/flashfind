@@ -1,0 +1,51 @@
+闪寻 FlashFind
+Copyright 2026 李青宇
+
+本产品包含下列第三方代码。完整许可文本见各组件目录。
+
+===============================================================================
+1. MyNAS 搜索核心（Dart）
+
+   本项目 `MyNASCore/` 下的搜索核心，其设计参照了开源项目 MyNAS：
+
+       仓库：https://github.com/chenqi92/my-nas
+       许可：MIT License
+       版权：Copyright (c) 2024 chenqi92
+
+   完整许可文本见 `MyNASCore/licenses/MyNAS-MIT.txt`。
+   依据 MIT 许可第 1 条，其版权声明与许可声明已在随附文件中原样保留。
+
+===============================================================================
+2. SQLite（C 库）
+
+   位置：`Sources/CSQLite/sqlite3.c`、`Sources/CSQLite/include/`
+
+   SQLite 处于公有领域（Public Domain）。作者已放弃版权，可用于任何目的。
+   参见 https://www.sqlite.org/copyright.html
+
+   本项目以如下方式使用：
+       SQLITE_ENABLE_FTS5
+       SQLITE_THREADSAFE=1
+       SQLITE_ENABLE_COLUMN_METADATA
+
+===============================================================================
+3. 系统框架
+
+   本产品链接 macOS 系统框架 Carbon（全局热键）与 QuickLookUI（空格预览），
+   二者均为 Apple 系统组件，随操作系统分发，不在此许可范围内。
+
+===============================================================================
+4. 商标
+
+   「闪寻」「FlashFind」名称与本项目图标资源
+   （`Resources/Brand/` 下的 .icns 与 .png）**不在 Apache-2.0 许可授权范围内**。
+   详见 `TRADEMARK.md`。
+
+===============================================================================
+5. 品牌素材的来源
+
+   `Resources/Brand/` 下的字形与图标由开发过程中使用的 AI 助手生成，
+   非改编自第三方商业字体或图标库。
+
+   AI 生成内容的著作权归属在现行法律下尚无定论，本项目不对其单独主张著作权，
+   亦不就第三方主张作出担保。详见 `TRADEMARK.md`。

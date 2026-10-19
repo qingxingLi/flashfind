@@ -1,0 +1,65 @@
+# 独立环境验证（Clean environment gate）。
+#
+# 为什么必须有这一条：本机 clean-room 只能证明「目录隔离」——同一个 Homebrew、
+# 同一个 Xcode、同一个 Dart、同一个钥匙串全都还在。真正要证明的是
+# 「一个没有 FlashFind 开发历史的人，照 README 也能编出来」，而这件事
+# 只有一台没碰过本项目的机器能回答。GitHub Runner 每次都是全新的，
+# 它红的时候，错的不是运气，是文档或脚本里某句只有本机才成立的假设。
+#
+# 跑的四个动作与 README 完全一致，不另设快捷方式：
+#   core → app → test → release build
+# 缺 Dart SDK 时 build.sh test 会明确打印「未执行」而不是沿用旧数字，
+# 所以这里装 Dart 不是为了跑通，是为了让「Dart 套件真的跑了」这件事成立。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean-build:
+    # Apple Silicon / arm64：与首发支持范围一致（Intel 未纳入构建矩阵）。
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Dart SDK
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: 记录环境并校验架构
+        # 明确打印 `uname -m`：首发只声明 Apple Silicon / arm64，
+        # 而「runner 实际是什么架构」不写在 manifest 里、只能看这一行。
+        # 万一将来有人把 runs-on 改成 Intel runner，本步直接失败，
+        # 而不是产出一个与首发声明不符、却谁也没注意到的包。
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          dart --version
+          arch=$(uname -m)
+          echo "uname -m = $arch"
+          if [ "$arch" != "arm64" ]; then
+            echo "runner 不是 arm64，与首发声明的支持范围不符"
+            exit 1
+          fi
+
+      - name: core —— 编译 Dart 搜索核心与原生信任助手
+        run: ./scripts/build.sh core
+
+      - name: app —— 编译 Swift 可执行体
+        run: ./scripts/build.sh app
+
+      - name: test —— Swift 全量测试 + Dart 行为测试
+        run: ./scripts/build.sh test
+
+      - name: release —— 全量 Release 构建
+        run: swift build -c release

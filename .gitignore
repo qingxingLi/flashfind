@@ -1,0 +1,53 @@
+# 构建产物
+.build/
+*.o
+*.swiftdoc
+*.swiftmodule
+
+# 打包脚本把 clang / swift 的模块缓存放在项目根（见 scripts/build_trial.py
+# 的 CLANG_MODULE_CACHE_PATH / SWIFT_MODULE_CACHE_PATH）。它们是缓存不是源码，
+# 跟着仓走会让「git clone 下来比源码大十倍」，也会把本机绝对路径带进仓。
+clang-cache/
+swift-cache/
+
+# 打包产物（制品走 Release 附件，不入库）
+*.dmg
+*.zip
+*.app/
+dist/
+build/
+
+# 预编译的搜索核心与原生助手（由 tools/install-mynas-core.sh 生成）
+Resources/MyNAS/bin/mynas-core
+Resources/MyNAS/native/TrustHTTP
+
+# 运行态（含真实凭据与证书固定记录，绝不能入库）
+app-state/
+**/trust/
+**/credentials.json
+MyNAS-resources/
+
+# 工具链与临时工作区
+工具链/
+工作区/
+tmp/
+scratch/
+
+# 打包脚本要求开发者自建的暂存目录与短软链（README「构建」一节有这条命令）。
+# `--scratch` / `--temporary-alias` 收的都是编译中间产物，跟着仓走会塞满垃圾。
+.ff2-scratch/
+.ff2-alias
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# macOS
+.DS_Store
+*.swp
+
+# 编辑器
+.idea/
+.vscode/

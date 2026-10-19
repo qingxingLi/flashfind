@@ -1,0 +1,54 @@
+{
+  "_说明": [
+    "secret_audit.py 的命中白名单。每条必须写清「为什么这条不算问题」——",
+    "只写「已知」之类的空理由不被接受。needle 是行内的一段原文，命中即放行；",
+    "行号漂移不会让白名单失效，但文件改名必须同步改这里。"
+  ],
+  "entries": [
+    {
+      "file": "MyNASCore/test_adapters.dart",
+      "needle": "https://nas.local",
+      "reason": "测试里的虚构主机名（Dio BaseOptions 与 Logger.safeUrl 的脱敏用例），不是任何人的设备"
+    },
+    {
+      "file": "MyNASCore/test_adapters.dart",
+      "needle": "Logger.safeUrl('https://nas.local/dav/a?sid=SECRET&token=XYZ')",
+      "reason": "这一行本身就是 safeUrl 的脱敏用例：query 里的 SECRET/XYZ 是占位串，断言的是「被打码」这个行为"
+    },
+    {
+      "file": "MyNASCore/lib/adapters/ugreen.dart",
+      "needle": "_log.i('UGreenApi: Token 过期，重新登录')",
+      "reason": "只记录状态与下一步动作，没有打印 token 的值；值在请求头里，不经过日志"
+    },
+    {
+      "file": "MyNASCore/lib/adapters/ugreen.dart",
+      "needle": "_log.w('UGreenApi: v2 token 加密失败，回退 v1', e)",
+      "reason": "同上：打的是「哪一步失败」与异常对象，异常里是状态/消息，不含 token 原文"
+    },
+    {
+      "file": "tools/DevTools/FlashFindCLI/main.swift",
+      "needle": "print(try await sync.sync(settings: settings, password: password))",
+      "reason": "打印的是 sync 的返回摘要（String）；password 只是入参名，不进输出"
+    },
+    {
+      "file": "Sources/FlashFind2App/NASSourceWizardController.swift",
+      "needle": "请填写端口，或把端口直接写在地址里",
+      "reason": "界面示例地址，用的是通用文档网段 192.168.1.0/24，不是任何真实设备"
+    },
+    {
+      "file": "Sources/FlashFind2App/NASSourceWizardView.swift",
+      "needle": "TextField(\"192.168.1.96\"",
+      "reason": "输入框的占位示例，同上：通用文档网段，不是真实设备地址"
+    },
+    {
+      "file": "Sources/FlashFindCore/NASSourceConfig.swift",
+      "needle": "请填写端口（也可以直接写进地址",
+      "reason": "同上：给用户看的示例句式，网段为占位网段"
+    },
+    {
+      "file": "tools/probe_admin_identity.py",
+      "needle": "python3 tools/probe_admin_identity.py",
+      "reason": "用法示例里的目标地址是占位网段；脚本本身要求地址由命令行传入"
+    }
+  ]
+}

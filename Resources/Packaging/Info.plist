@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>闪寻</string>
+	<key>CFBundleExecutable</key>
+	<string>FlashFind2App</string>
+	<key>CFBundleIconFile</key>
+	<string>ShanXun.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.flashfind.v2</string>
+	<key>CFBundleName</key>
+	<string>FlashFind</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.1</string>
+	<key>CFBundleVersion</key>
+	<string>19</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>闪寻仅请求 Finder 定位你选择的已验证文件，不读取文件正文。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_smb._tcp</string>
+		<string>_webdav._tcp</string>
+		<string>_webdavs._tcp</string>
+		<string>_synology-dsm._tcp</string>
+		<string>_afpovertcp._tcp</string>
+		<string>_device-info._tcp</string>
+		<string>_airplay._tcp</string>
+		<string>_ipp._tcp</string>
+		<string>_diskstation._tcp</string>
+		<string>_qnap._tcp</string>
+	</array>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>闪寻只连接你自己添加的 NAS，用来搜索你已授权的文件目录。</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>闪寻使用你已连接的 SMB 共享，在 Finder 中定位搜索结果。</string>
+</dict>
+</plist>
