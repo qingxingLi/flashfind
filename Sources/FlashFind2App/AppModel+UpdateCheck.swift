@@ -19,7 +19,10 @@ extension AppModel {
         // 上一轮的结论先清掉：留着旧结果会让「正在检查」和「已是最新」同时出现在屏幕上。
         updateOutcome = nil
         let current = AppVersion.shortVersion
-        Task { [weak self] in
+        // 显式标 `@MainActor`：结果要写进 `@Published`，跨线程改会直接崩。
+        // 这里不靠「Task 在 @MainActor 上下文里会继承隔离」那条隐式规则——
+        // 文件被搬动、包一层普通函数之后它就不成立了。
+        Task { @MainActor [weak self] in
             let outcome = await UpdateCheck.evaluate(current: current)
             guard let self else { return }
             self.updateOutcome = outcome
