@@ -532,8 +532,76 @@ struct SettingsView: View {
             } footer: {
                 sectionFooter("打开后，「添加搜索来源」里会出现尚未在真机上验证过的类型（威联通 / 绿联 / 飞牛 / WebDAV）。它们当中有的是已知连不上的，仅供自行尝试。")
             }
+
+            // 检查更新放在高级页末尾：它不改任何设置，只是「看看有没有新版」。
+            //
+            // 只判断、不自动装：更新包没有 Developer ID 签名与公证，自动替换 App
+            // 这一步在不签名的前提下要么必然失败、要么得关掉验签。所以这里只把
+            // 用户送到发版页，下载与拖动由他自己来，出问题也看得见。
+            Section {
+                LabeledContent("当前版本") {
+                    HStack(spacing: 10) {
+                        Text(AppVersion.current)
+                        Button(UpdateCheckText.button(checking: model.updateChecking)) {
+                            model.checkForUpdates()
+                        }
+                        .disabled(model.updateChecking)
+                        .accessibilityIdentifier("check-for-updates")
+                    }
+                }
+                if model.updateChecking {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("正在读取 GitHub 上的最新发布…")
+                            .font(.system(size: SettingsTypography.caption))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                } else if let outcome = model.updateOutcome {
+                    updateResultRow(outcome)
+                }
+            } header: {
+                sectionHeader("更新")
+            } footer: {
+                sectionFooter("从 GitHub 的发布页读取最新版本号后比对，只发一个查询请求，不上传任何信息。")
+            }
         }
         .formStyle(.grouped)
+    }
+
+    /// 检查结果一行：图标 + 一句话 +（需要时）一个按钮。
+    @ViewBuilder private func updateResultRow(_ outcome: UpdateCheck.Outcome) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: updateSymbol(outcome))
+                .font(.system(size: SettingsTypography.caption))
+                .foregroundStyle(updateTint(outcome))
+            Text(UpdateCheckText.message(for: outcome))
+                .font(.system(size: SettingsTypography.caption))
+                .fixedSize(horizontal: false, vertical: true)
+            if let title = UpdateCheckText.linkTitle(for: outcome) {
+                Button(title) { model.openReleasePage(for: outcome) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func updateSymbol(_ outcome: UpdateCheck.Outcome) -> String {
+        switch outcome {
+        case .upToDate: return "checkmark.circle.fill"
+        case .updateAvailable: return "arrow.down.circle.fill"
+        case .incomparable: return "info.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func updateTint(_ outcome: UpdateCheck.Outcome) -> Color {
+        switch outcome {
+        case .upToDate: return .green
+        case .updateAvailable: return .accentColor
+        case .incomparable: return .secondary
+        case .failed: return .orange
+        }
     }
 }
 

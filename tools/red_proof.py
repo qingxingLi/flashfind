@@ -80,6 +80,8 @@ FILES = {
     'SpotlightProvider': CLIENT / 'Sources/FlashFindCore/SpotlightProvider.swift',
     'ExperimentalSources': CLIENT / 'Sources/FlashFindCore/ExperimentalSources.swift',
     'NASConnectionManager': CLIENT / 'Sources/FlashFindCore/NASConnectionManager.swift',
+    'UpdateCheck': CLIENT / 'Sources/FlashFindCore/UpdateCheck.swift',
+    'AppModelUpdateCheck': CLIENT / 'Sources/FlashFind2App/AppModel+UpdateCheck.swift',
     'PreviewInteractionValidation': CLIENT / 'Sources/FlashFind2App/DebugSupport/PreviewInteractionValidation.swift',
 }
 
@@ -700,6 +702,40 @@ MUTATIONS = [
     ('取消后仍把迟到批次送到界面', FILES['SearchCoordinator'],
      '                            guard let self, self.queryID==id, event.queryID==id else { return }',
      '                            guard let self, event.queryID==id else { return }'),
+    # ---- 2026-10-19 设置-高级：检查更新 ----
+    # 版本号按字符串比：`1.0.10` 会判成比 `1.0.9` 旧，第 10 个补丁版发布后
+    # 所有用户都被告知「已是最新」。
+    ('版本号按字符串比较', FILES['UpdateCheck'],
+     '            if left != right { return left > right }',
+     '            if left != right { return String(left) > String(right) }'),
+    # 缺的段不按 0 补：`1.0.0` 会被判成比 `1.0` 新。
+    ('缺位版本段用 -1 补', FILES['UpdateCheck'],
+     '            let right = index < b.count ? b[index] : 0',
+     '            let right = index < b.count ? b[index] : -1'),
+    # 同号预发布当正式：用户手上的 1.0.1 会被提示升级到 1.0.1-beta。
+    ('同号预发布版算作新版本', FILES['UpdateCheck'],
+     '        return isPrerelease(current) && !isPrerelease(candidate)',
+     '        return false'),
+    # 开发构建也去查：比不了还发请求，结论没人看得懂。
+    ('开发构建照样去请求 GitHub', FILES['UpdateCheck'],
+     '        guard isComparable(current) else { return .incomparable(current: current) }',
+     '        guard isComparable(current) else { return .upToDate(current: current) }'),
+    # 不看状态码：403/404 的返回体也被当版本号解析。
+    ('不检查 HTTP 状态码', FILES['UpdateCheck'],
+     '            guard http.statusCode == 200 else { throw Failure.httpStatus(http.statusCode) }',
+     '            guard http.statusCode != 0 else { throw Failure.httpStatus(http.statusCode) }'),
+    # 不带 User-Agent：GitHub 直接 403，表现为「永远查不了」。
+    ('请求不带 User-Agent', FILES['UpdateCheck'],
+     '        request.setValue("FlashFind/" + current, forHTTPHeaderField: "User-Agent")',
+     '        request.setValue(nil, forHTTPHeaderField: "User-Agent")'),
+    # 失败的说法糊成一句：限流与断网分不出来。
+    ('失败文案退化成只有原因', FILES['UpdateCheck'],
+     '        case .failed(let reason):\n            return "检查失败：\\(reason)"',
+     '        case .failed(let reason):\n            return reason'),
+    # 按钮接了空动作：界面还在，点了什么都不发生。
+    ('检查更新按钮没有接上动作', FILES['SettingsView'],
+     '                            model.checkForUpdates()',
+     '                            model.status = ""'),
 ]
 
 EXPECTED = {
@@ -777,6 +813,15 @@ EXPECTED = {
     'testAboutPanelAndSettingsShareOneVersionSource',
     # 2026-10-19 CI 首红复盘：取消之后的迟到批次必须被丢掉（原用例靠 sleep 赌顺序）。
     'testCancelRejectsDelayedBatches',
+    # 2026-10-19 设置-高级：检查更新（版本比较 / 请求合规 / 失败说法 / 视图接线）。
+    'testNumericComparisonIsNotLexicographic',
+    'testMissingSegmentsCountAsZero',
+    'testPrereleaseIsOlderThanTheSameStableVersion',
+    'testDevBuildIsReportedAsIncomparableWithoutTouchingTheNetwork',
+    'testRateLimitIsExplainedInsteadOfSwallowed',
+    'testRequestLooksLikeAnAppAndSkipsTheCache',
+    'testMessagesExplainEachOutcome',
+    'testAdvancedPaneChecksForUpdatesThroughCore',
     'testOTPPromptActivatesAppBeforeRunModal',
     'testOpenReconnectWizardShowsWizardWindow',
     'testQuietConnectMarksNeedsOTPThroughCore',

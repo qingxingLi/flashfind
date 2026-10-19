@@ -1438,6 +1438,45 @@ final class AppLayerStructureTests: XCTestCase {
                        "关于面板不该自己再读一次 Bundle 键名")
     }
 
+    /// ★ 「检查更新」必须走 Core 的判定，视图里不许另起一套。
+    ///
+    /// 视图里出现仓库地址、或者自己比一遍版本号，就意味着这份规则有两处：
+    /// 改一处漏一处，最后表现成「明明发了新版却说已是最新」。所以这里既要求
+    /// **调起来**（按钮接的是 `checkForUpdates`），也要求**不重复实现**
+    /// （没有地址、没有 URLSession、没有版本比较）。
+    func testAdvancedPaneChecksForUpdatesThroughCore() throws {
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+        guard let advanced = braceBlock(after: "private var advancedForm: some View", in: settings) else {
+            return XCTFail("缺少高级页")
+        }
+        XCTAssertTrue(advanced.contains("sectionHeader(\"更新\")"),
+                      "高级页要有「更新」这一节")
+        XCTAssertTrue(advanced.contains("AppVersion.current"),
+                      "这一节要显示当前版本，用户才知道在跟哪儿比")
+        XCTAssertTrue(advanced.contains("model.checkForUpdates()"),
+                      "检查更新按钮要真的接上动作")
+        XCTAssertTrue(advanced.contains("updateResultRow("),
+                      "结论要摆在按钮下面，不另开窗口")
+        XCTAssertTrue(settings.contains("UpdateCheckText.message(for:"),
+                      "结论文案走 Core，不在视图里拼字符串")
+        XCTAssertTrue(advanced.contains("check-for-updates"),
+                      "按钮要挂无障碍标识，键盘与 VoiceOver 靠它定位")
+        XCTAssertFalse(advanced.contains("api.github.com"),
+                       "仓库地址只能有一处（Core 的 UpdateCheck）")
+        XCTAssertFalse(advanced.contains("URLSession"),
+                       "请求不该由视图发起")
+
+        let actions = codeOnly(try appSource("AppModel+UpdateCheck.swift"))
+        XCTAssertTrue(actions.contains("UpdateCheck.evaluate(current:"),
+                      "动作层只转调 Core 的判定")
+        XCTAssertTrue(actions.contains("AppVersion.shortVersion"),
+                      "当前版本在动作层取，视图不传")
+        XCTAssertFalse(actions.contains("isNewer"),
+                       "版本比较不许在动作层再现一遍")
+        XCTAssertFalse(actions.contains("api.github.com"),
+                       "动作层也不该出现仓库地址")
+    }
+
     /// ★ 发出去的正式版不得再带 `trial` 字样。
     ///
     /// 打包脚本的试用版分支要求版本号以 `2.0.0-trial.` 开头。改版本号时忘摘

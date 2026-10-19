@@ -147,6 +147,18 @@ final class AppModel: ObservableObject {
         preferences.set(value, forKey: ExperimentalSources.storageKey)
     }
 
+    // MARK: 检查更新（实现在 AppModel+UpdateCheck.swift）
+    //
+    // 判定与文案全在 Core 的 `UpdateCheck` / `UpdateCheckText`（App 层不可测）。
+    // 这里只留两个**存储**状态：extension 不能含存储属性，这是硬约束。
+
+    /// 上一次检查的结论。`nil` = 这次打开设置后还没查过。
+    ///
+    /// 不在打开设置时自动查：只进来改个快捷键的人，不该顺带产生一次网络请求。
+    @Published var updateOutcome: UpdateCheck.Outcome?
+    /// 正在查。按钮据此禁用并换文案。
+    @Published var updateChecking = false
+
     // MARK: 登录时启动（实现在 AppModel+LaunchAtLogin.swift）
     //
     // 动作在 `AppModel+LaunchAtLogin.swift`；下面两个是存储属性，
