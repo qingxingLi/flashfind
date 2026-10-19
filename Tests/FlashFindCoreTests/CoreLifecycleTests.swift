@@ -289,14 +289,25 @@ final class MyNASProcessBridgeTests: XCTestCase {
     /// 一起丢掉。那比原来的 bug 更难查：请求石沉大海，界面既不报错也不超时，
     /// 只能干等 180 秒看门狗。所以这条**哨兵**必须存在（修复前后都该是绿的）。
     ///
-    /// 构造：假核心读一条请求、回一条合法响应、然后**自己退出**（逼出一次真实的
-    /// 代次前进）；再发第二条请求，这时已经是新一代核心，它照样要把请求走完。
+    /// 构造：假核心读一条请求、回一条合法响应，然后**等测试放行**才退出
+    /// （逼出一次真实的代次前进）；再发第二条请求，这时已经是新一代核心，
+    /// 它照样要把请求走完。
+    ///
+    /// ★ 退出不能「回完就退」（CI 首跑就是栽在这里）：
+    /// 回完立刻退出会和「记下当前代次」赛跑——退出通知若先被处理，代次已经前进、
+    /// 进程也已经没了，后面再怎么等都不会有人推进，5 秒后必然断言失败。
+    /// 本机调度快、通知总是后到，于是一直是绿的；GitHub 的 arm64 runner 慢一截，
+    /// 这个顺序就翻了过来。改成「测试写完代次再放行退出」，顺序确定。
     func testNewCoreOutputIsStillAcceptedAfterGenerationBump() async throws {
         // 用 expectedCoreRevision 插值而不是写死 6：协议修订号是**单一出处**，
         // 写死的话哪天升号，这条测试会以「版本不一致」的形态红掉，误导半天。
-        let body = "id=$(printf '%s' \"$line\" | sed -n 's/.*\"requestID\":\"\\([^\"]*\\)\".*/\\1/p')\n"
+        let answer = "id=$(printf '%s' \"$line\" | sed -n 's/.*\"requestID\":\"\\([^\"]*\\)\".*/\\1/p')\n"
             + "printf '{\"protocolVersion\":1,\"coreRevision\":\(MyNASProcessBridge.expectedCoreRevision),"
-            + "\"requestID\":\"%s\",\"sourceID\":\"src\",\"queryID\":\"none\",\"event\":\"capabilities\"}\\n' \"$id\""
+            + "\"requestID\":\"%s\",\"sourceID\":\"src\",\"queryID\":\"none\",\"event\":\"capabilities\"}\\n' \"$id\"\n"
+        // 退出闸门：文件出现前核心一直活着。路径写进脚本，不靠环境变量——
+        // 子进程的环境是白名单（PATH/LANG/FF2_TRUST_DIR），传不进别的东西。
+        let gate = scratch.appendingPathComponent("exit-now")
+        let body = answer + "while [ ! -f \"\(gate.path)\" ]; do sleep 0.05; done"
         let binary = try fakeCore(body, waitsForStdin: true, linger: false)
         let bridge = MyNASProcessBridge(executable: binary, stateDirectory: scratch)
 
@@ -304,8 +315,10 @@ final class MyNASProcessBridgeTests: XCTestCase {
         XCTAssertEqual(first["event"] as? String, "capabilities", "前置：第一代核心要能正常应答")
         let started = bridge.processGeneration
 
-        // 等核心真的退出、terminationHandler 排到 MainActor 上跑完。
-        for _ in 0..<50 {
+        // 先记代次、后放行退出：退出通知只可能落在这之后。
+        try Data().write(to: gate)
+        // 最多等 20 秒。CI 的调度比本机慢一个数量级，只给 5 秒等于把机器快慢当断言。
+        for _ in 0..<200 {
             try await Task.sleep(nanoseconds: 100_000_000)
             if bridge.processGeneration > started { break }
         }
