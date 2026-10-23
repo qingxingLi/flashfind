@@ -140,9 +140,24 @@ struct SearchView: View {
 
     /// 打开独立设置窗口（带红绿灯，可自由切换与关闭）。
     private func openSettings() {
-        settingsPage = .search
+        settingsPage = Self.previewSettingsPage ?? .search
         NSApp.activate(ignoringOtherApps: true)
         SettingsWindow.shared.show(model: model, page: settingsPage)
+    }
+
+    /// 预览构建里可以直接停在某一页：`FF_UI_SETTINGS_PAGE=AI`（取页面名，与
+    /// `SettingsPane.rawValue` 一致）。截图与点验用，**发布构建里这段被编译掉**。
+    ///
+    /// 没有它，「打开设置」永远落在搜索页，AI 页那几张截图只能靠手点——而手点的
+    /// 结果没法复现，也没法在改动前后各截一张来比。
+    private static var previewSettingsPage: SettingsPane? {
+        #if DEBUG
+        guard AppEnvironment.isPreview,
+              let raw = ProcessInfo.processInfo.environment["FF_UI_SETTINGS_PAGE"] else { return nil }
+        return SettingsPane(rawValue: raw)
+        #else
+        return nil
+        #endif
     }
 
     private var resultsList: some View {

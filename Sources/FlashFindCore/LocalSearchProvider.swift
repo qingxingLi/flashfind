@@ -8,6 +8,12 @@ import Foundation
     /// 调用方的取消，不握住它的话，输入框一改就废弃的那次搜索仍会在后台跑满
     /// 3 秒预算，而界面早就切到新的一次查询了。
     private var folderTask: Task<LocalFolderSearchReport, Error>?
+    /// 这次搜索的事件通道。**存它是为了在 `cancel` 里补发终态**：取消之后
+    /// `search()` 的各条分支都被 `guard active == queryID` 挡住，没人再发终态，
+    /// 上层「所有来源都落终态才停止转圈」的判据就永远不成立。
+    /// 与 `NASSearchProvider` 的 `activeEmit` 同一个套路。
+    private var activeEmit: (@MainActor (ProviderEvent) -> Void)?
+    private var activeEmitQueryID: UUID?
     public var folders: [URL] = []
     /// 本机搜索方式。
     ///
@@ -20,13 +26,27 @@ import Foundation
 
     public func cancel(queryID: UUID) {
         guard active == queryID else { return }
+        // ★ 先补发终态，再清状态：清完 `active` 之后没有任何分支会再发事件，
+        // 这条就成了一次「沉默的取消」。顺序反了就等于没发。
+        let emit = activeEmitQueryID == queryID ? activeEmit : nil
         active = nil
+        activeEmit = nil
+        activeEmitQueryID = nil
         spotlight?.cancel()
         folderTask?.cancel()
+        emit?(ProviderEvent(queryID: queryID, sourceID: source.id, state: .cancelled))
     }
 
     public func search(_ text: String, queryID: UUID, emit: @escaping @MainActor (ProviderEvent)->Void) async {
         active = queryID
+        activeEmit = emit
+        activeEmitQueryID = queryID
+        // 正常结束（含取消后返回）都要把通道清掉，否则下一次 `cancel(旧 id)`
+        // 会对一次早已完成的查询再补一条 `.cancelled`。
+        defer {
+            if activeEmitQueryID == queryID { activeEmit = nil; activeEmitQueryID = nil }
+            if active == queryID { active = nil }
+        }
         emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .searching))
         // 与 NAS 侧同一套解析：`测试报告 ppt` 的 ppt 是格式限制，不是名字的一部分。
         let parsed = SearchQueryParser.parse(text)
@@ -58,7 +78,7 @@ import Foundation
             guard active == queryID, !Task.isCancelled else { return }
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, results: report.results,
                                state: .completed, message: report.warnings.first,
-                               isComplete: report.warnings.isEmpty))
+                               resultsIncomplete: !report.warnings.isEmpty))
         } catch is CancellationError {
             folderTask = nil
             guard active == queryID else { return }
@@ -100,7 +120,7 @@ import Foundation
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, results: results,
                                state: provider.deadlineExceeded ? .timedOut : .completed,
                                message: provider.searchWasIncomplete ? "本机查询达到时间或数量上限" : nil,
-                               isComplete: !provider.searchWasIncomplete))
+                               resultsIncomplete: provider.searchWasIncomplete))
         } catch {
             guard active == queryID else { return }
             emit(ProviderEvent(queryID: queryID, sourceID: source.id,

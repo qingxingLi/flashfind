@@ -34,7 +34,25 @@ final class SMBReachabilityTests: XCTestCase {
     }
 
     /// 解析不到的主机名不能抛异常，只能返回 false。
-    func testUnresolvableHostReturnsFalse() async {
+    ///
+    /// ★ 2026-10-23 实测：代理开 **fake-ip 模式**时（198.18.0.0/15），本机任何主机名
+    ///   都会「解析成功」，这条测试的前提（DNS 真的失败）不再成立——探测到的是
+    ///   假 IP 上的 TUN，连接由代理接管。前提不满足就如实跳过，不硬撑假绿。
+    func testUnresolvableHostReturnsFalse() async throws {
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var info: UnsafeMutablePointer<addrinfo>?
+        let rc = getaddrinfo("no-such-host.invalid", nil, &hints, &info)
+        if rc == 0, let info {
+            defer { freeaddrinfo(info) }
+            let sin = info.pointee.ai_addr!.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            var ip = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var addr = sin.sin_addr
+            inet_ntop(AF_INET, &addr, &ip, socklen_t(INET_ADDRSTRLEN))
+            throw XCTSkip("本机 DNS 被代理 fake-ip 劫持：no-such-host.invalid 解析到 "
+                          + String(cString: ip) + "，前提不成立")
+        }
         let reachable = await SMBReachability.isReachable(host: "no-such-host.invalid", timeout: 1.0)
         XCTAssertFalse(reachable)
     }

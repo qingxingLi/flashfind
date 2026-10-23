@@ -177,6 +177,9 @@ extension AppModel {
         get { wizard.nativeNASPassword }
         set { wizard.nativeNASPassword = newValue }
     }
+    /// 动态码只由弹窗写入（见 `promptForOTPThenReconnect`）：拿到的码先落到这里，
+    /// 再由 `connectDraft()` 读走。界面上**没有**绑定到它的输入框 ——
+    /// 一次性凭证不是一台 NAS 的属性，不该常驻在表单里。
     var nativeNASOTP: String {
         get { wizard.nativeNASOTP }
         set { wizard.nativeNASOTP = newValue }

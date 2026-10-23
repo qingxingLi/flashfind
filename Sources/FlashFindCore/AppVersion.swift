@@ -38,6 +38,16 @@ public enum AppVersion {
         return displayText(short: short)
     }
 
+    /// 给协议与日志用的**机器可读**版本号：`1.1.2`。
+    ///
+    /// ★ 与 `current` 是同一个事实（`CFBundleShortVersionString`）的两种形态，所以
+    /// 两者都在这里读，别处不许再读一次 Info.plist。区别只在缺值时：
+    /// 界面要中文的「开发构建」，而 MCP 的 `serverInfo.version` 进的是客户端配置与
+    /// 日志，塞中文会让配对、比较、排序全部失效，因此回落成 ASCII 的 `0.0.0-dev`。
+    public static var machineReadable: String {
+        value(for: "CFBundleShortVersionString") ?? "0.0.0-dev"
+    }
+
     private static func value(for key: String) -> String? {
         Bundle.main.infoDictionary?[key] as? String
     }

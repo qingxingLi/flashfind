@@ -76,6 +76,27 @@ find_dart() {
     return 1
 }
 
+# 本包依赖的官方 MCP SDK 声明了 `swift-tools-version:6.1`，而 SwiftPM 校验的是
+# 「被依赖包的 tools-version vs **当前工具链**」——不是拿本包 manifest 去比
+# （四组对照实验见方案 §8.1.1）。工具链低于 6.1 时，报错落在依赖包身上：
+#   error: package 'swift-sdk' is using Swift tools version 6.1.0
+#          but the installed version is 6.0.3
+# 那句话太容易被读成「仓库坏了」。入口处先说清缺什么、怎么补。
+require_swift_61() {
+    v=$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [ -n "$v" ] && printf '%s\n' "$v" | awk -F. '{exit !($1>6 || ($1==6 && $2>=1))}'; then
+        return 0
+    fi
+    echo "build.sh: 本包需要 Swift 6.1+（MCP SDK 0.12.1 的 swift-tools-version 是 6.1）。" >&2
+    echo "          当前工具链：${v:-无法识别}" >&2
+    echo "          两条路，任选其一：" >&2
+    echo "            1) 装 Xcode 16.3+，并把 xcode-select 指向它（全局生效）" >&2
+    echo "            2) 用已装好的 6.1+ 工具链，只对这一条命令生效：" >&2
+    echo "               TOOLCHAINS=<CFBundleIdentifier> ./scripts/build.sh $cmd" >&2
+    echo "               （标识见 ~/Library/Developer/Toolchains/*.xctoolchain/Info.plist）" >&2
+    exit 1
+}
+
 case "$cmd" in
 core)
     # 底层脚本是 bash，必须用 bash 调，不能 sh。
@@ -106,11 +127,21 @@ app)
             exit 1
         fi
     fi
-    exec swift build --package-path "$CLIENT" --product FlashFind2App --disable-sandbox "$@"
+    require_swift_61
+    exec swift build --package-path "$CLIENT" --product FlashFind2App --disable-sandbox \
+        --only-use-versions-from-resolved-file "$@"
     ;;
 test)
+    require_swift_61
     echo "==> Swift 全量测试（唯一回归门槛）"
-    swift test --package-path "$CLIENT" --disable-sandbox
+    # ★ 1.1.2 起本包依赖官方 MCP SDK（`exact 0.12.1`），而该 SDK 的 manifest 声明了
+    #   `swift-docc-plugin` 的 `branch: "main"` 依赖。branch 依赖本身不可复现，
+    #   所以「用哪份依赖」不交给每次 resolve 去猜：这里钉死只用 Package.resolved
+    #   记录的版本，解析结果与文件不符就直接失败，而不是悄悄换一个 commit 继续测。
+    #   ★ 升级依赖的唯一合法路径是显式跑 `swift package resolve` 并提交新的
+    #   Package.resolved；本入口不替任何人做这个决定。
+    swift test --package-path "$CLIENT" --disable-sandbox \
+        --only-use-versions-from-resolved-file
     echo
     echo "==> Dart 核心行为测试"
     if dart_bin=$(find_dart); then
@@ -140,6 +171,7 @@ test)
     fi
     ;;
 package)
+    require_swift_61
     [ $# -ge 1 ] || die "package 需要 --output <新目录>"
     case " $* " in
     *" --output "*) ;;

@@ -7,9 +7,11 @@ import FlashFindCore
 /// 它的定位是**调搜索行为的地方**，不是一个 NAS 管理器 —— 每台 NAS 都配
 /// 一行按钮、每页都自绘卡片，会让设置看起来像另一个产品。因此：
 ///
-/// 1. **一级页面三页**：「搜索来源」并入「搜索」——它们回答的是同一个
+/// 1. **一级页面四页**：「搜索来源」并入「搜索」——它们回答的是同一个
 ///    问题（搜哪些地方），分成两页只会让用户在「调整搜索」和「管理 NAS」
-///    之间来回跳；三页撑不起一条常驻侧栏，所以导航是顶部横向分段控件；
+///    之间来回跳；「AI」独立成页（1.1.2 唯一的新增主功能，藏在「高级」里
+///    与产品定位冲突，§14.3.1）。四页撑不起一条常驻侧栏，所以导航是顶部横向
+///    分段控件；
 /// 2. **来源列表只显示名称 / 状态 / 位置 / 启用**，点整行进详情页，
 ///    只有出问题时才出现一个按钮；
 /// 3. **视觉走系统原生**：`Form` + `.formStyle(.grouped)`，不再自绘卡片；
@@ -109,6 +111,7 @@ struct SettingsView: View {
         switch pane {
         case .general: generalForm
         case .search: searchPane
+        case .ai: aiForm
         case .advanced: advancedForm
         }
     }
@@ -472,6 +475,220 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
+    // MARK: - AI
+
+    /// 「清空历史」的二次确认。清空不可恢复，所以不提供「不再提示」。
+    @State private var confirmingHistoryClear = false
+    /// 清空之后的那一句结果。★ **失败也要说**——只说成功的话，删失败时界面一片安静，
+    /// 用户会以为已经清掉了。
+    @State private var historyMessage: String?
+    /// 刚点过「复制接入提示词」。只用来显示一下「已复制」，不参与任何判定。
+    @State private var promptCopied = false
+
+    /// AI 页回答的是「AI 现在能做什么、我给它开了什么」。
+    ///
+    /// 五段，顺序就是用户心里的顺序：先决定开不开 → 再说给哪些位置 →
+    /// 确认它在跑 → 拿到怎么接 → 最后是「我记了什么、怎么清掉」。
+    ///
+    /// 判定与文案全在 Core（`AIAccessSettings` / `MCPHelperStatus` / `AIHistorySummary` /
+    /// `MCPIntegrationPrompt`），这一段只做绑定：拨开关 → 草稿变；点保存 → 落盘。
+    /// ★ 「助手状态」与「历史」读的都是**事实**（socket 有没有在监听、库里几条），
+    ///   不是估计值；读不到就如实说读不到。
+    private var aiForm: some View {
+        let history = model.aiHistorySummary
+        let integration = model.aiIntegrationPrompt
+        return Form {
+            Section {
+                Toggle("允许 AI 使用闪寻",
+                       isOn: Binding(get: { model.aiAccess.draft.isEnabled },
+                                     set: { model.aiAccess.setEnabled($0) }))
+                    .accessibilityIdentifier("ai-access-enabled")
+            } header: {
+                sectionHeader("AI 访问")
+            } footer: {
+                sectionFooter(model.aiAccess.draft.isEnabled
+                              ? "关掉后 AI 立刻失去连接，正在进行的搜索也会停下。"
+                              : "打开后，Claude、Codex、Cursor 这类 AI 工具才能通过闪寻查找文件。默认关闭，也不会预先勾选任何位置。")
+            }
+
+            // 关着的时候不摆一排灰掉的勾选框：那既点不动，又像是在暗示
+            // 「你已经授权了这些」。关着就只留上面那句说明。
+            if model.aiAccess.draft.isEnabled {
+                Section {
+                    ForEach(model.aiAccessCandidates) { candidate in
+                        Toggle(candidate.name,
+                               isOn: Binding(get: { model.aiAccess.draft.allowedSources.contains(candidate.id) },
+                                             set: { model.aiAccess.setSource(candidate.id, allowed: $0) }))
+                            .accessibilityIdentifier("ai-access-source-\(candidate.id)")
+                    }
+                    if model.aiAccess.draft.allowedSources.isEmpty {
+                        Text("至少选择一个位置才能保存。")
+                            .font(.system(size: SettingsTypography.caption))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: 10) {
+                        Button("保存") {
+                            model.aiAccess.save(existing: model.aiAccessExistingSourceIDs)
+                        }
+                        .disabled(!model.aiAccess.canSave)
+                        .accessibilityIdentifier("ai-access-save")
+                        Button("撤销修改") { model.aiAccess.discard() }
+                            .disabled(!model.aiAccess.isDirty)
+                            .accessibilityIdentifier("ai-access-revert")
+                        if model.aiAccess.isDirty {
+                            Text("未保存")
+                                .font(.system(size: SettingsTypography.caption))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let message = model.aiAccess.message {
+                        Text(message)
+                            .font(.system(size: SettingsTypography.caption))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } header: {
+                    sectionHeader("允许 AI 搜索的位置")
+                } footer: {
+                    sectionFooter("AI 只能看到你在这里勾选的来源。没有勾选的来源，连名字都不会告诉 AI。")
+                }
+            }
+
+            Section {
+                LabeledContent("状态") {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(model.mcpHelperStatus.isHealthy ? Color.green : Color.secondary)
+                            .frame(width: 7, height: 7)
+                        Text(model.mcpHelperStatus.title)
+                    }
+                }
+                .accessibilityIdentifier("ai-helper-status")
+                Text(model.mcpHelperStatus.detail)
+                    .font(.system(size: SettingsTypography.caption))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                sectionHeader("MCP Helper")
+            } footer: {
+                // 这里不写「已连接 N 个客户端」之类的数字：闪寻只知道自己这边在监听，
+                // 谁连上来、连了几个它并不跟踪。编一个数字比不写更糟。
+                //
+                // ★ 必须补最后那句：上面可能写着「正常运行」而 AI 访问是关着的
+                //（socket 一直在监听，判定在服务里）。不说明的话，用户会以为
+                //「正常运行」等于「AI 现在能用」，然后去问为什么搜不到。
+                sectionFooter("这一行说的是闪寻这一侧在不在等待连接。AI 客户端什么时候连上来，由你在那边决定；AI 访问关着时，连上来也会被拒绝。")
+            }
+
+            // 「怎么接」——这一段是 AI 页里唯一能直接解决用户问题的东西。
+            //
+            // ★ 只给**已保存且已开启**的状态看。草稿开着但没保存就给出可复制的一段话，
+            //   用户复制过去必然连不上（权威端还认为 AI 访问是关的），
+            //   那比不给更糟——所以未保存时只留一行字说明。
+            //
+            // ★ 正文、按钮、折叠说明全部来自 Core（`MCPIntegrationText`），
+            //   这里不写任何字面量：一段要给人复制的话，最怕两处各写一份。
+            if model.isAIAccessGranted {
+                Section {
+                    Text(integration.text)
+                        // ★ 用 `body` 而不是 `caption`：这一段是本页**要用户照做**的内容，
+                        //   不是备注。用 11pt 会让整页看起来「重点在别处」。
+                        .font(.system(size: SettingsTypography.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .accessibilityIdentifier("ai-prompt-text")
+
+                    HStack(spacing: 10) {
+                        Button(MCPIntegrationText.copyButton) { copyPrompt(integration.text) }
+                            .accessibilityIdentifier("ai-prompt-copy")
+                        if promptCopied {
+                            Text(MCPIntegrationText.copied)
+                                .font(.system(size: SettingsTypography.caption))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    // 刻意不给「Claude / Codex / Cursor」三选一：填进去的永远是同一个路径，
+                    // 选客户端只会让人以为选错了就接不上。这里真正的分支只有
+                    // 「它的配置写法长什么样」，而那件事该由它自己的文档回答。
+                    DisclosureGroup(MCPIntegrationText.otherClientsTitle) {
+                        Text(MCPIntegrationText.otherClientsDetail)
+                            .font(.system(size: SettingsTypography.caption))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 4)
+                    }
+                    .accessibilityIdentifier("ai-prompt-other-clients")
+                } header: {
+                    sectionHeader(MCPIntegrationText.title)
+                } footer: {
+                    sectionFooter(MCPIntegrationText.footer)
+                }
+            } else if model.aiAccess.draft.isEnabled {
+                Section {
+                    Text(MCPIntegrationText.saveFirst)
+                        .font(.system(size: SettingsTypography.caption))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("ai-prompt-save-first")
+                }
+            }
+
+            Section {
+                LabeledContent("记录") { Text(history.title) }
+                    .accessibilityIdentifier("ai-history-title")
+                Text(history.detail)
+                    .font(.system(size: SettingsTypography.caption))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(AIHistoryText.clearButton) { confirmingHistoryClear = true }
+                    .disabled(!history.canClear)
+                    .accessibilityIdentifier("ai-history-clear")
+                if let historyMessage {
+                    Text(historyMessage)
+                        .font(.system(size: SettingsTypography.caption))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                sectionHeader("AI 历史")
+            } footer: {
+                sectionFooter("历史只记在本机：谁在什么时候看过哪个文件。不记文件内容，不上传。清空不影响 AI 已经拿到的文件编号。")
+            }
+        }
+        .formStyle(.grouped)
+        .alert(AIHistoryText.clearTitle, isPresented: $confirmingHistoryClear) {
+            Button("清空", role: .destructive) { clearHistory() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(AIHistoryText.clearDetail)
+        }
+    }
+
+    /// 清空历史，并把三种结局都翻译成一句话。
+    private func clearHistory() {
+        switch model.clearAIHistory() {
+        case .cleared(let count): historyMessage = AIHistoryText.cleared(count)
+        case .failed: historyMessage = AIHistoryText.clearFailed
+        case .unavailable: historyMessage = AIHistoryText.clearUnavailable
+        }
+    }
+
+    /// 复制接入提示词。
+    ///
+    /// ★ 复制的是**当前这一段文本本身**，不是重新拼一遍：界面看到什么、剪贴板里就是什么。
+    ///   重新拼会出现「屏幕上是一句、粘出来是另一句」这种只能靠人眼发现的分叉。
+    private func copyPrompt(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        promptCopied = true
+    }
+
     // MARK: - 高级
 
     @State private var diagnosticsShown = false
@@ -532,6 +749,11 @@ struct SettingsView: View {
             } footer: {
                 sectionFooter("打开后，「添加搜索来源」里会出现尚未在真机上验证过的类型（威联通 / 绿联 / 飞牛 / WebDAV）。它们当中有的是已知连不上的，仅供自行尝试。")
             }
+
+            // AI 访问已搬到独立的「AI」页（Phase 9-lite，2026-10-22）：
+            // 1.1.2 唯一的新增主功能，藏在「高级」里与产品定位冲突（§14.3.1）。
+            // ★ 这里**不要**再放一份入口。两处入口必然分叉——一处改了另一处没改，
+            //   用户看到的就是「设置里有两个 AI 开关，说的话还不一样」。
 
             // 检查更新放在高级页末尾：它不改任何设置，只是「看看有没有新版」。
             //

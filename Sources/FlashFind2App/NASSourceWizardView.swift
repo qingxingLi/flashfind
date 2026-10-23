@@ -6,7 +6,6 @@ import FlashFindCore
 struct NASSourceWizardView: View {
     @ObservedObject var model: AppModel
     @FocusState private var nameFocused: Bool
-    @State private var showOTP = false
     /// 是否把局域网里的电脑、打印机也列出来。
     ///
     /// 默认不列——用户要的是 NAS，混着同事的 Mac 与打印机反而找不到。
@@ -358,15 +357,13 @@ struct NASSourceWizardView: View {
                             }
                         }
                     }
-                    // OTP 默认收起：多数账号用不到，但开启两步验证时必须有入口，
-                    // 否则用户只会看到一句「登录失败」。
-                    DisclosureGroup("该账号需要动态口令？", isExpanded: $showOTP) {
-                        PlainSecureField(text: $model.nativeNASOTP, placeholder: "OTP",
-                                        accessibilityID: "nas-otp")
-                            .frame(height: 22)
-                            .padding(.top, 6)
-                    }
-                    .font(.callout)
+                    // 【这里不要再放 OTP 输入框。】
+                    //
+                    // 动态码是**一次性**的：它不属于「这台 NAS 的配置」，
+                    // 摆在表单里只会让人以为那是这台 NAS 的一个属性。
+                    // 现在所有登录路径统一在「设备要求动态码」时弹窗问一次，
+                    // 填完自动接着连（见 `promptForOTPThenReconnect`）。
+                    // 表单里放了，用户就会先去填它；而多数账号根本用不到。
                     if !model.draftSource.host.isEmpty, model.draftSource.hostName.isEmpty {
                         rowError("IP 格式不对，请填 IP 或主机名")
                     }

@@ -35,6 +35,16 @@ jobs:
         with:
           sdk: stable
 
+      - name: 选择工具链
+        # ★ 1.1.2 起依赖 MCP Swift SDK，它的 manifest 是 `swift-tools-version:6.1`。
+        #   SwiftPM 校验的是「被依赖包的 tools-version vs 当前工具链」，低于 6.1
+        #   会在解析依赖那一步直接拒绝——而 runner 的默认 Xcode 会随镜像升级而变，
+        #   所以这里显式选最新稳定版，并在下一步**断言**版本下限。
+        #   （本机基线为 Swift 6.1.2；系统自带的那份 6.0.3 编不过这个包。）
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: 记录环境并校验架构
         # 明确打印 `uname -m`：首发只声明 Apple Silicon / arm64，
         # 而「runner 实际是什么架构」不写在 manifest 里、只能看这一行。
@@ -51,6 +61,14 @@ jobs:
             echo "runner 不是 arm64，与首发声明的支持范围不符"
             exit 1
           fi
+          # Swift 版本下限：MCP Swift SDK 要求 >= 6.1
+          ver=$(swift --version | sed -n 's/.*Apple Swift version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+          echo "Swift = $ver"
+          if [ -z "$ver" ]; then echo "没能解析出 Swift 版本"; exit 1; fi
+          if ! awk -v v="$ver" 'BEGIN{split(v,a,"."); exit !(a[1]*100+a[2] >= 601)}'; then
+            echo "Swift $ver 低于 6.1，MCP Swift SDK 的 manifest 会拒绝解析"
+            exit 1
+          fi
 
       - name: core —— 编译 Dart 搜索核心与原生信任助手
         run: ./scripts/build.sh core
@@ -62,4 +80,18 @@ jobs:
         run: ./scripts/build.sh test
 
       - name: release —— 全量 Release 构建
-        run: swift build -c release
+        # 不带 --product：要编**所有** target。`flashfind-mcp` 是独立可执行文件，
+        # 只在 `--product FlashFind2App` 下不会被编到，漏了它等于「Helper 能不能
+        # 编出来」这件事没人验证过。
+        run: swift build -c release --only-use-versions-from-resolved-file
+
+      - name: 依赖未漂移
+        # `--only-use-versions-from-resolved-file` 已经保证构建用的是入库的那份，
+        # 这一步确认构建过程没有把它改写成别的形态。漂移了要么是有人改了
+        # `Package.resolved` 忘了提交，要么是某次 resolve 悄悄升级了依赖。
+        run: |
+          if ! git diff --quiet -- Package.resolved; then
+            echo "Package.resolved 在构建过程中被改动了："
+            git diff -- Package.resolved
+            exit 1
+          fi

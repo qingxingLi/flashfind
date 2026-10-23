@@ -16,8 +16,8 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
     private let ds1621Hex = """
     1234567853594e4f191130323a30303a35653a30303a30303a38381204c0a80158100400000000\
     1304ffffff001804010000001504727272721404c0a80101a30400000000010402000000110a46\
-    414b454e41533030311e04c0a8015cc00d534e46414b4544534d30303031730a4e464b45444d30\
-    303031a40400000201a6047800000050005200540400000000560058005a005c00510053005504\
+    414b454e41533030311e04c0a8015cc00d46414b45303030303030303031730a46414b45303030\
+    303939a40400000201a6047800000050005200540400000000560058005a005c00510053005504\
     00000000570059005b005d00a704010000004804010000004904f94f01007705372e332e329004\
     0400000078074453313632312b701473796e6f6c6f67795f76313030305f313632312bc1034453\
     4d8004000000007b040000000071040100000075048a13000076048b130000b008bf0200000000\
@@ -28,7 +28,7 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
     private let ds124Hex = """
     1234567853594e4f191130323a30303a35653a30303a30303a39361204c0a801601004000000\
     001304ffffff001804010000001504727272721404c0a80101a3040000000001040200000011\
-    0d64656d6f2d73796e6f6c6f67791e04c0a8015cc00d534e46414b4544534d30303032730a4e46\
+    0d64656d6f2d73796e6f6c6f67791e04c0a8015cc00d46414b45303030303030303032730a4e46\
     4b45444d30303032a40400000201a6047800000050005200540400000000560058005a005c00\
     51005300550400000000570059005b005d00a704010000004804010000004904661c01007705\
     372e322e3290040000000078054453313234701773796e6f6c6f67795f72746431363139625f\
@@ -71,7 +71,7 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
         let response = try XCTUnwrap(
             SynologyDiscoveryPacket.parseResponse(data(fromHex: ds1621Hex), responderAddress: "192.168.1.88"))
         XCTAssertEqual(response.model, "DS1621+")
-        XCTAssertEqual(response.serial, "SNFAKEDSM0001")
+        XCTAssertEqual(response.serial, "FAKE000000001")
         XCTAssertEqual(response.mac, "02:00:5E:00:00:88")
         XCTAssertEqual(response.serverName, "FAKENAS001")
         XCTAssertEqual(response.ip, "192.168.1.88")
@@ -82,7 +82,7 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
         XCTAssertEqual(response.dsmBuild, 86009)
         XCTAssertEqual(response.platform, "synology_v1000_1621+")
         XCTAssertEqual(response.product, "DSM")
-        XCTAssertEqual(response.shortSerialFragment, "NFKEDM0001")
+        XCTAssertEqual(response.shortSerialFragment, "FAKE000099")
         XCTAssertEqual(response.state, 1, "1 = Ready")
         XCTAssertEqual(response.ipAssignment, 1, "1 = 手动")
         XCTAssertEqual(response.dsmHTTPPort, 5002, "这台把 DSM 开在非标准口 5002/5003")
@@ -97,7 +97,7 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
         let response = try XCTUnwrap(
             SynologyDiscoveryPacket.parseResponse(data(fromHex: ds124Hex), responderAddress: "192.168.1.96"))
         XCTAssertEqual(response.model, "DS124")
-        XCTAssertEqual(response.serial, "SNFAKEDSM0002")
+        XCTAssertEqual(response.serial, "FAKE000000002")
         XCTAssertEqual(response.mac, "02:00:5E:00:00:96")
         XCTAssertEqual(response.serverName, "demo-synology")
         XCTAssertEqual(response.dsmVersion, "7.2.2")
@@ -166,7 +166,7 @@ final class SynologyDiscoveryPacketTests: XCTestCase {
         let response = try XCTUnwrap(SynologyDiscoveryPacket.parseResponse(Data(cut)))
         XCTAssertEqual(response.mac, "02:00:5E:00:00:88")
         XCTAssertEqual(response.serverName, "FAKENAS001")
-        XCTAssertEqual(response.serial, "SNFAKEDSM0001", "serial 落在前 120 字节里，截到这儿还保得住")
+        XCTAssertEqual(response.serial, "FAKE000000001", "serial 落在前 120 字节里，截到这儿还保得住")
         XCTAssertNil(response.model, "model(0x78) 在后半段，被截掉了就是没有——不许猜")
     }
 

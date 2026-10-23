@@ -53,6 +53,8 @@ echo "==> 核心行为测试"
 # 这些断言写在 Dart 侧，因为它们验的是核心行为，Swift 测试覆盖不到。
 "$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_admin_identity.dart"
 "$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_multi_scope.dart"
+# 来源根 / 共享名契约（6.3b-3）：适配器不许私自重造设备的身份空间。
+"$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_share_contract.dart"
 
 echo "==> 编译 Dart AOT 核心"
 mkdir -p "$OUT/bin" "$OUT/native"

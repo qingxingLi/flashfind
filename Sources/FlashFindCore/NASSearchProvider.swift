@@ -36,6 +36,25 @@ import Foundation
     /// 「某一处用的是另一套 ID」。
     private var activeMachine: SearchSessionMachine?
     private var active: UUID? { activeMachine?.session.queryID }
+    /// 当前活跃搜索是**谁**发起的（P3：GUI / MCP 会话隔离）。
+    ///
+    /// 只有同一 owner 的新查询才允许取代旧查询。跨 owner 一律排队，
+    /// 排队由 `SearchScheduler` 负责；这里守的是「万一没排队也不许互相取消」。
+    private var activeOwner: SearchOwner = .ui
+    /// 刚刚结束的那次查询的 `queryID`（正常完成、失败、超时都算）。
+    ///
+    /// 为什么需要它：搜索一结束就必须把 `activeMachine` 摘掉 —— 否则下一次
+    /// **换 owner** 的搜索会被上面那条不变量检查当成「另一个调用方还在搜索」，
+    /// 而实际上这个来源早就空了（实测症状：GUI 与 MCP 互相把对方挡在门外，
+    /// 文案是「这个来源正在被另一个调用方搜索」）。
+    ///
+    /// 但结果行的**可打开性**是事后补发的：解析挂载路径可能阻塞到 3 秒，
+    /// 那时 `active` 已经是 nil。所以留一个只对「刚结束的那一次」开放的窗口，
+    /// 下一次搜索一开始就关掉 —— 否则旧查询的元数据会污染新查询的结果行。
+    private var completedQueryID: UUID?
+    /// 带 owner 的入口在调用旧 `search` 之前把它放这里，
+    /// 让旧实现建立 `activeMachine` 时能一并记下归属，不必把 owner 参数穿进去。
+    private var pendingOwner: SearchOwner?
     /// 活跃搜索的 emit 通道。
     ///
     /// 为什么必须留一份：`disconnect()` 把 `activeMachine` 摘掉之后，
@@ -308,14 +327,61 @@ import Foundation
 
     // MARK: - 搜索
 
+    /// 这次查询的**迟到元数据补发**还该不该被放行。
+    ///
+    /// 两个合法窗口：
+    /// 1. 它还是当前查询（`activeMachine` 就是它）；
+    /// 2. 它刚刚结束、且还没有新查询接手（`completedQueryID == queryID`）。
+    ///
+    /// 为什么必须有第 2 条：搜索正常结束会把 `activeMachine` 摘掉（否则会挡住
+    /// 下一个调用方），而「结果行能不能直接打开」是搜索返回**之后**才补发的。
+    /// 只按第 1 条判，NAS 结果就会永远停在「不可打开」。
+    ///
+    /// 不带 `private` 是给测试留的观察点：这条窗口没有别的外部可观察效果
+    /// （要等真实的挂载解析），只能直接锁边界。
+    func acceptsLateMetadata(for queryID: UUID) -> Bool {
+        if active == queryID { return true }
+        return completedQueryID == queryID
+    }
+
     public func cancel(queryID: UUID) {
         guard let machine = activeMachine, machine.session.queryID == queryID else { return }
         // 取消发生在设备任务已建之后 ⇒ 记 orphaned（不知道设备侧有没有清掉），
         // 记成 cancelled 会让这类遗留永远不出现在诊断里。
+        let alreadyTerminal = machine.isTerminal
         machine.forceTerminal(machine.state.holdsRemoteTask ? .orphaned : .cancelled)
         lastSessionTrail = machine.trail; lastSessionRejected = machine.rejected
+        // ★ 补发恰好一次取消终态（与 `disconnect()` 同一条纪律）。
+        // 只摘状态机不报终态的话，`search()` 后续分支全被 `guard active == queryID`
+        // 挡住，上层 `SearchCompletionTracker` 会把这个来源一直记在 pending 里，
+        // 界面永久「正在搜索」。`alreadyTerminal` 防的是「完成之后又被取消一遍」。
+        if !alreadyTerminal, let emit = activeEmit, activeEmitQueryID == queryID {
+            emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .cancelled))
+        }
         activeMachine = nil
+        activeEmit = nil; activeEmitQueryID = nil
         Task { _ = try? await bridge.command("cancel", sourceID: source.id, queryID: queryID.uuidString) }
+    }
+
+    /// 带发起方的搜索入口（P3）。
+    ///
+    /// **跨 owner 并发时拒绝，不取消对方。** 正常情况下 `SearchScheduler` 已经
+    /// 按来源排好队，不会出现两个 owner 同时进来；走到这里说明调度层被绕过了
+    /// （或有人新增了调用路径没走调度器）。此时正确的反应是**保护正在跑的那一个**：
+    /// 取消它会让 GUI 或某个 Agent 的搜索突然消失，而它们什么都没做错。
+    /// 所以这里回一个明确的失败，并在 stderr 留一行——这是不变量违规，不是业务错误。
+    public func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                       emit: @escaping @MainActor (ProviderEvent) -> Void) async {
+        if let running = activeMachine, running.session.queryID != queryID, activeOwner != owner {
+            FileHandle.standardError.write(Data(
+                "[nasuser] owner-invariant-violation source=\(source.id) running=\(activeOwner.label) incoming=\(owner.label)\n".utf8))
+            emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .failed,
+                               message: "\(config.displayName)：这个来源正在被另一个调用方搜索，请稍后重试"))
+            return
+        }
+        pendingOwner = owner
+        defer { pendingOwner = nil }
+        await search(text, queryID: queryID, emit: emit)
     }
 
     /// 结果是否落在已授权的共享之下。多位置时任一命中即可。
@@ -411,7 +477,10 @@ import Foundation
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .degraded, message: "正在等待 \(config.displayName) 重试完成")); return
         }
         // 同一来源只保留一个活跃任务：新查询先取消旧的，避免两个 Search Task 互相 stop/clean。
-        if let running = activeMachine, running.session.queryID != queryID {
+        // ★ 只对**同一 owner** 成立。跨 owner 的取消会表现为「用户搜着搜着结果没了」
+        // 或「Agent 突然拿到 cancelled」，而且重试一次就好，极难复现（P3）。
+        if let running = activeMachine, running.session.queryID != queryID,
+           activeOwner == (pendingOwner ?? .ui) {
             let superseded = running.session.queryID
             // 被取代的那次是**被打断**的：设备侧任务若已建起来，就记 orphaned，
             // 不能装作正常结束——否则「打断遗留的任务」在诊断里永远看不见。
@@ -423,6 +492,9 @@ import Foundation
         let machine = SearchSessionMachine(session: SearchSession(queryID: queryID, sourceID: source.id,
                                                                  attempt: 1 + autoReconnectCount))
         activeMachine = machine
+        activeOwner = pendingOwner ?? .ui
+        // 新查询一开始，上一次的迟到补发窗口就关了（见 `completedQueryID` 的说明）。
+        completedQueryID = nil
         // 记下这条 emit 通道：断开时靠它补发取消终态（见 `disconnect()`）。
         activeEmit = emit; activeEmitQueryID = queryID
         retryInFlight = true
@@ -437,6 +509,15 @@ import Foundation
             }
             lastSessionTrail = machine.trail
             lastSessionRejected = machine.rejected
+            // ★ **释放槽位**：只置终态不摘状态机，下一个换 owner 的调用方就会撞上
+            //   「这个来源正在被另一个调用方搜索」，而这时设备侧其实早就空了。
+            //   用 `===` 而不是比 queryID：本次可能已被新查询取代，那时
+            //   `activeMachine` 已经是新查询的，绝不能顺手摘掉。
+            if activeMachine === machine {
+                activeMachine = nil
+                // 留给「结果行可打开」的迟到补发（解析挂载路径最多 3 秒）。
+                completedQueryID = queryID
+            }
             // 只清**属于这次查询**的那条通道：本次搜索已被新查询取代时，
             // `activeEmit` 已经是新查询的，不能顺手清掉。
             if activeEmitQueryID == queryID { activeEmit = nil; activeEmitQueryID = nil }
@@ -444,7 +525,7 @@ import Foundation
         emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .searching))
         var count = 0
         var terminalState: ProviderSearchState?
-        var terminalComplete = false
+        var terminalIncomplete = false
         do {
             // ⚠️ 这里**没有** `extensions` 字段：核心（Dart）目前不消费它，
             // 格式过滤在下面客户端侧完成。等核心能重编并真的把格式下推给 DSM
@@ -492,9 +573,11 @@ import Foundation
                         }
                         return checked
                     }.value
-                    guard self.active == queryID, !resolved.isEmpty else { return }
+                    guard self.acceptsLateMetadata(for: queryID), !resolved.isEmpty else { return }
                     emit(ProviderEvent(queryID: queryID, sourceID: self.source.id, results: resolved,
-                                       state: terminalState ?? .searching, isComplete: terminalComplete, isMetadataUpdate: true))
+                                       state: terminalState ?? .searching,
+                                       resultsIncomplete: terminalIncomplete,
+                                       isMetadataUpdate: true))
                 }
             }
             guard active == queryID, !Task.isCancelled else { return }
@@ -503,7 +586,10 @@ import Foundation
             machine.transition(to: .cleaning)
             let rawState = response["resultState"] as? String
             let state = ProviderSearchState.fromCore(rawState)
-            terminalState = state; terminalComplete = response["isComplete"] as? Bool ?? false
+            terminalState = state
+            // 核心的 `isComplete` 说的是「结果收全了吗」，与本事件是否终态无关：
+            // 收全 → 未截断；没明说 → 按收全处理（只有明确 false 才算截断）。
+            terminalIncomplete = (response["isComplete"] as? Bool) == false
             let errorBody = response["error"] as? [String: Any]
             let error = errorBody?["kind"] as? String
             let apiCode = (errorBody?["apiCode"] as? NSNumber)?.intValue
@@ -559,7 +645,7 @@ import Foundation
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: state,
                                message: failureMessage(state: state, kind: error, apiCode: apiCode, reason: reason)
                                         ?? skippedNote(unparsed: unparsed, duplicates: duplicates),
-                               isComplete: response["isComplete"] as? Bool ?? false,
+                               resultsIncomplete: terminalIncomplete,
                                reportedTotal: response["reportedTotal"] as? Int,
                                cleanupState: cleanupState))
         } catch {

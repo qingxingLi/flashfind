@@ -93,6 +93,20 @@ final class AppModel: ObservableObject {
     /// 这里只转发——和前几个 controller 一样的边界。
     private let appearance: AppearanceController
     private var appearanceBridge: AnyCancellable?
+    /// 「允许 AI 使用闪寻」（高级页骨架）。
+    ///
+    /// 规则与判定在 Core（`AIAccessSettings` / `PermissionPolicy`，可测）；
+    /// 这里只转发，让设置页能把 Toggle 绑到 `model.aiAccess.draft` 上。
+    /// 跨文件 extension 要访问，所以不写 private。
+    let aiAccess: AIAccessController
+    private var aiAccessBridge: AnyCancellable?
+    /// 权威端监听本体（Phase 9-lite）。设置页要问它两件事：助手在不在跑、
+    /// 历史里有多少条。
+    ///
+    /// ★ 不在这里构造：它由 App 入口持有、在 `applicationDidFinishLaunching` 里注入。
+    /// 弱引用是刻意的——监听的生命周期跟着 App，不该被模型延长；预览或测试里
+    /// 没有注入时，设置页读到的是「未启动」，那是实话。
+    weak var mcpAuthority: MCPAuthorityController?
     /// 设置页「外观」读写的就是这个值。
     var appearanceChoice: AppearanceChoice {
         get { appearance.choice }
@@ -253,6 +267,13 @@ final class AppModel: ObservableObject {
     /// 闪寻已失去前台、keyWindow 常常是 nil —— 于是出现「点了外面，
     /// 浮窗还杵在那儿」。收哪个窗口只有面板自己确定，这件事交回给它。
     var hidePanel: (() -> Void)?
+    /// 把搜索浮窗放回来的回调，同样由 `SearchPanelController` 注入。
+    ///
+    /// 与 `hidePanel` 必须成对存在：打开设置/向导时会 `hideSearch()` 收掉浮窗，
+    /// 如果关窗路径不还回来，屏幕上就一个窗口都没有了 —— macOS 会把这种应用
+    /// 判成空闲并**直接回收**（Automatic Termination，不是崩溃、没有崩溃报告）。
+    /// 用户看到的就是「点完登录闪退」。判定规则在 `LastWindowClosePolicy`。
+    var showPanel: (() -> Void)?
     var contextRevision: UInt64 = 0
     var displayedRevision: UInt64?
     var displayedQuery = ""
@@ -331,6 +352,8 @@ final class AppModel: ObservableObject {
                                              isPreview: AppEnvironment.isPreview, fixtureMode: fixtureMode)
         appearance = AppearanceController(preferences: self.preferences,
                                           isPreview: AppEnvironment.isPreview, fixtureMode: fixtureMode)
+        aiAccess = AIAccessController(preferences: self.preferences,
+                                      isPreview: AppEnvironment.isPreview, fixtureMode: fixtureMode)
         cacheRoot = cacheDirectory ?? (AppEnvironment.isPreview ? AppEnvironment.previewRoot : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/FlashFind2"))
         // 快捷键的读取与恢复在 ShortcutController 里（连同「已存数据无效」的提示），
         // 装配放在 preferences 确定之后立刻做，保证界面首次渲染时状态已就位。
@@ -339,6 +362,10 @@ final class AppModel: ObservableObject {
         // 所有存储属性必须在它之前初始化完，否则报 used before being initialized。
         onboardingStore = OnboardingStore(preferences: self.preferences)
         shortcutBridge = shortcuts.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        // ★ 这条闭包捕获 self，所以必须等上面所有存储属性初始化完之后才能写。
+        // 向导里「设备要动态码」时弹的那扇窗，与详情页「重新登录…」用的是同一扇：
+        // 两条路各弹各的，迟早会走出两套文案与两种行为（同 kind 不得两种说法）。
+        wizard.otpPrompter = { [weak self] name in self?.promptForOTP(sourceName: name) }
         // 动作要用的三个入口都由宿主提供：解析当前行（要读权限/来源开关）、
         // 解析文件 URL（要读 provider 与挂载绑定）、状态与浮窗收起。
         resultActions.resolveRow = { [weak self] row in self?.currentResult(row) }
@@ -381,6 +408,10 @@ final class AppModel: ObservableObject {
         appearance.onStatus = { [weak self] text in self?.status = text }
         appearanceBridge = appearance.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         appearance.loadFromPreferences()
+        // AI 访问：默认关、不预勾任何来源。同样要桥接 `objectWillChange`，
+        // 否则「拨了开关但界面不刷新」，而这条偏偏是权限开关，界面骗人代价更大。
+        aiAccessBridge = aiAccess.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        aiAccess.load()
         // 向导要用的入口：桥接层、挂载服务、超时预算、Provider 装配、
         // 核心来源清理、搜索重置。其余（凭据读写、连接尝试闸门、Provider 字典）
         // 都在 controller 内部。

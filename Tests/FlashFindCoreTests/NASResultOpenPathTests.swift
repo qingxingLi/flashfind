@@ -16,7 +16,7 @@ import XCTest
 ///
 ///   `NASLocator.owningRoot` 返回的授权根**带前导斜杠**（`/示例共享`），
 ///   而三处调用只做 `path.dropFirst(root.count)`，切完还剩一个前导斜杠
-///   （`/供应商资料/x.pdf`）；`RelativePath.validate` 第一条就拒绝
+///   （`/示例资料/x.pdf`）；`RelativePath.validate` 第一条就拒绝
 ///   前导斜杠。于是**每一个** NAS 结果在打开/定位时都抛错——
 ///   与网络环境、品牌、共享名都无关，是必然失败。
 @MainActor
@@ -32,8 +32,8 @@ final class NASResultOpenPathTests: XCTestCase {
 
     /// 核心回归：切完授权根后不能再带前导斜杠。
     func testRelativePathStripsLeadingSlashAfterRoot() {
-        XCTAssertEqual(RelativePath.relative("/示例共享/供应商资料/a.pdf", under: "/示例共享"),
-                       "供应商资料/a.pdf")
+        XCTAssertEqual(RelativePath.relative("/示例共享/示例资料/a.pdf", under: "/示例共享"),
+                       "示例资料/a.pdf")
         // 含中文与空格的真实文件名
         XCTAssertEqual(RelativePath.relative("/示例共享/质量手册/第 6.2 版.pdf", under: "/示例共享"),
                        "质量手册/第 6.2 版.pdf")
@@ -45,7 +45,7 @@ final class NASResultOpenPathTests: XCTestCase {
     /// 这就是修复前必然失败的那条链。
     func testRealisticResultPathPassesValidation() throws {
         let locator = locator(["/示例共享"])
-        let path = "/示例共享/供应商资料/供应商质量手册.pdf"
+        let path = "/示例共享/示例资料/供应商质量手册.pdf"
         let root = try XCTUnwrap(locator.owningRoot(path: path))
         XCTAssertEqual(root, "/示例共享")
 
@@ -81,13 +81,13 @@ final class NASResultOpenPathTests: XCTestCase {
     // MARK: - 挂载侧解析
 
     /// 真实目录 + 中文文件名，走一遍挂载侧的解析。
-    /// 修复前 mountService.resolve 收到的是 "/供应商资料/…"，会被 validate 拒收。
+    /// 修复前 mountService.resolve 收到的是 "/示例资料/…"，会被 validate 拒收。
     func testMountResolveAcceptsRelativePathFromLocator() async throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory
             .appendingPathComponent("ff-open-\(UUID().uuidString)", isDirectory: true)
         let share = base.appendingPathComponent("示例共享", isDirectory: true)
-        let folder = share.appendingPathComponent("供应商资料", isDirectory: true)
+        let folder = share.appendingPathComponent("示例资料", isDirectory: true)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: base) }
 
@@ -95,10 +95,10 @@ final class NASResultOpenPathTests: XCTestCase {
         try Data("pdf".utf8).write(to: file)
 
         let locator = locator(["/示例共享"])
-        let path = "/示例共享/供应商资料/质量手册.pdf"
+        let path = "/示例共享/示例资料/质量手册.pdf"
         let root = try XCTUnwrap(locator.owningRoot(path: path))
         let inside = RelativePath.relative(path, under: root)
-        XCTAssertEqual(inside, "供应商资料/质量手册.pdf")
+        XCTAssertEqual(inside, "示例资料/质量手册.pdf")
 
         let service = SMBMountService()
         let resolved = try await service.resolve(relativePath: inside, under: share)

@@ -29,6 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CredentialStore.install(KeychainSecretStore(), plaintextSource: FileSecretStore())
     }()
     let model: AppModel = {
+        #if DEBUG
+        // Phase 6.3b-4 的跨进程装配验证：只换「偏好从哪儿来」与缓存落点，
+        // 装配本身仍是产品那套（真 provider / 真协调器 / 真权威端）。
+        if let launch = E2ELaunchMode.current {
+            return AppModel(preferences: launch.preferences,
+                            cacheDirectory: launch.cacheDirectory,
+                            credentialAccessAllowed: false)
+        }
+        #endif
         if Bundle.main.object(forInfoDictionaryKey:"FlashFindAcceptanceRecording") as? String == "1" {
             return AppModel(preferences:InMemoryClientPreferences(values:["ff2.multiNAS.enabled":true,"ff2.localEnabled":true]),cacheDirectory:Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("RuntimeData/legacy-cache-unused"),credentialAccessAllowed:false)
         }
@@ -36,7 +45,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private var searchPanel: SearchPanelController?
     private var previewDesktop: NSWindow?
+    /// MCP 助手的权威端监听（Phase 6.1）。生命周期跟着 App：起来一次、退出时停。
+    private let mcpAuthority = MCPAuthorityController()
     private let hotkeyRegistrar = GlobalHotKeyRegistrar()
+    /// 关掉最后一个窗口**不等于**退出应用。
+    ///
+    /// 闪寻是常驻的搜索工具：关掉搜索浮窗只是「暂时不搜」，关掉设置只是
+    /// 「改完了」，两件事都不是「我要退出」。真正退出走菜单「退出闪寻」或 ⌘Q。
+    ///
+    /// 不实现这一条，AppKit 会把「最后一个窗口关闭」当成退出信号，
+    /// 进程随后以 **0** 退出。用户在界面上看到的就是「闪退」，
+    /// 而**没有崩溃报告**——它不是崩溃；日志里只有这一串（实测 15:23:58）：
+    ///
+    /// ```
+    /// window <...SearchPanel: 0x1559095f0> windowNumber=fbb6 finishing close
+    /// [launchd] service inactive: application.com.flashfind.v2.…
+    /// [runningboardd] termination reported by launchd (0, 0, 0)
+    /// ```
+    ///
+    /// OTP 账号复现得最明显：向导关掉的那一刻，屏幕上最后一个窗口消失，
+    /// 用户刚点完「登录」，看到的就是整台应用凭空不见。
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 旧明文 → 钥匙串的一次性迁移。只写不读（不读回校验）；
         // 明文删在最后：要等某次真实登录用新后端的密码连上了才删（见 confirmCredentialVerified）。
@@ -53,6 +85,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 不能先闪一下浅色再变。启动路径上漏这一句，设置页里选了也不生效——
         // 那种缺陷编译能过、运行也不报错。
         model.applyAppearance()
+        // AI 助手的 IPC 监听。放在这儿而不是 onboarding 之后：引导页可能停留很久，
+        // 而 `flashfind-mcp` 可能在用户还没点完引导时就被客户端拉起来了。
+        // 抢不到 socket（另一份闪寻在跑）时它自己会安静退出这条路径（§1.3.3.1）。
+        //
+        // 先注入再启动：设置页的「MCP 助手」那一行读的是这个对象上的 `lastStart`，
+        // 顺序反了会读到 nil（显示「未启动」），而实际已经在监听了。
+        model.mcpAuthority = mcpAuthority
+        mcpAuthority.start(model: model)
+        #if DEBUG
+        // 权威端已经起来了，剩下的都是给真实用户看的东西（引导、搜索浮窗、
+        // 全局快捷键）。测试启动模式在这里收手：窗口会抢焦点、还会按机器上
+        // 当前的焦状态让用例时好时坏。
+        if E2ELaunchMode.current?.isHeadless == true { return }
+        #endif
         if AppEnvironment.isPreview, ProcessInfo.processInfo.environment["FF_UI_DESKTOP"] == "1" {
             if let screen = NSScreen.main, let url = NSWorkspace.shared.desktopImageURL(for: screen), let image = NSImage(contentsOf: url) {
                 let backdrop = NSWindow(contentRect: screen.visibleFrame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -79,6 +125,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        // ★ 常驻应用：窗口全部关闭之后不许系统回收进程。
+        //
+        // macOS 的 Automatic Termination 会在「没有可见窗口」时把应用标记成
+        // 可回收并**直接杀掉**。它不是崩溃，所以不产生崩溃报告——
+        // 用户看到的就是「点完登录就闪退」，而我们翻遍
+        // `~/Library/Logs/DiagnosticReports` 也找不到任何痕迹。
+        //
+        // 实测日志（2026-10-22 15:24:35，build 25）：
+        //   window <NSWindow: 0x13aa6a650> finishing close
+        //   [AutomaticTermination] Setting _kLSApplicationWouldBeTerminatedByTALKey=1
+        //
+        // 关窗路径现在也会把搜索浮窗放回来（见 `LastWindowClosePolicy`），
+        // 但两件事解决的是不同的失败：浮窗管「看得见」，这句管「进程还在」。
+        // 只做浮窗，关窗到浮窗出现之间仍有空窗期；只做这句，
+        // 用户会盯着一片干净的桌面找不到入口。
+        //
+        // 放在 headless / preview 之后：那两条路径靠测试自己退出，
+        // 不能被「永不回收」拖住。
+        ProcessInfo.processInfo.disableAutomaticTermination(
+            LastWindowClosePolicy.automaticTerminationDisabledReason)
         presentOnboardingOrSearch()
         hotkeyRegistrar.onPress = { [weak self] in
             guard let self else { return }
@@ -124,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        mcpAuthority.stop()
         previewDesktop?.orderOut(nil)
         model.closeSearchProviders();model.cancelShortcutRecording(); hotkeyRegistrar.stop()
     }

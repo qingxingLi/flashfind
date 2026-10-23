@@ -71,6 +71,11 @@ final class SearchPanelController {
         // 而点在**其它应用**上时闪寻已失去前台、keyWindow 常为 nil，
         // 于是「点了外面，浮窗还杵在那儿」。谁持有窗口谁负责收。
         model.hidePanel = { [weak self] in self?.panel.orderOut(nil) }
+        // 与上一句成对：关掉设置/向导后若屏幕上没有别的窗口，由这里把浮窗放回来。
+        // 走 `show()` 而不是 `orderFront`，是为了和「按快捷键唤起」完全同一条路径——
+        // 查询词恢复、键位提示、点击外部关闭的监视都在里面，少走一样就会出现
+        // 「浮窗回来了但点外面关不掉」这种只在某条路径上坏掉的缺陷。
+        model.showPanel = { [weak self] in self?.show() }
     }
     func toggle() {
         if let modal = NSApplication.shared.modalWindow ?? panel.attachedSheet {

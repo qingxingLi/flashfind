@@ -216,7 +216,7 @@ class BrandSession {
       'fileType': item.isDirectory
           ? 'folder'
           : FileType.fromExtension(ext).name,
-      'size': item.size,
+      'size': item.sizeKnown ? item.size : null,
       'modifiedDate': item.modifiedTime?.toIso8601String(),
       'sourceID': sourceID,
       'sourceName': sourceName,

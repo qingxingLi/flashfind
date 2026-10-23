@@ -1,5 +1,8 @@
 # 构建产物
 .build/
+# SwiftPM 的 workspace 状态（Xcode 打开本包时生成，里面是本机绝对路径与
+# 上次解析的结果；和 .build 一样属于「机器状态」而不是源码，不能入库）
+.swiftpm/
 *.o
 *.swiftdoc
 *.swiftmodule
@@ -16,6 +19,10 @@ swift-cache/
 *.app/
 dist/
 build/
+# build_trial.py 的 `--output` 目录（交付-<版本>-build<号>/）。
+# 里面的 dmg/zip/app 已被上面三条挡住，但 build-record.json、安装前说明.txt、
+# 编译日志不是——它们带着本机路径与构建时序，属于「产物」不属于「源码」。
+交付-*/
 
 # 预编译的搜索核心与原生助手（由 tools/install-mynas-core.sh 生成）
 Resources/MyNAS/bin/mynas-core

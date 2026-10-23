@@ -116,6 +116,35 @@ final class ConnectionFailureTextTests: XCTestCase {
         XCTAssertTrue(text.contains("每次登录都不一样"), "要说清动态码为什么必须重填，实际：\(text)")
     }
 
+    // MARK: - 弹窗式动态码（2026-10-22 起所有登录路径统一）
+
+    /// 弹窗标题与「再点一次就能叫回来」那句提示必须同时存在。
+    ///
+    /// ## 这条守的是什么
+    ///
+    /// 动态码换了三版形态，每一版坏法都不同：
+    ///   1. 表单里的折叠区 —— 默认收起，且没有一条路径会打开它；
+    ///   2. 模型持有开关、失败自动展开 —— 但用户得回表单再点一次「连接」；
+    ///   3. **弹窗**（现在）：失败即弹、填完自动续连。
+    ///
+    /// 第 1 版的坏法正是「指路指到一个不存在的位置」：提示让你去填某个框，
+    /// 界面上根本没有那个框。所以现在只指一个确定还在的控件 —— **「连接」按钮**，
+    /// 并且要求弹窗标题本身非空、住 Core（两处登录路径共用同一句）。
+    func testTheOTPRetryHintPointsAtAButtonThatStillExists() {
+        XCTAssertFalse(ConnectionFailureText.otpDialogTitle.isEmpty, "弹窗标题不能是空的")
+        let hint = ConnectionFailureText.otpRetryHint
+        XCTAssertTrue(hint.contains("「连接」"), "指路只能指界面上确定还在的控件，实际：\(hint)")
+        XCTAssertFalse(hint.contains(ConnectionFailureText.otpDialogTitle),
+                       "弹窗标题不该再被拼进状态行：怎么说填是弹窗的事，两处各说一遍必然走样")
+    }
+
+    /// 取消弹窗之后，用户还得知道「填什么、怎么再来一次」。
+    func testTheOTPRetryHintSaysWhatToTypeAndHowToComeBack() {
+        let hint = ConnectionFailureText.otpRetryHint
+        XCTAssertTrue(hint.contains("6 位数字"), "要说清填什么，实际：\(hint)")
+        XCTAssertTrue(hint.contains("再点一次"), "要说清怎么把它叫回来，实际：\(hint)")
+    }
+
     // MARK: - 连接尝试闸门
 
     /// 双击「连接」时，第一次尝试必须立刻失效——否则两条 discover→login

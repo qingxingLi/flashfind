@@ -299,10 +299,9 @@ extension AppModel {
             return
         }
         ensureProviderCoordinator();providerCoordinator?.cancel()
-        // ★ `mode` 必须和 `folders` 一起给：从「已选文件夹」切回「整台 Mac」时
-        // 挑过的文件夹仍留在 `localFolders` 里（切回去还要用），只给 folders 会让
-        // provider 以为还在文件夹模式，把全盘搜索也限制在那几个旧目录里。
-        results=[];selected=nil;localProvider.folders=localFolders;localProvider.mode=localSearchMode
+        results=[];selected=nil
+        // 本机范围只有一处出处（MCP 执行侧也要套，见 `AppModel+AIAccess`）。
+        applyLocalScopeToProvider()
         for provider in nativeProviders.values { provider.queryBudgetMs = max(1, min(120, nativeSearchTimeoutSeconds)) * 1000 }
         // 请求哪些来源完全由当前配置决定：不再写死任何设备标识。
         // ★ 判定搬到 Core 的 `SearchRequestPlan`：这台机器到底有没有请求 NAS，

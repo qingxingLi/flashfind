@@ -87,7 +87,7 @@ import XCTest
                                results: [SearchResult(id: "local:1", name: "本机.txt", relativePath: "/tmp/本机.txt",
                                                       sourceID: source.id, sourceName: "本机", kind: "file", size: 1,
                                                       localURL: URL(fileURLWithPath: "/tmp/本机.txt"))],
-                               state: .completed, isComplete: true))
+                               state: .completed))
         }
     }
 

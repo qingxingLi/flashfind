@@ -39,6 +39,16 @@ final class NASSourceWizardController: ObservableObject {
     /// **不在点「连接」时清**——那时清会落到模型却落不到框里，失败后无法一键重试。
     @Published var nativeNASPassword = ""
     @Published var nativeNASOTP = ""
+    /// 弹动态码输入框的那扇门。
+    ///
+    /// 由 AppModel 注入（`promptForOTP`）：弹窗要 `NSApp.activate` 才能在不进程序坞的
+    /// 辅助型应用里前置，那是 AppModel 已经踩过并锁住的行为（见
+    /// `testOTPPromptActivatesAppBeforeRunModal`）。向导**不自己再造一个弹窗**，
+    /// 否则两条登录路径（向导 / 详情页「重新登录…」）会各弹各的、文案与行为走样。
+    var otpPrompter: ((String) -> String?)?
+    /// 上一次因「设备要动态码」而失败的状态文本。弹窗被取消时补提示要用：
+    /// 取消之后界面上只剩这一行，它必须仍然说清刚才到底怎么了。
+    private var otpFailureStatus = ""
     /// 添加/编辑向导的草稿。只有点「保存」才写入正式配置。
     @Published var draftSource = NASSourceConfig()
     @Published var draftStatus = ""
@@ -154,6 +164,7 @@ final class NASSourceWizardController: ObservableObject {
         draftSource = draft; selectedSourceID = nil
         nasTrustCandidate = nil; draftAvailableShares = []; draftStatus = ""; draftConnected = false
         draftOriginalEndpoint = nil
+        otpFailureStatus = ""
     }
 
     func editSource(_ id: String) {
@@ -168,6 +179,7 @@ final class NASSourceWizardController: ObservableObject {
         draftAvailableShares = nativeProviders[id]?.availableShares ?? []
         draftStatus = ""; draftConnected = nativeProviders[id]?.ready ?? false
         draftUsesAdminAccount = nativeProviders[id]?.isManagerAccount ?? false
+        otpFailureStatus = ""
         // 编辑一个**已经连上**的来源时，不需要用户重新输密码——
         // 钥匙串里就有。预填只是让界面状态一致，实际连接仍走自动流程。
         if !draftConnected, source.rememberPassword,
@@ -668,16 +680,62 @@ final class NASSourceWizardController: ObservableObject {
         var apiCode: Int?
         var isCoreFailure = false
         if case let .coreFailure(_, _, code)? = flash { isCoreFailure = true; apiCode = code }
+        // ★ 设备要求动态口令 → 直接弹输入框，填完自动接着连。
+        //
+        // 这一条换过三版，每一版都是同一个现象改头换面：
+        //   1. 输入框是视图私有的 `@State`，**没有任何路径会打开它**
+        //      → 状态行说「请填写 OTP」，界面上没有能填的地方；
+        //   2. 改成模型持有折叠开关，失败时自动展开
+        //      → 但用户得自己回表单点第二次「连接」；
+        //   3. 现在：**弹窗**问码，拿到就自动续连，与详情页「重新登录…」
+        //      那条路走同一扇门（`otpPrompter`）。
+        // 判据不变：失败里到底是不是 OTP，由 Core 的 `isOTPRequired` 说了算。
+        let needsOTP = ConnectionFailureText.isOTPRequired(error)
         let offer = PlainHTTPRetryOffer.shouldOffer(
             allowsPlainHTTPChoice: config.vendor.allowsPlainHTTPChoice,
             usesPlainHTTP: config.usesPlainHTTP,
             coreApiCode: apiCode,
-            isCoreFailure: isCoreFailure) && pendingCredential != nil
+            isCoreFailure: isCoreFailure) && pendingCredential != nil && !needsOTP
         draftOffersPlainHTTPRetry = offer
-        draftStatus = offer ? PlainHTTPRetryOffer.message(reason: reason) : prefix + reason
+        if needsOTP {
+            // 状态行只留事实（「登录失败：设备要求两步验证码…」）：
+            // 怎么填是弹窗的事，同一句话不该在两处各说一遍。
+            otpFailureStatus = prefix + reason
+            draftStatus = otpFailureStatus
+            promptForOTPThenReconnect(sourceName: config.displayName)
+        } else {
+            draftStatus = offer ? PlainHTTPRetryOffer.message(reason: reason) : prefix + reason
+        }
         // 要弹一键重试，就得留住那份凭据——此刻密码框已清空，用户没法再输一次。
         // 这与「确认证书」保留凭据是同一个理由。
         if !offer { clearPendingCredential() }
+    }
+
+    /// 设备要动态码 → 弹窗问码 → 拿到就自动接着连。
+    ///
+    /// ## 为什么弹窗要放到一个独立的 Task 里
+    ///
+    /// 失败收尾是 `performConnect` 的最后一步，而弹窗是**模态**的（同步阻塞主线程）。
+    /// 就地弹会把这次连接尝试的 `defer`、状态刷新全卡在半路；放进 Task 则是在
+    /// 本次尝试彻底结束（按钮已解锁、`draftBusy` 已复位）之后才问用户。
+    ///
+    /// ## 为什么拿到码之后走 `connectDraft()` 而不是把码塞进 `pendingCredential`
+    ///
+    /// `connectDraft()` 里已经把「密码从框里来还是从本机存的那把来」、
+    /// 「改过地址/账号就不许沿用旧密码」这类判定写全了；再抄一遍必然会漏一条，
+    /// 而漏的那条往往是安全相关的。密码此刻仍在框里（连接失败不清框，
+    /// 详见 `connectDraft` 的注释），所以这条路对「手输密码」与「已保存密码」都成立。
+    private func promptForOTPThenReconnect(sourceName: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let code = self.otpPrompter?(sourceName), !code.isEmpty else {
+                // 用户点取消：界面上只剩状态行，得把「下次怎么再来」说清楚。
+                self.draftStatus = self.otpFailureStatus + " " + ConnectionFailureText.otpRetryHint
+                return
+            }
+            self.nativeNASOTP = code
+            self.connectDraft()
+        }
     }
 
     /// 用户点了「改用明文 HTTP 重试」。
@@ -979,6 +1037,10 @@ final class NASSourceWizardController: ObservableObject {
             installProvider(provider)
             setSourceStatus(draftSource.id) {
                 $0.health = provider.ready ? .ready : .offline
+                // 这次登录通了，就不再是「需要动态码」的来源。
+                // 不清的话，用户把账号换成不开两步验证的那一个之后，
+                // 详情页的「重新登录…」仍会每次先弹 OTP 框问一遍。
+                $0.needsOTP = false
                 // 多选：把全部位置列出来，不要只显示第一个。
                 let scopes = provider.config.scopes
                 $0.message = provider.ready && !scopes.isEmpty

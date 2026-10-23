@@ -102,13 +102,13 @@ def dsm_page(rows: int) -> bytes:
     刻意做成真形状而不是随机填充：这样「大小」这个数字才有意义 ——
     它是设备真的会发出来的量级，不是人为造的字符串。
     """
-    folder = "/公司共享文档/年度汇总报告/各部门提交"
+    folder = "/示例共享文件夹/年度汇总报告/各部门提交"
     files = [{
         "name": f"第{i:04d}份 质量分析报告 副本.docx",
         "path": f"{folder}/第{i:04d}份 质量分析报告 副本.docx",
         "isdir": False,
         "additional": {
-            "real_path": f"/volume1/公司共享文档/年度汇总报告/各部门提交/第{i:04d}份 质量分析报告 副本.docx",
+            "real_path": f"/volume1/示例共享文件夹/年度汇总报告/各部门提交/第{i:04d}份 质量分析报告 副本.docx",
             "size": 102400 + i,
             "owner": {"user": "示例共享", "group": "users", "uid": 1026, "gid": 100},
             "time": {"atime": 1750000000, "crtime": 1740000000, "ctime": 1745000000, "mtime": 1755000000},

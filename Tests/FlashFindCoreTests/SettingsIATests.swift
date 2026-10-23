@@ -10,15 +10,35 @@ final class SettingsIATests: XCTestCase {
 
     // MARK: - 页面集合
 
-    /// ★ 一级导航最多三页。页数本身就是复杂度：七页意味着用户要在七个地方找一件小事。
+    /// ★ 一级导航最多四页。页数本身就是复杂度：七页意味着用户要在七个地方找一件小事。
     ///
     /// 第二次收敛：「搜索来源」并入「搜索」——它们回答的是同一个
     /// 问题（搜哪些地方），分成两页只会让用户在「调整搜索」和「管理 NAS」
     /// 之间来回跳。
-    func testSettingsPaneHasAtMostThreePages() {
-        XCTAssertLessThanOrEqual(SettingsPane.allCases.count, 3,
-                                 "设置的一级导航必须压到三页以内")
-        XCTAssertEqual(SettingsPane.allCases.map(\.rawValue), ["通用", "搜索", "高级"])
+    ///
+    /// 第三次（1.1.2 Phase 9-lite，2026-10-22）：三页变四页，新增独立的「AI」页。
+    /// **这不是回退**——AI 是 1.1.2 唯一的新增主功能，原先挂在「高级」里
+    /// （§14.3.1 记过这条冲突），而「高级」只该放诊断与实验性开关。
+    /// 四页仍是上限：再拆（比如把「允许的位置」单列一页）就会让
+    /// 「为什么搜不到」又要在两页之间对照。
+    func testSettingsPaneHasAtMostFourPages() {
+        XCTAssertLessThanOrEqual(SettingsPane.allCases.count, 4,
+                                 "设置的一级导航必须压到四页以内")
+        XCTAssertEqual(SettingsPane.allCases.map(\.rawValue), ["通用", "搜索", "AI", "高级"])
+    }
+
+    /// ★ AI 是独立页，而且排在「高级」**前面**。
+    ///
+    /// 顺序不是审美：排在最后会让它看起来像「又一个高级设置」，
+    /// 而它是这一版的主功能。前半句防「AI 又没了」，后半句防
+    /// 「AI 还在，但被挪到高级后面，跟诊断混在一起」。
+    func testAIIsItsOwnPaneAndSitsBeforeAdvanced() {
+        let titles = SettingsPane.allCases.map(\.rawValue)
+        guard let ai = titles.firstIndex(of: "AI"),
+              let advanced = titles.firstIndex(of: "高级") else {
+            return XCTFail("「AI」与「高级」都该是一级页，实际：\(titles)")
+        }
+        XCTAssertLessThan(ai, advanced, "AI 页要排在「高级」前面：正式功能不该排在诊断之后")
     }
 
     /// ★ 「搜索来源」不再是独立页面。
@@ -44,7 +64,7 @@ final class SettingsIATests: XCTestCase {
 
     // MARK: - 来源行：正常不给按钮
 
-    private func source(scopes: [String] = ["/公司共享文档", "/部门文档"],
+    private func source(scopes: [String] = ["/示例共享文件夹", "/项目资料"],
                         host: String = "192.168.1.96", username: String = "nasuser",
                         enabled: Bool = true) -> NASSourceConfig {
         NASSourceConfig(name: "公司 NAS", vendor: .synology,
@@ -59,7 +79,7 @@ final class SettingsIATests: XCTestCase {
         let row = NASSourceRowModel.make(config: source(), status: NASSourceStatus(), ready: true)
         XCTAssertNil(row.action, "正常连接的来源不该出现按钮")
         XCTAssertEqual(row.detail, "群晖 · 已连接")
-        XCTAssertEqual(row.locations, "公司共享文档、部门文档")
+        XCTAssertEqual(row.locations, "示例共享文件夹、项目资料")
         XCTAssertEqual(row.health, .ready)
         XCTAssertTrue(row.enabled)
     }
@@ -71,7 +91,7 @@ final class SettingsIATests: XCTestCase {
         XCTAssertEqual(row.detail, "已关闭")
         XCTAssertFalse(row.enabled)
         // 位置仍然显示：关掉不等于忘了配过什么。
-        XCTAssertEqual(row.locations, "公司共享文档、部门文档")
+        XCTAssertEqual(row.locations, "示例共享文件夹、项目资料")
     }
 
     // MARK: - 来源行：异常才给按钮，而且只给一个
@@ -157,8 +177,8 @@ final class SettingsIATests: XCTestCase {
 
     /// 搜索位置在界面上不带前导斜杠（那是 DSM 的表示法，不是产品概念）。
     func testScopeDisplayNameStripsTheLeadingSlash() {
-        XCTAssertEqual(NASSourceRowModel.scopeDisplayName("/部门文档"), "部门文档")
-        XCTAssertEqual(NASSourceRowModel.scopeDisplayName("部门文档"), "部门文档")
+        XCTAssertEqual(NASSourceRowModel.scopeDisplayName("/项目资料"), "项目资料")
+        XCTAssertEqual(NASSourceRowModel.scopeDisplayName("项目资料"), "项目资料")
     }
 
     /// 行上状态用短名，不带品牌全称里的英文。

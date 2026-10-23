@@ -215,7 +215,7 @@ extension AppModel {
     /// 这样 OTP 逻辑的可测部分与不可测部分边界清晰。
     func promptForOTP(sourceName: String) -> String? {
         let alert = NSAlert()
-        alert.messageText = "输入两步验证动态码"
+        alert.messageText = ConnectionFailureText.otpDialogTitle
         alert.informativeText = ConnectionFailureText.otpPromptText(sourceName: sourceName)
         alert.alertStyle = .informational
         alert.addButton(withTitle: "连接")

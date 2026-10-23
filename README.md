@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.1
+- **当前版本**：1.1.2
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -26,6 +26,30 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
 
 局域网发现走五路证据合并：Bonjour / Synology UDP 9999 / SSDP / ARP / TCP 端口探测
 （端口探测已降级为兜底，只探「ARP 说在线但没有任何识别证据」的主机）。
+
+---
+
+## 接入 AI 客户端（1.1.2 新增）
+
+给支持 MCP 的 AI 客户端（Claude、Cursor、WorkBuddy 等）接上闪寻的检索能力，
+让 AI 直接问「你那边有没有这个文件」，而不是让它猜路径。
+
+**默认关闭，不开就没有任何对外接口。** 开启在 设置 ▸ **AI**：先打开总开关，
+再勾选允许它搜哪几个来源；开关下方那段「接入提示词」可以一键复制，
+粘给你的 AI 客户端即完成配置（里面写了助手位置与调用方式）。
+
+| 项 | 说明 |
+|---|---|
+| 助手 | `闪寻.app/Contents/Helpers/flashfind-mcp`，随应用分发，不是单独下载 |
+| 通道 | 本机 unix socket（`~/Library/Application Support/闪寻/ipc/mcp.sock`，权限 `0600`，仅同一登录会话可连），不出网 |
+| 工具 | `list_sources` / `search` / `locate` / `locate_many` / `get_metadata` / `recent` |
+
+交出去的只有文件本身的信息（名称、所在来源、大小、修改时间、类型等），
+**不含文件内容，也不含绝对路径**——路径在客户端侧合成，AI 拿到的是一个不透明的
+`file_id`。授权范围跟着你的勾选走：取消勾选某个来源后，连它的旧 `file_id` 也问不到东西
+（会像「文件不在了」一样返回 `not_found`，不给专门的拒绝码——拒绝本身也是一种信息）。
+
+想收回随时可以：关掉总开关，或在同一页「清空 AI 历史」。细节见 `PRIVACY.md` 第六节。
 
 ---
 
@@ -66,13 +90,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 755 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1320 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 755 项
+swift test                       # 1320 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 
@@ -126,7 +150,12 @@ MyNASCore       Dart 搜索核心，以子进程方式运行，stdin/stdout 走 
 公开的发布信息（匿名、无参数、不点不发）。文件名只进本机索引（不含内容），
 密码存系统钥匙串。
 
-全文、本机落点清单与三步自查命令见 `PRIVACY.md`。
+AI 访问（上面那一节）走的是**本机 socket**，不是第三类网络请求；它默认关闭，
+且只在你勾选的范围里、只回文件名与元数据。**AI 客户端本身是不是联网、会不会把
+拿到的东西发出去，取决于那个客户端，不取决于闪寻** —— 它是你的另一个软件，
+闪寻没有能力也无意替它承诺。
+
+全文、本机落点清单与四步自查命令见 `PRIVACY.md`。
 
 ## 安全
 

@@ -68,5 +68,8 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
         controller?.noteStepLeft()
         model?.pushOnboardingShortcutPressed = nil
         window?.orderOut(nil)
+        // 引导窗口也是「唯一窗口」的候选：用户还没配来源、先把引导关掉时，
+        // 若不放回搜索浮窗，屏幕上零窗口 → 系统会把进程回收。
+        restoreSearchPanelIfNeeded(closing: notification.object as? NSWindow, model: model)
     }
 }

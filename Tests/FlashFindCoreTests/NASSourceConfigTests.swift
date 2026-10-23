@@ -198,7 +198,7 @@ final class NASSourceConfigTests: XCTestCase {
 
     func testTwoSourcesDoNotAcceptEachOthersPaths() throws {
         let first = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.96", scope: "/示例共享"), port: 5001)
-        let second = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.88", scope: "/研发组"), port: 5003)
+        let second = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.88", scope: "/工程部"), port: 5003)
         let row = SearchResult(id: "x", name: "a.txt", relativePath: "/示例共享/a.txt",
                                sourceID: second.source.id, sourceName: second.source.displayName,
                                kind: "file", size: nil, localURL: nil)
@@ -219,8 +219,8 @@ final class NASSourceConfigTests: XCTestCase {
     func testLocatorUpdatesWhenScopeChanges() async throws {
         let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.96", scope: "/示例共享"), port: 5001)
         XCTAssertEqual(provider.locatorSnapshot.shares, ["示例共享"])
-        provider.updateConfig(fixture(host: "192.168.1.96", scope: "/研发组"))
-        XCTAssertEqual(provider.locatorSnapshot.scopePrefixes, ["/研发组/"], "换范围后后台核验必须跟着换")
+        provider.updateConfig(fixture(host: "192.168.1.96", scope: "/工程部"))
+        XCTAssertEqual(provider.locatorSnapshot.scopePrefixes, ["/工程部/"], "换范围后后台核验必须跟着换")
     }
 
     // MARK: 持久化

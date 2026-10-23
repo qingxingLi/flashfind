@@ -35,7 +35,7 @@ public struct NASSourceRowModel: Equatable, Sendable {
     public let title: String
     /// 状态行：正常时是「群晖 · 已连接」，异常时是「无法连接」这类短句。
     public let detail: String
-    /// 搜索位置，如「公司共享文档、部门文档」。空表示没选。
+    /// 搜索位置，如「示例共享文件夹、项目资料」。空表示没选。
     public let locations: String
     /// 需要用户处理时给按钮；正常行是 `nil`（界面据此**不画**按钮）。
     public let action: NASSourceRequiredAction?
@@ -54,7 +54,7 @@ public struct NASSourceRowModel: Equatable, Sendable {
         self.health = health
     }
 
-    /// `/公司共享文档` → `公司共享文档`。
+    /// `/示例共享文件夹` → `示例共享文件夹`。
     ///
     /// 搜索位置在界面上一律不带前导斜杠：用户配的是 NAS 上的共享名，
     /// 那是产品概念；`/xxx` 是 DSM 的表示法，属于实现细节。

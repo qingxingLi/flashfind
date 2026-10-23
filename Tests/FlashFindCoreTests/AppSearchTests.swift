@@ -105,7 +105,7 @@ final class AppSearchTests: XCTestCase {
         XCTAssertEqual(events.count, 2)
         XCTAssertEqual(events[0].state, .searching)
         XCTAssertEqual(events[1].state, .completed)
-        XCTAssertTrue(events[1].isComplete)
+        XCTAssertTrue(events[1].isTerminal)
         XCTAssertEqual(events[1].reportedTotal, 1)
     }
 

@@ -51,7 +51,7 @@ private func nasFixtureConfig() -> NASSourceConfig {
         try? await Task.sleep(nanoseconds:delay)
         if let gate { await gate.enterAndWait() }
         // Deliberately emit even after cancellation to challenge Coordinator guards.
-        emit(ProviderEvent(queryID:queryID,sourceID:source.id,results:fail ? [] : [SearchResult(id:source.id+text,name:text,relativePath:"/fixture/"+text,sourceID:source.id,sourceName:source.name,kind:"file",size:nil,localURL:nil)],state:fail ? .failed : .completed,isComplete: !fail))
+        emit(ProviderEvent(queryID:queryID,sourceID:source.id,results:fail ? [] : [SearchResult(id:source.id+text,name:text,relativePath:"/fixture/"+text,sourceID:source.id,sourceName:source.name,kind:"file",size:nil,localURL:nil)],state:fail ? .failed : .completed))
     }
 }
 @MainActor private final class FixtureBridge: MyNASBridgeTransport {
@@ -90,7 +90,12 @@ final class NASSearchPipelineTests:XCTestCase {
     @MainActor func testNewQueryRejectsDeliberatelyLateOldEvents() async {
         let p=ScriptProvider(.local,delay:80_000_000),c=SearchCoordinator(providers:[p]);var old=[ProviderEvent](),new=[ProviderEvent]()
         let first=c.search("旧") { old.append($0) };try? await Task.sleep(nanoseconds:10_000_000)
-        let second=c.search("新") { new.append($0) };try? await Task.sleep(nanoseconds:120_000_000)
+        let second=c.search("新") { new.append($0) }
+        // ★ 等待窗口必须覆盖**两段**：旧查询还要跑完它剩下的 ~70 ms，新查询才被放
+        //   进 provider，然后它自己也要 80 ms。旧实现在取消时立刻清空槽位，新查询
+        //   会马上并行开跑，所以 120 ms 就够——但那是「同一来源两个活跃请求」，
+        //   正是 §1.6 要禁止的。这里等 200 ms 是为了等正确的串行行为。
+        try? await Task.sleep(nanoseconds:200_000_000)
         XCTAssertTrue(old.isEmpty);XCTAssertEqual(new.map(\.queryID),[second]);XCTAssertTrue(p.cancelled.contains(first));XCTAssertNotEqual(first,second)
     }
     /// 防抖：连续输入 `o`→`od`→`odoo` 只应产生一次 NAS 查询，而本地来源每次都立即执行。
@@ -113,8 +118,19 @@ final class NASSearchPipelineTests:XCTestCase {
         XCTAssertGreaterThan(events.filter { $0.sourceID=="local_mac" }.count, localAfterFirst)
         // NAS 只在最后一次输入后触发一次。
         XCTAssertEqual(events.filter { $0.sourceID==nasFixtureSource.id }.count, 1)
-        // 3 次输入产生 2 个被取代的旧查询，都应被取消
-        XCTAssertEqual(nas.cancelled.count, 2)
+        // 被取代的旧查询要取消，但**只取消真正提交过的那一份**。
+        //
+        // 旧实现（P3 之前）在 `supersede` 里对全部 provider 无条件 cancel，
+        // 于是防抖窗口内被丢掉的那次输入也会产生一条取消记录 → 这里是 2。
+        // P3 改成按 owner 记「上一轮真正提交的 queryID」，变成 1——但那个 1 仍然
+        // 是**广播**：`o` 那一轮的 queryID 被发给 NAS，而 NAS 从头到尾没收到过
+        // 任何 search（它在 600 ms 防抖窗口内就被 `od` 取代了）。
+        //
+        // 现在取消只作用于 running / cancelling / queues 里**真实存在**的条目，
+        // 所以对 NAS 的取消是 **0**：这条 provider 上根本没有它的请求。
+        // 这不是退化——`provider.cancel` 不保证幂等，给一个从未发出的查询发取消
+        // 既没有意义，还会让「取消了几次」的诊断计数变脏。
+        XCTAssertEqual(nas.cancelled.count, 0)
     }
     /// 回车提交走 search()，必须立即发起，不等防抖窗口。
     @MainActor func testImmediateSearchSkipsDebounce() async {
@@ -190,7 +206,7 @@ final class NASSearchPipelineTests:XCTestCase {
     @MainActor func testLegalZeroCompletesWithoutDegradationAndSeparateBudgets() async throws {
         let b=FixtureBridge(),p=NASSearchProvider(bridge:b,config:nasFixtureConfig(),port:5001);_=try await p.discover();try await p.login(account:"fixture",password:"fixture-only")
         var events=[ProviderEvent]();await p.search("zzz不存在xyz",queryID:UUID()) { events.append($0) }
-        XCTAssertEqual(events.last?.state,.completed);XCTAssertTrue(events.last?.isComplete==true)
+        XCTAssertEqual(events.last?.state,.completed);XCTAssertTrue(events.last?.isTerminal==true)
         XCTAssertEqual(b.messages[0]["requestBudgetMs"] as? Int,30_000);XCTAssertEqual(b.messages[0]["queryBudgetMs"] as? Int,60_000)
         _=try await p.discover();XCTAssertEqual(b.requests.filter{$0=="discover"}.count,1)
     }

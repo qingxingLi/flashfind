@@ -234,7 +234,7 @@ Future<void> main() async {
   //
   // 真机实测证明那条结论只对了一半：`finished=false` 时的 `total` 是
   // **「目前已发现数」，还会继续涨**。示例设备（192.168.1.88:5003，双根
-  // /公司共享文档 + /部门文档，关键词「测试」）10/10 轮：
+  // /示例共享文件夹 + /项目资料，关键词「测试」）10/10 轮：
   //   就绪轮询 limit=1  → total=33~103、finished=false
   //   第一页 limit=200  → total=239、finished=true
   // 于是分页第一条一致性断言必炸 → IncompleteResponse「设备返回的分页数据

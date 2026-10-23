@@ -197,18 +197,76 @@ public struct ProviderEvent: Sendable {
     public let results: [SearchResult]
     public let state: ProviderSearchState
     public let message: String?
-    public let isComplete: Bool
+    /// 结果是否**可能不完整**：达到时间/数量上限、设备侧 truncated、
+    /// 部分目录读不到或跳过。含义只有「结果全不全」，与「请求结没结束」无关。
+    ///
+    /// ★ 这两件事以前挤在同一个字段 `isComplete` 里：本机侧用它表示「结果没收全」，
+    /// 取消路径又把它默认成 `false`，于是同一个 `.cancelled` 终态在「排队时被取消」
+    /// 与「在跑时被取消」两种来源下取值不同。字段拆开后各只剩一个含义。
+    ///
+    /// ★ 名字故意不叫 `truncated`：本机遍历的 warnings 里有「部分目录读不到」
+    /// 「已跳过越界路径」，它们同样意味着结果可能缺项，但都不是「截断」。
+    public let resultsIncomplete: Bool
     public let reportedTotal: Int?
     public let cleanupState: String?
     public let isMetadataUpdate: Bool
-    public init(queryID: UUID, sourceID: String, results: [SearchResult] = [], state: ProviderSearchState, message: String? = nil, isComplete: Bool = false, reportedTotal:Int? = nil, cleanupState:String? = nil, isMetadataUpdate:Bool = false) {
-        self.queryID=queryID;self.sourceID=sourceID;self.results=results;self.state=state;self.message=message;self.isComplete=isComplete;self.reportedTotal=reportedTotal;self.cleanupState=cleanupState;self.isMetadataUpdate=isMetadataUpdate
+
+    /// 本条事件是不是这次 Provider 请求的**终态**。
+    ///
+    /// ★ 由 `state` 与 `isMetadataUpdate` 唯一决定，**不允许调用方传**：
+    /// 能传就能传错，而「同一件事两种取值」正是 v0.7 复审指出的契约矛盾。
+    /// 定义与 `SearchCompletionTracker` 共用这一处，别再在别处重写判据。
+    ///
+    /// 终态 = `completed / cancelled / failed / timedOut / truncated /
+    /// limitedTraversal / degraded / blocked / needsAuth` 之一；`searching`
+    /// 只是「还在跑」，元数据补发（`isMetadataUpdate`）更不是终态。
+    ///
+    /// ★ **枚举契约（1.1.2 冻结）：`ProviderSearchState` 里除 `.searching` 以外
+    /// 的取值全部是终态。** 这条是上面那行实现的**前提**，不是它的结论——
+    /// 以后若给枚举加上非终态的中间状态（`.connecting` / `.waiting` /
+    /// `.retrying` 之类），`state != .searching` 会把它**静默当成终态**，
+    /// 于是「还在等设备回包」被记成「这次搜索结束了」，界面提前收声。
+    /// 加这类取值时必须同步改这一行（改成显式的终态集合），
+    /// 并在 `ProviderTerminalContractTests` 里补一条对应用例。
+    public var isTerminal: Bool { !isMetadataUpdate && state != .searching }
+
+    public init(queryID: UUID, sourceID: String, results: [SearchResult] = [], state: ProviderSearchState, message: String? = nil, resultsIncomplete: Bool = false, reportedTotal:Int? = nil, cleanupState:String? = nil, isMetadataUpdate:Bool = false) {
+        self.queryID=queryID;self.sourceID=sourceID;self.results=results;self.state=state;self.message=message;self.resultsIncomplete=resultsIncomplete;self.reportedTotal=reportedTotal;self.cleanupState=cleanupState;self.isMetadataUpdate=isMetadataUpdate
     }
 }
 @MainActor public protocol SearchProvider: AnyObject {
     var source: SearchSource { get }
+    /// 跑一次搜索。
+    ///
+    /// ★ **终态契约（恰好一次）**：一次 `search` 调用期间、在它 `return` 之前，
+    /// 必须已经发出**恰好一个** `isTerminal` 事件（`completed` / `cancelled` /
+    /// `failed` / `timedOut` / `blocked` / `degraded` …）。
+    ///
+    /// - 正常结束 → 自己的终态；
+    /// - 被 `cancel(queryID:)` 打断 → **仍然要补发 `.cancelled`**，不能只是
+    ///   清掉内部状态然后沉默返回。沉默的后果不是「少一条日志」：上层
+    ///   `SearchCompletionTracker` 会一直把这个来源记在 pending 里，界面
+    ///   永久显示「正在搜索」。
+    /// - 不许发第二个终态：`.cancelled` 之后所有分支都已被
+    ///   `guard active == queryID` 挡住，别在 cancel 与 return 两处各发一次。
     func search(_ text: String, queryID: UUID, emit: @escaping @MainActor (ProviderEvent) -> Void) async
+    /// 带发起方的入口（见 `SearchOwner`）。
+    ///
+    /// ★ 它必须是**协议要求**，不能只是 protocol extension 里的方法：
+    /// 通过 `any SearchProvider` 调用时，非要求的扩展方法走静态派发，
+    /// `NASSearchProvider` 里写的「跨 owner 不取消」实现根本不会被调用——
+    /// 编译期毫无提示，运行时表现为跨 owner 照样互相取消。
+    func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                emit: @escaping @MainActor (ProviderEvent) -> Void) async
     func cancel(queryID: UUID)
+}
+
+extension SearchProvider {
+    /// 默认实现：不知道发起方的 provider（本机、应用程序、测试假件）等价于 GUI 发起。
+    public func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                       emit: @escaping @MainActor (ProviderEvent) -> Void) async {
+        await search(text, queryID: queryID, emit: emit)
+    }
 }
 public enum NASQueryPolicy {
     // Only a contiguous literal containing >=2 Han/Latin/digit characters. No DSM glob.

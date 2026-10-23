@@ -50,7 +50,7 @@ final class OnboardingTests: XCTestCase {
     // MARK: - 从真实配置推导状态
 
     private func source(host: String = "192.168.1.96", username: String = "nasuser",
-                        scopes: [String] = ["/公司共享文档", "/部门文档"],
+                        scopes: [String] = ["/示例共享文件夹", "/项目资料"],
                         name: String = "公司 NAS") -> NASSourceConfig {
         NASSourceConfig(name: name, vendor: .synology, host: host, port: 5001,
                         username: username, scopes: scopes)
@@ -90,8 +90,8 @@ final class OnboardingTests: XCTestCase {
     func testSourceCountsWhenConfiguredEvenIfNotConnected() {
         let configured = state(sources: [source()])
         XCTAssertEqual(configured.networkSourceNames, ["公司 NAS"])
-        // 位置去前导斜杠：`/部门文档` 是 DSM 的写法，不是产品概念。
-        XCTAssertEqual(configured.networkLocations, ["公司共享文档", "部门文档"])
+        // 位置去前导斜杠：`/项目资料` 是 DSM 的写法，不是产品概念。
+        XCTAssertEqual(configured.networkLocations, ["示例共享文件夹", "项目资料"])
     }
 
     /// 地址或账号没填全的来源不算已添加。
@@ -152,7 +152,7 @@ final class OnboardingTests: XCTestCase {
         XCTAssertEqual(lines[1].value, "这台 Mac")
         XCTAssertEqual(lines[2].value, "已开启")
         XCTAssertEqual(lines[3].value, "公司 NAS")
-        XCTAssertEqual(lines[3].detail, "搜索位置：公司共享文档、部门文档")
+        XCTAssertEqual(lines[3].detail, "搜索位置：示例共享文件夹、项目资料")
     }
 
     /// ★ 没加 NAS 不是错误：如实写「尚未添加」，并告诉用户以后在哪加。

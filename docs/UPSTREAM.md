@@ -1,6 +1,6 @@
 # UPSTREAM —— 上游来源、许可证与派生关系
 
-日期：2026-10-19 ｜ 适用版本：闪寻 FlashFind 1.1.1（客户端直连形态）
+日期：2026-10-23 ｜ 适用版本：闪寻 FlashFind 1.1.2（客户端直连形态）
 
 ## 0. 本文件的边界
 
@@ -20,11 +20,11 @@
 
 | 项目 | 事实 |
 | --- | --- |
-| 名称 | 闪寻 FlashFind 1.1.1 |
+| 名称 | 闪寻 FlashFind 1.1.2 |
 | 许可 | Apache License 2.0（全文见 `LICENSE`） |
 | 版权 | Copyright 2026 李青宇 |
 | 形态 | macOS 客户端，直连 NAS，无服务端组件 |
-| 原创范围 | `Sources/`（Swift，含 `FlashFindCore` 与 `FlashFind2App`）、`MyNASCore/` 下除「第 2 节派生文件」以外的全部 Dart 代码、`MyNASCore/bin/harness.dart`、`MyNASCore/native/TrustHTTP.swift` |
+| 原创范围 | `Sources/`（Swift，含 `FlashFindCore`、`FlashFind2App` 与 `FlashFindMCP`）、`MyNASCore/` 下除「第 2 节派生文件」以外的全部 Dart 代码、`MyNASCore/bin/harness.dart`、`MyNASCore/native/TrustHTTP.swift` |
 
 「闪寻」「FlashFind」名称与 `Resources/Brand/` 下的图标**不在** Apache-2.0 授权
 范围内，见 `TRADEMARK.md`。
@@ -94,10 +94,42 @@ SQLite 不要求随附许可声明；此处登记是为了让「仓库内存在�
 | Dart 运行时许可 | 由 Dart SDK 自带 `LICENSE` 文件规定，位于 SDK 安装目录（如 `/opt/homebrew/opt/dart-sdk/libexec/LICENSE`）；本项目未修改 Dart 运行时 |
 | 编译方式 | `dart compile exe bin/harness.dart`（见 `docs/构建与打包.md`） |
 | 是否引入 pub 依赖 | **否**。仓库无 `pubspec.yaml`，全部 Dart 代码只 import `dart:*` 标准库 |
-| Swift 包依赖 | **无**。`Package.swift` 全部依赖为仓库内 target，无任何 `.package(url:)` 外部包 |
+| Swift 包依赖 | **有，2 个直接依赖 + 21 个传递依赖**，见 4.1 节（1.1.2 起引入） |
 
-> 发布二进制时，Dart 运行时的许可声明由 Dart SDK 许可覆盖。若未来引入任何 pub
-> 依赖或 Swift 包，必须先在此登记版本、内容哈希与全部传递依赖的许可。
+> 发布二进制时，Dart 运行时的许可声明由 Dart SDK 许可覆盖。
+
+### 4.1 Swift 包依赖（1.1.2 起）
+
+1.1.2 增加「接入 AI 客户端」功能，协议层用官方 MCP Swift SDK，它又带进
+swift-log 与 NIO 生态。**这些包以静态链接方式成为 `flashfind-mcp` 二进制的一部分，
+不随仓库分发源码**，因此按 Apache-2.0 §4 在 `NOTICE` 与本节登记来源与版本。
+
+| 包 | 版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| [modelcontextprotocol/swift-sdk](https://github.com/modelcontextprotocol/swift-sdk) | `exact 0.12.1` | Apache-2.0（**MIT→Apache-2.0 过渡期**，详见下） | MCP 协议实现 |
+| [apple/swift-log](https://github.com/apple/swift-log) | `exact 1.15.1` | Apache-2.0 | `SanitizingTransport` 需要的 `Logger` |
+
+> `swift-sdk` 的 `LICENSE` 原文声明：该项目正从 MIT 迁移到 Apache-2.0；已取得再许可
+> 同意的贡献按 Apache-2.0，尚未同意的部分仍为 MIT。两种许可都允许本项目以 Apache-2.0
+> 分发并静态链接，义务均已在 `NOTICE` 中履行。
+
+传递依赖 21 个（全部 Apache-2.0，除注明者）：`async-http-client` 1.36.2、
+`swift-algorithms` 1.2.1、`swift-asn1` 1.7.3、`swift-async-algorithms` 1.1.7、
+`swift-atomics` 1.3.1、`swift-certificates` 1.21.0、`swift-collections` 1.6.0、
+`swift-crypto` 4.5.2、`swift-distributed-tracing` 1.5.0、
+`swift-http-structured-headers` 1.7.0、`swift-http-types` 1.8.0、`swift-nio` 2.104.0、
+`swift-nio-extras` 1.35.1、`swift-nio-http2` 1.46.0、`swift-nio-ssl` 2.37.5、
+`swift-nio-transport-services` 1.28.0、`swift-numerics` 1.1.1、`swift-service-context` 1.3.0、
+`swift-service-lifecycle` 2.12.1、`swift-system` 1.8.1、
+`eventsource` 1.5.1（**MIT**）。
+
+完整清单与各自解析到的版本见仓库根的 `Package.resolved`（已入库；构建与测试都带
+`--only-use-versions-from-resolved-file`，不会在别人机器上悄悄漂移）。
+每个包的许可全文在其 GitHub 仓库根的 `LICENSE` / `LICENSE.txt`。
+
+> 本条登记是**发版前置条件**：以后新增任何 `.package(url:)` 依赖，必须同时更新本节与
+> `NOTICE`。此前本节一直写着「Swift 包依赖：无」，1.1.2 引入 MCP SDK 后这句话就不再
+> 成立——文档与实现脱节，在这里的代价是许可义务没被履行。
 
 ---
 
@@ -125,7 +157,10 @@ AI 生成内容的著作权归属在现行法律下尚无定论；本项目不�
 
 登记这些是为了避免下游误判，同样是可核实事实：
 
-1. 本仓库**没有** vendored 的第三方 Swift / Dart 包源码（除第 2、3 节所列）；
+1. 本仓库**没有** vendored 的第三方 Swift / Dart 包源码（除第 2、3 节所列）。
+   第 4.1 节登记的 Swift 包由 SwiftPM 按 `Package.resolved` 拉取，源码不进本仓库；
+   它们被静态链接进产物，所以**在二进制里存在、在源码树里不存在**——这两件事都要看清楚，
+   只查源码树会得出「没有第三方代码」的错误结论；
 2. 本仓库**不含**飞牛（fnOS）REST 适配器的实现代码。该实现曾移植自上游并封存，
    现已删除：真实设备确认原生文件搜索使用 WebSocket + HMAC，而非那份 REST 实现
    假设的 HTTP 管理接口。历史版本仅保留在内部 Git 历史中，不随公开仓发布；

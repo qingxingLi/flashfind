@@ -232,7 +232,7 @@ public enum DeviceMerger {
             var keys = Set(item.serials.compactMap { normalizeKey($0) })
             if let mac = item.mac, let normalized = normalizeKey(mac) { keys.insert(normalized) }
             // ★ Synology 自述里的序列号/MAC 也是身份键。
-            //   实测 DS1621+：.88 只有 Synology 自述（序列号 SNFAKEDSM0001、MAC），
+            //   实测 DS1621+：.88 只有 Synology 自述（序列号 FAKE000000001、MAC），
             //   .152 只有 SSDP（serialNumber 是同一个值）——两边不同协议、不同 IP，
             //   靠这两个键才能归成一台。少了它，三块网卡就是「三台 NAS」。
             if let serial = item.synology?.serial, let normalized = normalizeKey(serial) {

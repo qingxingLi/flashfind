@@ -26,7 +26,13 @@ extension AppModel {
     func editSource(_ id: String) { wizard.editSource(id) }
     @discardableResult
     func saveDraft(rebuildProviders: Bool = true) -> Bool { wizard.saveDraft(rebuildProviders: rebuildProviders) }
-    func removeSource(_ id: String) { wizard.removeSource(id) }
+    func removeSource(_ id: String) {
+        wizard.removeSource(id)
+        // 来源删掉之后，AI 授权里残留的 id 也要一起清掉。
+        // 不清的后果不是「多搜一个」：`list_sources` 会把一个永远搜不到的来源
+        // 报给 Agent，然后 `locate` 每次都对它报 `source_unavailable`。
+        aiAccess.forgetSources(notExisting: aiAccessExistingSourceIDs)
+    }
     func setDraftRememberPassword(_ value: Bool) { wizard.setDraftRememberPassword(value) }
     func setDraftPort(_ text: String) { wizard.setDraftPort(text) }
     func setDraftBasePath(_ text: String) { wizard.setDraftBasePath(text) }

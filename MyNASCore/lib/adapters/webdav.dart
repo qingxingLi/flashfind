@@ -149,6 +149,7 @@ class _WebdavEntry {
     required this.name,
     required this.isDir,
     required this.size,
+    required this.sizeKnown,
     required this.mimeType,
     required this.eTag,
     this.modifiedTime,
@@ -159,6 +160,9 @@ class _WebdavEntry {
   final String name;
   final bool isDir;
   final int size;
+  /// 设备是否给出了大小。见 `_WebdavEntry` 构造处的说明：
+  /// 「没给」不等于「0 字节」。
+  final bool sizeKnown;
   final String mimeType;
   final String eTag;
   final DateTime? modifiedTime;
@@ -675,6 +679,7 @@ class WebDavAdapter implements NasBrandAdapter {
       path: _stripTrailingSlash(f.path),
       isDirectory: f.isDir,
       size: f.size,
+      sizeKnown: f.sizeKnown,
       modifiedTime: f.modifiedTime,
       createdTime: f.createdTime,
       extension: f.isDir ? null : PathCompat.extension(f.name),
@@ -747,6 +752,12 @@ class WebDavAdapter implements NasBrandAdapter {
             // 上游: xml.dart:66-94 —— 按 mimeType / size / eTag / cTime / mTime 顺序取字段。
             final mimeType = _firstText(prop, 'getcontenttype') ?? '';
             var size = 0;
+            // ★ 与上游的有意差异：上游把「设备没给 getcontentlength」直接写成 0，
+            //   `FileItem.size` 是非空 int，于是「未知」与「真的是空文件」在过了
+            //   适配器这一刻就再也分不开（6.4b-0 的直查探针实测到这一点）。
+            //   `get_metadata` 契约里 `size_bytes` 是**可空**的，null ≠ 0，
+            //   所以这里把「有没有拿到」这个事实一起带出去。
+            var sizeKnown = false;
             if (!isDir) {
               final sizeText = _firstText(prop, 'getcontentlength');
               if (sizeText != null) {
@@ -757,6 +768,7 @@ class WebDavAdapter implements NasBrandAdapter {
                   );
                 }
                 size = parsed;
+                sizeKnown = true;
               }
             }
             final eTag = _firstText(prop, 'getetag') ?? '';
@@ -777,6 +789,7 @@ class WebDavAdapter implements NasBrandAdapter {
                 name: name,
                 isDir: isDir,
                 size: size,
+                sizeKnown: sizeKnown,
                 mimeType: mimeType,
                 eTag: eTag,
                 modifiedTime: modifiedTime,

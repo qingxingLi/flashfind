@@ -43,7 +43,9 @@ public final class NASDiagnosticsController {
         let row: [String: Any] = ["sequence": eventSequence, "monotonicSeconds": uptime(),
                                   "queryID": event.queryID.uuidString, "sourceID": event.sourceID,
                                   "state": event.state.rawValue, "batchCount": event.results.count,
-                                  "isComplete": event.isComplete, "isMetadataUpdate": event.isMetadataUpdate,
+                                  "isTerminal": event.isTerminal,
+                                  "resultsIncomplete": event.resultsIncomplete,
+                                  "isMetadataUpdate": event.isMetadataUpdate,
                                   "reportedTotal": event.reportedTotal as Any? ?? NSNull(),
                                   "cleanupState": event.cleanupState as Any? ?? NSNull()]
         appendAcceptance(row, file: "provider-events")

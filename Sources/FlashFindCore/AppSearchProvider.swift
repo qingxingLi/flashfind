@@ -35,7 +35,7 @@ public final class AppSearchProvider: SearchProvider {
         let parsed = SearchQueryParser.parse(text)
         guard !parsed.hasFormatFilter, !parsed.keywords.isEmpty else {
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, results: [],
-                               state: .completed, isComplete: true, reportedTotal: 0))
+                               state: .completed, reportedTotal: 0))
             return
         }
         let hits = AppCatalog.matches(scan(), query: parsed.keywords, limit: limit)
@@ -55,7 +55,6 @@ public final class AppSearchProvider: SearchProvider {
                                             rank: AppCatalog.rank(name: candidate.name, query: parsed.keywords))
                            },
                            state: .completed,
-                           isComplete: true,
                            reportedTotal: hits.count))
     }
 }

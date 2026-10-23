@@ -538,6 +538,67 @@ final class AppLayerStructureTests: XCTestCase {
                       "激活要写在 runModal 之前")
     }
 
+    /// ★ 向导里「设备要动态码」必须走同一扇弹窗，且拿到码之后自己接着连。
+    ///
+    /// 2026-10-22 用户要求「全部改成登录时弹 OTP 弹窗的形式」。
+    /// 向导以前是把折叠区展开让用户回表单再点一次「连接」——多一步不说，
+    /// 用户还会以为刚才那次连接已经作废。现在与详情页「重新登录…」
+    /// 共用 `otpPrompter`（同一扇窗、同一套文案），拿到码直接 `connectDraft()`。
+    ///
+    /// ★ 弹窗必须放在**独立 Task** 里：失败收尾是 `performConnect` 的最后一步，
+    /// 模态弹窗就地弹会把本次尝试的收尾（按钮解锁、`draftBusy` 复位）卡在半路。
+    func testWizardPromptsForOTPAndContinuesOnItsOwn() throws {
+        let controller = try appSource("NASSourceWizardController.swift")
+        let region = controller.range(of: "private func promptForOTPThenReconnect(sourceName: String)")
+        XCTAssertNotNil(region, "向导必须有「弹窗问码 → 自动续连」这条路径")
+        let tail = String(controller[region!.lowerBound...])
+        let end = tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
+        let body = String(tail[tail.startIndex..<end])
+
+        XCTAssertTrue(body.contains("Task {"), "弹窗必须在独立 Task 里，别卡住本次尝试的收尾")
+        XCTAssertTrue(body.contains("otpPrompter?("),
+                      "必须走注入的那扇弹窗，向导自己再造一个就会走出两套文案")
+        XCTAssertTrue(body.contains("self.nativeNASOTP = code"),
+                      "拿到的码要落进模型，否则 connectDraft 读不到")
+        XCTAssertTrue(body.contains("connectDraft()"),
+                      "拿到码必须自动接着连，不能让用户回表单再点一次「连接」")
+        XCTAssertTrue(body.contains("otpRetryHint"),
+                      "用户点取消时，状态行要补上「下一次怎么把它叫回来」")
+    }
+
+    /// ★ 失败收尾必须真的去叫那扇弹窗 —— 判定走 Core，不能自己拼字符串。
+    ///
+    /// ★ 断言必须锁到**调用点**（`sourceName: config.displayName`）：
+    /// 截断点 `\n    func ` 吞不下下一行 `    private func promptForOTPThenReconnect…`
+    /// 的定义，body 会一直延伸到那扇弹窗的**定义体**里去。只断言
+    /// `promptForOTPThenReconnect(sourceName:` 的话，**定义行本身就把它满足了**——
+    /// 调用点删没删测试都绿（2026-10-22 批跑 MISS 实测，靠单条变异复现定位）。
+    func testWizardFailurePromptsWhenTheDeviceNeedsOTP() throws {
+        let controller = try appSource("NASSourceWizardController.swift")
+        let region = controller.range(of: "private func finishFailedAttempt(")
+        XCTAssertNotNil(region, "finishFailedAttempt 必须存在")
+        let tail = String(controller[region!.lowerBound...])
+        let end = tail.range(of: "\n    private func promptForOTPThenReconnect")?.lowerBound
+            ?? tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
+        let body = String(tail[tail.startIndex..<end])
+        XCTAssertTrue(body.contains("ConnectionFailureText.isOTPRequired(error)"),
+                      "「是不是要动态码」只能由 Core 判定")
+        XCTAssertTrue(body.contains("promptForOTPThenReconnect(sourceName: config.displayName)"),
+                      "判定成立就必须弹窗，不能只写一句状态就完事")
+    }
+
+    /// ★ 表单里不能再有常驻的动态码输入框。
+    ///
+    /// 动态码是**一次性**的，不属于「这台 NAS 的配置」。摆在表单里，
+    /// 用户会先去填它，而多数账号根本用不到——那正是改弹窗式的原因。
+    func testTheWizardFormHasNoInlineOTPField() throws {
+        let view = try appSource("NASSourceWizardView.swift")
+        let code = codeOnly(view)
+        XCTAssertFalse(code.contains("nas-otp"), "表单里不该再有动态码输入框")
+        XCTAssertFalse(code.contains("nativeNASOTP"), "表单不该再绑定动态码字段")
+        XCTAssertFalse(code.contains("DisclosureGroup"), "动态码不再用折叠区承载")
+    }
+
     /// ★ 「重新登录…」在本机没有保存密码时必须真的打开向导窗口。
     ///
     /// `openReconnectWizard` 早先只做 `editSource(id)` + 写一句状态文案，
@@ -1886,12 +1947,44 @@ final class AppLayerStructureTests: XCTestCase {
         guard let changedQuery = braceBlock(after: "func changedQuery(", in: code) else {
             return XCTFail("找不到 changedQuery，下面的断言会假绿")
         }
-        XCTAssertTrue(changedQuery.contains("localProvider.folders=localFolders"),
+        // ★ 2026-10-21（6.3b-4）：赋值搬进了 `applyLocalScopeToProvider`。
+        //   MCP 执行侧也要套同一份范围，两处各写一遍就会出现「GUI 套了、Agent 没套」。
+        XCTAssertTrue(changedQuery.contains("applyLocalScopeToProvider()"),
+                      "搜索前必须把当前的本机范围交给 provider")
+
+        guard let apply = braceBlock(after: "func applyLocalScopeToProvider(", in: code) else {
+            return XCTFail("找不到 applyLocalScopeToProvider，下面的断言会假绿")
+        }
+        XCTAssertTrue(apply.contains("localProvider.folders = localFolders"),
                       "搜索前必须把当前选的文件夹交给 provider")
-        XCTAssertTrue(changedQuery.contains("localProvider.mode=localSearchMode"),
+        XCTAssertTrue(apply.contains("localProvider.mode = localSearchMode"),
                       "搜索方式必须和文件夹一起给，否则 provider 判不出该走哪条路")
-        // 两条必须同处一次赋值：分开写在别处的话，改了一个另一个还是旧的。
-        XCTAssertTrue(changedQuery.contains("localProvider.folders=localFolders;localProvider.mode=localSearchMode"),
-                      "方式要与文件夹在同一处装配，避免只有定义、没有调用点")
+        // 两条必须同处一次装配：分开写在别处的话，改了一个另一个还是旧的。
+        XCTAssertTrue(
+            apply.contains("localProvider.folders = localFolders\n        localProvider.mode = localSearchMode"),
+            "方式要与文件夹在同一处装配，避免只有定义、没有调用点")
+        // MCP 那条调用点由产品级跨进程 E2E 守（`ProductAssemblyE2ETests`）：
+        // 这里再断言一遍会让「删掉 MCP 那边的调用」有两条用例同时红，
+        // 红证就归因不到唯一一条了。
+    }
+
+    /// ★ 测试启动钩子必须 **DEBUG-only**。
+    ///
+    /// 它能让进程绑到任意 socket 路径、并读一组内存偏好。这些在开发构建里是
+    /// 测试设施，在**发布二进制里就是「谁设了环境变量谁说了算」**——所以整个文件
+    /// 包在 `#if DEBUG` 里，发布构建根本不含这个符号，任何漏在外面的引用都会
+    /// 在 release 编译时直接失败。
+    func testTheE2ELaunchHookCannotReachReleaseBuilds() throws {
+        let hook = try appSource("DebugSupport/E2ELaunchMode.swift")
+        XCTAssertTrue(hook.hasPrefix("#if DEBUG"),
+                      "整个文件必须包在 `#if DEBUG` 里，否则发布构建里也有这个符号")
+        XCTAssertTrue(hook.contains("FF_E2E_LAUNCH"), "启动开关的名字只在这里读")
+
+        // 注释里的那句说明不算：只看代码行。
+        let authority = codeOnly(try appSource("MCPAuthority.swift"))
+        let marker = try XCTUnwrap(authority.range(of: "FF_AUTHORITY_SOCKET"),
+                                   "socket 覆盖不见了；它若被删，6.3b-4 的 E2E 会静默失败")
+        XCTAssertTrue(authority[..<marker.lowerBound].contains("#if DEBUG"),
+                      "socket 覆盖必须夹在 `#if DEBUG` 里")
     }
 }

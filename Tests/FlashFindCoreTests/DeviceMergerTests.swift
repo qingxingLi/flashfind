@@ -23,7 +23,7 @@ final class DeviceMergerTests: XCTestCase {
                                         dsmHTTPSPort: 5003,
                                         dsmVersion: "7.3.2",
                                         model: "DS1621+",
-                                        serial: "SNFAKEDSM0001")
+                                        serial: "FAKE000000001")
         var primary = DeviceEvidence(host: "192.168.1.88", sources: [.synologyDiscovery, .arp])
         primary.mac = "02:00:5E:00:00:88"
         primary.synology = synology
@@ -34,7 +34,7 @@ final class DeviceMergerTests: XCTestCase {
                                     ssdp: SSDPIdentity(location: "http://192.168.1.152:5000/description.xml",
                                                        manufacturer: "Synology",
                                                        modelName: "DS1621+",
-                                                       serialNumber: "SNFAKEDSM0001"),
+                                                       serialNumber: "FAKE000000001"),
                                     additionalHosts: ["192.168.3.4"])
         let third = DeviceEvidence(host: "192.168.3.4", sources: [.arp])
 
@@ -96,7 +96,7 @@ final class DeviceMergerTests: XCTestCase {
     /// 没有共同点的两台设备各是各的。
     func testDifferentDevicesStaySeparate() {
         let nas = DeviceEvidence(host: "192.168.1.96", mac: "02:00:5E:00:00:96",
-                                 serials: ["SNFAKEDSM0002"], sources: [.synologyDiscovery])
+                                 serials: ["FAKE000000002"], sources: [.synologyDiscovery])
         let macBook = DeviceEvidence(host: "192.168.1.92", mac: "02:00:5E:00:00:11",
                                      serviceTypes: ["_smb._tcp"], sources: [.bonjour])
         let merged = DeviceMerger.merge([nas, macBook])
@@ -109,7 +109,7 @@ final class DeviceMergerTests: XCTestCase {
         synology.synology = SynologyResponse(serverName: "demo-synology",
                                              mac: "02:00:5E:00:00:96",
                                              model: "DS124",
-                                             serial: "SNFAKEDSM0002")
+                                             serial: "FAKE000000002")
         var ssdp = DeviceEvidence(host: "192.168.1.96", sources: [.ssdp])
         ssdp.ssdp = SSDPIdentity(manufacturer: "Synology", modelName: "DS124")
         let arp = DeviceEvidence(host: "192.168.1.96", mac: "02:00:5E:00:00:96", sources: [.arp])
@@ -194,7 +194,7 @@ final class DeviceMergerTests: XCTestCase {
                                     dsmHTTPSPort: 5003,
                                     dsmVersion: "7.3.2",
                                     model: "DS1621+",
-                                    serial: "SNFAKEDSM0001")
+                                    serial: "FAKE000000001")
         let forward = DeviceMerger.merge([
             DeviceEvidence(host: "192.168.1.88", sources: [.synologyDiscovery], synology: sparse),
             DeviceEvidence(host: "192.168.1.88", sources: [.synologyDiscovery], synology: rich),
@@ -224,7 +224,7 @@ final class DeviceMergerTests: XCTestCase {
     func testMergeIsDeterministicRegardlessOfInputOrder() {
         let a = DeviceEvidence(host: "192.168.1.88", mac: "02:00:5E:00:00:88", sources: [.arp])
         let b = DeviceEvidence(host: "192.168.1.152", mac: "02:00:5E:00:00:88", sources: [.arp])
-        let c = DeviceEvidence(host: "192.168.1.96", serials: ["SNFAKEDSM0002"], sources: [.arp])
+        let c = DeviceEvidence(host: "192.168.1.96", serials: ["FAKE000000002"], sources: [.arp])
         let forward = DeviceMerger.merge([a, b, c])
         let backward = DeviceMerger.merge([c, b, a])
         XCTAssertEqual(forward, backward)

@@ -102,6 +102,7 @@ class FileItem {
     required this.path,
     required this.isDirectory,
     required this.size,
+    this.sizeKnown = true,
     this.modifiedTime,
     this.createdTime,
     this.mimeType,
@@ -117,6 +118,14 @@ class FileItem {
   final String path;
   final bool isDirectory;
   final int size;
+  /// 设备是否给出了大小。
+  ///
+  /// ★ 与上游的有意差异（6.4b-1）：上游 `FileItem.size` 是非空 int，适配器把
+  ///   「设备没给」折成 0，于是「未知大小」与「真的是空文件」在过了适配器之后
+  ///   再也分不开——而 `get_metadata` 的契约是 `size_bytes` 可空、null ≠ 0。
+  ///   这个标记把「有没有拿到」这件事保留到序列化那一步，由 `row()` 决定输出
+  ///   null 还是 0。**不做**在别处猜（比如把 0 当成未知）：那正是它要防的错误。
+  final bool sizeKnown;
   final DateTime? modifiedTime;
   final DateTime? createdTime;
   final String? mimeType;

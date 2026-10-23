@@ -50,7 +50,15 @@ parser.add_argument('--app-from-zip',
                          '主二进制仍有 1914 字节差异（LC_UUID 一类）。而「只改 DMG 包装」不该换掉'
                          '用户已经装过的那份二进制：同版本号下出现两个不同的二进制，比不升级更糟。'
                          '此模式下 zip 原样带入，只重做 DMG。')
+parser.add_argument('--identity', default='-',
+                    help='codesign 身份。默认 "-" = ad-hoc（本机没有 Developer ID 证书时的既定做法，'
+                         '包能用但不经公证，用户首次打开要右键「打开」）。'
+                         '证书到位后传 "Developer ID Application: 名字 (TEAMID)"：脚本会自动给每个'
+                         '签名加上 hardened runtime 与安全时间戳，公证与 staple 仍在脚本外用 notarytool 走。'
+                         '★ 不做 --deep 递归签名：它会把不该被签的东西一起签掉，Apple 已明确不推荐。')
 args = parser.parse_args()
+if args.identity != '-' and not args.identity.strip():
+    raise SystemExit('--identity must be "-" (ad-hoc) or a real codesign identity')
 out = Path(args.output).resolve()
 scratch = Path(args.scratch).resolve() if args.scratch else None
 tmp_alias = Path(args.temporary_alias) if args.temporary_alias else None
@@ -86,7 +94,11 @@ def sha(path):
 
 def inputs():
     glyph_paths = [client / 'Resources/Brand' / n for n in SEARCH_GLYPH_NAMES]
-    paths = list((client / 'Sources').rglob('*')) + list((client / 'MyNASCore').rglob('*')) + [client / 'scripts/build_mynas_resources.py', client / 'Package.swift', client / 'Resources/Packaging/Info.plist', client / 'Resources/Brand/ShanXunMenuIcon.png', client / 'Resources/Brand/ShanXunMenuIcon@2x.png', client / 'Resources/dmg-ds-store', Path(__file__).resolve()] + glyph_paths
+    paths = list((client / 'Sources').rglob('*')) + list((client / 'MyNASCore').rglob('*')) + [client / 'scripts/build_mynas_resources.py', client / 'Package.swift', client / 'Resources/Packaging/Info.plist',
+             # HelperInfo.plist 是**链接期输入**（嵌进 flashfind-mcp 的 __TEXT,__info_plist），
+             # 不进这份清单的话，「只改 Helper 版本号」会被判成「源码没变」而漏掉重新构建。
+             client / 'Resources/Packaging/HelperInfo.plist',
+             client / 'Resources/Brand/ShanXunMenuIcon.png', client / 'Resources/Brand/ShanXunMenuIcon@2x.png', client / 'Resources/dmg-ds-store', Path(__file__).resolve()] + glyph_paths
     if icon:
         paths.append(icon)
     return {str(p.relative_to(project)): sha(p) for p in sorted(paths) if p.is_file()}
@@ -102,6 +114,116 @@ def run(command, name, required=True, env=None):
     if required and result.returncode:
         raise SystemExit(name + ' failed; see log')
     return result
+
+
+# ---- MCP Helper（Phase 10）------------------------------------------------
+# 打包后叫 `flashfind-mcp`，只放在 `Contents/Helpers/` 一处。名字在这里定一次，
+# 组装、签名、目录核对、证据记录都引用它——四处各写一遍字面量，改一处漏三处。
+HELPER_NAME = 'flashfind-mcp'
+
+
+def helper_packaging_identity():
+    """两份 plist 必须同版本；返回 Helper 的那份字典。
+
+    链接期嵌进 `flashfind-mcp` 的是 `Resources/Packaging/HelperInfo.plist`，它一旦
+    与主 `Info.plist` 分叉，发布出去的 Helper 会对着发布版本报一个**错版本号**——
+    而这在本机完全看不出来：编译成功、`swift build` 0 warning、单元测试全绿，
+    只有客户端握手时那行 `serverInfo.version` 是错的。所以构建前先硬卡。
+    """
+    app_info = plistlib.loads((client / 'Resources/Packaging/Info.plist').read_bytes())
+    helper_info = plistlib.loads((client / 'Resources/Packaging/HelperInfo.plist').read_bytes())
+    for key in ('CFBundleShortVersionString', 'CFBundleVersion'):
+        if app_info.get(key) != helper_info.get(key):
+            raise SystemExit('HelperInfo.plist %s=%r does not match Info.plist %r; '
+                             'the two files must move together' % (key, helper_info.get(key), app_info.get(key)))
+    if helper_info.get('CFBundleExecutable') != HELPER_NAME:
+        raise SystemExit('HelperInfo.plist CFBundleExecutable must be %r' % HELPER_NAME)
+    return helper_info
+
+
+def _otool_section_bytes(binary, segment, section):
+    """取 Mach-O 某个 section 的原始字节。
+
+    不用 `otool -s … -X | xxd` 这类管道：`-X` 只去掉表头，行首地址仍然在，
+    而且数据按 4 字节一组**小端字**打印（`6d783f3c` 实际是 `3c 3f 78 6d`）。
+    所以按字段解析、逐字段反转字节序。
+    """
+    listing = subprocess.run(['otool', '-l', str(binary)],
+                             stdout=subprocess.PIPE).stdout.decode('utf-8', 'replace')
+    if ('sectname ' + section) not in listing or ('segname ' + segment) not in listing:
+        raise SystemExit('no (%s,%s) section in %s' % (segment, section, binary))
+    dump = subprocess.run(['otool', '-s', segment, section, '-X', str(binary)],
+                          stdout=subprocess.PIPE).stdout.decode('utf-8', 'replace')
+    out = bytearray()
+    for line in dump.splitlines():
+        for field in line.split()[1:]:      # 第一个字段是地址
+            out += bytes.fromhex(field)[::-1]
+    return bytes(out)
+
+
+def embedded_info_plist(binary):
+    """从 `__TEXT,__info_plist` 解出嵌入的 plist。
+
+    为什么要对着**二进制**验一次，而不是直接信 `HelperInfo.plist`：`-sectcreate`
+    一旦没生效（某个环节把 linkerSettings 丢了、或链接器换了参数顺序），产出的
+    二进制看起来完全正常——能跑、能握手、六个 Tool 都在——只是 `Bundle.main`
+    悄悄回落成 `0.0.0-dev`。那是最难在用户机器上定位的一类缺陷。
+    """
+    raw = _otool_section_bytes(binary, '__TEXT', '__info_plist')
+    end = raw.find(b'</plist>')
+    if end >= 0:
+        raw = raw[:end + len(b'</plist>')]
+    return plistlib.loads(raw)
+
+
+def verify_helper_binary(binary, expected):
+    """对将要进包的那个 Helper 做身份自检，返回证据字典。"""
+    embedded = embedded_info_plist(binary)
+    if embedded.get('CFBundleShortVersionString') != expected.get('CFBundleShortVersionString'):
+        raise SystemExit('embedded Helper version %r != expected %r'
+                         % (embedded.get('CFBundleShortVersionString'), expected.get('CFBundleShortVersionString')))
+    if embedded.get('CFBundleVersion') != expected.get('CFBundleVersion'):
+        raise SystemExit('embedded Helper build %r != expected %r'
+                         % (embedded.get('CFBundleVersion'), expected.get('CFBundleVersion')))
+    return {'embedded_version': embedded['CFBundleShortVersionString'],
+            'embedded_build': embedded['CFBundleVersion'],
+            'embedded_identifier': embedded.get('CFBundleIdentifier'),
+            'sha256': sha(binary), 'bytes': binary.stat().st_size}
+
+
+def verify_helpers_directory(app):
+    """`Contents/Helpers/` 里**只允许** flashfind-mcp。
+
+    Phase 10 的硬 Gate。开发期的几个 smoke / CLI 入口一个都不许跟进包：它们能
+    起真实的权威端监听、能直连 socket，跟着产品发出去等于给每个用户附一个
+    绕过设置的调试入口。
+    ★ 这条按**目录内容枚举**判，不按「脚本里有没有出现某个名字」判：名字扫描
+      只能证明没人手滑写了字面量，证明不了别处（比如将来某个 install 步骤）没把它
+      搬进来。真正的闸是「组装完打开包数一遍」。
+    """
+    helpers = app / 'Contents' / 'Helpers'
+    entries = sorted(p.name for p in helpers.iterdir())
+    if entries != [HELPER_NAME]:
+        raise SystemExit('Contents/Helpers must contain exactly %r, found %r' % (HELPER_NAME, entries))
+    if not (helpers / HELPER_NAME).is_file():
+        raise SystemExit('Contents/Helpers/%s is not a regular file' % HELPER_NAME)
+    return entries
+
+
+def sign_arguments(path):
+    """一个路径的 codesign 参数。
+
+    ★ 绝不用 `--deep`：它把签名一次性递归到整棵目录，于是「哪个东西被签成了
+      什么身份」就没人分得清，Apple 也明确不推荐用它做签名策略。这里逐个签，
+      Helper 与 MyNAS 的两个原生组件各自被显式签一次，主 App 最后签。
+    ★ 非 ad-hoc 时才加 hardened runtime 与时间戳：公证要求这两项，而 ad-hoc
+      签名不需要（也不该伪造出一个"可以公证"的样子）。
+    """
+    flags = ['codesign', '--force', '--sign', args.identity]
+    if args.identity != '-':
+        flags += ['--options', 'runtime', '--timestamp']
+    return flags + [str(path)]
+
 
 
 def app_identity(info):
@@ -289,6 +411,11 @@ def repack_from_zip():
         raise SystemExit('reused app is named %s, identity says %s.app' % (source_app.name, app_name))
     app = out / source_app.name
     shutil.copytree(source_app, app)
+    # 「原样搬过来」也要核一遍：1.1.2 起 `Contents/Helpers/flashfind-mcp` 是对外承诺，
+    # 拿一份缺 Helper 的旧 zip 重做 DMG，会做出一个「AI 设置页告诉你路径、路径却是空」的包。
+    record['helper'] = {'path_in_app': 'Contents/Helpers/' + HELPER_NAME,
+                        'entries': verify_helpers_directory(app),
+                        'sha256': sha(app / 'Contents/Helpers' / HELPER_NAME)}
     record.update(version=version, build=build_number, app=str(app),
                   channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0')
     record['app_source'] = {
@@ -340,7 +467,15 @@ env.update(CLANG_MODULE_CACHE_PATH=str(scratch.parent / 'clang-cache'), SWIFT_MO
 # 编译期临时文件留在系统默认临时目录；构建输入输出仍全部约束在项目内。
 record['build_environment'] = {key: env[key] for key in ('CLANG_MODULE_CACHE_PATH', 'SWIFT_MODULE_CACHE_PATH')}
 record['tmpdir_kept_default'] = env.get('TMPDIR', '')
-run(['swift', 'build', '--package-path', str(client), '--scratch-path', str(scratch), '-c', 'release', '--disable-sandbox'], 'compile', env=env)
+# ★ `--only-use-versions-from-resolved-file`：1.1.2 起依赖官方 MCP SDK，
+#   它的 manifest 里有 `branch: "main"` 的依赖（不可复现）。发布构建必须按
+#   提交在仓里的 Package.resolved 取版本；解析结果与文件不符就失败退出，
+#   而不是让同一次 commit 在不同日期构建出不同依赖图（§12 的可复现要求）。
+# ★ Helper 的身份必须在**链接之前**核对：嵌进二进制的是 HelperInfo.plist，
+#   两份分叉时链接照样成功，错误只会在客户端握手时露出来。
+helper_info = helper_packaging_identity()
+run(['swift', 'build', '--package-path', str(client), '--scratch-path', str(scratch), '-c', 'release',
+     '--disable-sandbox', '--only-use-versions-from-resolved-file'], 'compile', env=env)
 record['sources_after'] = inputs()
 if record['sources_before'] != record['sources_after']:
     save(); raise SystemExit('Source changed during compile; artifact not packaged')
@@ -353,6 +488,24 @@ macos.mkdir(parents=True)
 (app / 'Contents/Resources').mkdir()
 shutil.copyfile(binary, macos / 'FlashFind2App')
 (macos / 'FlashFind2App').chmod(0o755)
+
+# MCP Helper：`Contents/Helpers/flashfind-mcp`。
+#
+# ★ 这个路径是**对外承诺**——AI 设置页「接入提示词」直接把它写给用户去填进
+#   客户端配置（`MCPIntegrationPrompt.helperPath`）。所以它必须在最终 .app 里
+#   真实存在；文案里写成肯定句的那一刻，这里就成了可被用户当场证伪的断言。
+# ★ 组装顺序固定：先验二进制里嵌的版本 → 再复制进包 → 签 Helper → 最后签主 App。
+#   签完之后不许再往二进制里塞任何东西，那会让签名失效。
+helper_binary = scratch / 'release/FlashFindMCP'
+if not helper_binary.is_file():
+    save(); raise SystemExit('helper binary missing: ' + str(helper_binary))
+record['helper'] = verify_helper_binary(helper_binary, helper_info)
+helpers = app / 'Contents/Helpers'
+helpers.mkdir(parents=True)
+shutil.copyfile(helper_binary, helpers / HELPER_NAME)
+(helpers / HELPER_NAME).chmod(0o755)
+record['helper']['path_in_app'] = 'Contents/Helpers/' + HELPER_NAME
+record['helper']['entries'] = verify_helpers_directory(app)
 info = plistlib.loads((client / 'Resources/Packaging/Info.plist').read_bytes())
 if info.get('FlashFindUIOnlyPreview'):
     raise SystemExit('Refusing to package UI fixture app as production')
@@ -419,11 +572,17 @@ if leaked:
 record['app_file_count'] = sum(1 for p in app.rglob('*') if p.is_file())
 record['app_bytes'] = sum(p.stat().st_size for p in app.rglob('*') if p.is_file())
 for component in ('bin/mynas-core', 'native/TrustHTTP'):
-    run(['codesign', '--force', '--sign', '-', str(app / 'Contents/Resources/MyNAS' / component)], 'sign-' + Path(component).name)
+    run(sign_arguments(app / 'Contents/Resources/MyNAS' / component), 'sign-' + Path(component).name)
 (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 record.update(version=info['CFBundleShortVersionString'], build=info['CFBundleVersion'], app=str(app),
-              channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0')
-run(['codesign', '--force', '--sign', '-', str(app)], 'sign')
+              channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0',
+              signing_identity=args.identity,
+              hardened_runtime=args.identity != '-')
+# ★ 先签 Helper，再签主 App：主 App 的签名把 `Contents/` 下每个文件的内容纳入封存，
+#   反过来做的话，签完 App 再改 Helper 会让 App 的封存对不上（`codesign --verify`
+#   会报 "resource envelope is obsolete" 一类），而且这种失效在装到别的机器上才发现。
+run(sign_arguments(helpers / HELPER_NAME), 'sign-helper')
+run(sign_arguments(app), 'sign')
 verify = run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', str(app)], 'signature-verification', required=False)
 record['signature_verified'] = verify.returncode == 0
 record['binary_sha256'] = sha(macos / 'FlashFind2App')

@@ -61,7 +61,7 @@ public struct SynologyResponse: Equatable, Sendable {
     /// 型号，如 `DS1621+` / `DS124`。
     public var model: String?
 
-    /// 序列号，如 `SNFAKEDSM0001`。
+    /// 序列号，如 `FAKE000000001`。
     public var serial: String?
 
     /// 产品名，如 `DSM`。

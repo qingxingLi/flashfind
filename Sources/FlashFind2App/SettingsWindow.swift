@@ -15,9 +15,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private var hosting: NSHostingController<AnyView>?
     /// 当前停留的页面。切页不重建窗口，避免丢失滚动位置。
     private var page: SettingsPane = .search
+    /// 关闭时要用它把搜索浮窗放回来（见 `restoreSearchPanelIfNeeded`）。
+    private weak var model: AppModel?
 
     func show(model: AppModel, page requested: SettingsPane) {
         page = requested
+        self.model = model
         // 打开设置时收起搜索浮窗：它浮在屏幕上方且层级更高，
         // 不收起来会盖住设置窗口的上半部分——包括「添加搜索来源」按钮，
         // 用户看到的就是「点不到」。
@@ -53,6 +56,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         // 关闭窗口只隐藏，不销毁：再次打开时保持位置与大小。
         window?.orderOut(nil)
+        restoreSearchPanelIfNeeded(closing: notification.object as? NSWindow, model: model)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { true }
@@ -122,5 +126,8 @@ final class NASWizardWindow: NSObject, NSWindowDelegate {
         // `cancelDraft` 是幂等的：刚保存成功的路径上再调一次也不会破坏已落库的配置。
         model?.cancelDraft()
         window?.orderOut(nil)
+        // 登录成功（或取消）后向导一关，若设置窗口也已经不在屏幕上，
+        // 这里就是最后一个窗口——不放回搜索浮窗，整台应用会被系统回收。
+        restoreSearchPanelIfNeeded(closing: notification.object as? NSWindow, model: model)
     }
 }
