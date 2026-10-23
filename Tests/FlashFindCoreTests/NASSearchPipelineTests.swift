@@ -29,13 +29,27 @@ private func nasFixtureConfig() -> NASSourceConfig {
     private(set) var arrived = false
     var open = false
 
+    /// 停在闸门前，直到 `open` 被置为 true 或等满 5 s（超时＝用例失败，不静默放行）。
+    ///
+    /// ⚠️ 早先这里写的是「yield 20 000 次」——在快机器上几毫秒就转完了，闸门还没开
+    /// 就自己放行，迟到批次于是**不迟到**了：2026-10-23 把用例改成走闸门后连跑 10 次
+    /// 全红（`old` 非空），才发现的。等闸门要按**时间**等，不能按**次数**等。
     func enterAndWait() async {
         arrived = true
-        for _ in 0..<20_000 {
-            if open { return }
-            await Task.yield()          // 让出主线程，测试才能继续跑
-        }
+        let deadline=Date().addingTimeInterval(5)
+        while !open && Date()<deadline { try? await Task.sleep(nanoseconds:1_000_000) }
     }
+}
+
+/// 等条件成立，最多等 `timeout` 秒；等不到就把结论留给调用处的断言。
+///
+/// 为什么不用固定 `sleep`：CI 的 macOS runner 只有 3 核、负载高，
+/// 「旧查询剩 70 ms + 新查询 80 ms」这种**算出来的**窗口，实测 200 ms 也不够
+/// （2026-10-23 CI 就红在这里：新查询一个事件都没到）。等条件成立既快又稳，
+/// 真坏了照样在断言处失败——不会因为「等得不够久」变成假绿。
+@MainActor private func waitUntil(_ timeout:Double=5,_ condition:()->Bool) async {
+    let deadline=Date().addingTimeInterval(timeout)
+    while !condition() && Date()<deadline { try? await Task.sleep(nanoseconds:5_000_000) }
 }
 
 @MainActor private final class ScriptProvider: SearchProvider {
@@ -44,6 +58,9 @@ private func nasFixtureConfig() -> NASSourceConfig {
     var fail:Bool
     /// 给了闸门就等它放行再发事件（见 `ScriptGate` 的说明）。
     var gate:ScriptGate?
+    /// 发过几次事件。用来让「断言事件为空」的用例先确认 Provider **真的发完了**，
+    /// 否则它还在闸门后头没走到，断言空也会通过（假绿）。
+    var emitted=0
     var cancelled=[UUID]()
     init(_ source:SearchSource,delay:UInt64=0,fail:Bool=false) { self.source=source;self.delay=delay;self.fail=fail }
     func cancel(queryID:UUID) { cancelled.append(queryID) }
@@ -52,6 +69,7 @@ private func nasFixtureConfig() -> NASSourceConfig {
         if let gate { await gate.enterAndWait() }
         // Deliberately emit even after cancellation to challenge Coordinator guards.
         emit(ProviderEvent(queryID:queryID,sourceID:source.id,results:fail ? [] : [SearchResult(id:source.id+text,name:text,relativePath:"/fixture/"+text,sourceID:source.id,sourceName:source.name,kind:"file",size:nil,localURL:nil)],state:fail ? .failed : .completed))
+        emitted+=1        // 必须在 emit 之后：等它变成 1 才说明「事件已经交出去了」
     }
 }
 @MainActor private final class FixtureBridge: MyNASBridgeTransport {
@@ -87,16 +105,30 @@ final class NASSearchPipelineTests:XCTestCase {
         try? await Task.sleep(nanoseconds:180_000_000)
         XCTAssertEqual(events.flatMap(\.results).count,1);XCTAssertEqual(events.last?.state,.failed)
     }
+    /// 新查询取代旧查询后，旧查询的迟到批次必须被丢掉，且旧请求必须被取消。
+    ///
+    /// 顺序全部由闸门**保证**（同 `testCancelRejectsDelayedBatches`），不再用
+    /// 「睡 10 ms 让旧查询先跑」这种赌法：CI runner 满载时 10 ms 可能拖成 80 ms，
+    /// 旧查询先跑完，`old` 就非空了——那是测试自己假红，不是产品问题。
+    ///
+    /// ★ 还有一处更容易踩的：**必须先看到「取消已发出」再放行闸门**。
+    /// `search()` 只是把提交丢进 Task，旧查询若在那之前就从 provider 返回，
+    /// 调度器的 running 里已经没有它，`supersedeAll` 自然什么都不取消，
+    /// `p.cancelled` 就是空的。2026-10-23 本机连跑十次红四次，就是撞在这里
+    /// （报的是第 124 行的 `XCTAssertTrue`，不是看起来更可疑的 `old.isEmpty`）。
     @MainActor func testNewQueryRejectsDeliberatelyLateOldEvents() async {
-        let p=ScriptProvider(.local,delay:80_000_000),c=SearchCoordinator(providers:[p]);var old=[ProviderEvent](),new=[ProviderEvent]()
-        let first=c.search("旧") { old.append($0) };try? await Task.sleep(nanoseconds:10_000_000)
-        let second=c.search("新") { new.append($0) }
-        // ★ 等待窗口必须覆盖**两段**：旧查询还要跑完它剩下的 ~70 ms，新查询才被放
-        //   进 provider，然后它自己也要 80 ms。旧实现在取消时立刻清空槽位，新查询
-        //   会马上并行开跑，所以 120 ms 就够——但那是「同一来源两个活跃请求」，
-        //   正是 §1.6 要禁止的。这里等 200 ms 是为了等正确的串行行为。
-        try? await Task.sleep(nanoseconds:200_000_000)
-        XCTAssertTrue(old.isEmpty);XCTAssertEqual(new.map(\.queryID),[second]);XCTAssertTrue(p.cancelled.contains(first));XCTAssertNotEqual(first,second)
+        let p=ScriptProvider(.local),gate=ScriptGate(),c=SearchCoordinator(providers:[p])
+        p.gate=gate
+        var old=[ProviderEvent](),new=[ProviderEvent]()
+        let first=c.search("旧") { old.append($0) }
+        await waitUntil { gate.arrived }
+        XCTAssertTrue(gate.arrived,"假 Provider 没有进到闸门前，用例前提不成立")
+        let second=c.search("新") { new.append($0) }   // 旧查询仍占着槽位，新查询只能排队
+        await waitUntil { p.cancelled.contains(first) } // 取消必须发生在旧请求还在跑的时候
+        gate.open=true                                 // 旧查询此刻才发出迟到批次
+        await waitUntil { !new.isEmpty }               // 等新查询真的出结果（上限 5 s）
+        XCTAssertTrue(old.isEmpty,"旧查询的迟到批次必须被丢掉")
+        XCTAssertEqual(new.map(\.queryID),[second]);XCTAssertTrue(p.cancelled.contains(first));XCTAssertNotEqual(first,second)
     }
     /// 防抖：连续输入 `o`→`od`→`odoo` 只应产生一次 NAS 查询，而本地来源每次都立即执行。
     ///
@@ -187,12 +219,11 @@ final class NASSearchPipelineTests:XCTestCase {
         p.gate=gate
         var events=[ProviderEvent]()
         let id=c.search("odoo") { events.append($0) }
-        var spins=0
-        while !gate.arrived && spins<20_000 { spins+=1; await Task.yield() }
+        await waitUntil { gate.arrived }
         XCTAssertTrue(gate.arrived, "假 Provider 没有进到闸门前，用例前提不成立")
         c.cancel()
         gate.open=true                              // 迟到批次现在才发
-        try? await Task.sleep(nanoseconds:20_000_000)
+        await waitUntil { p.emitted==1 }            // 等它真的发完，别在没轮到时就断言空
         XCTAssertTrue(events.isEmpty)
         XCTAssertEqual(p.cancelled,[id])
     }
