@@ -96,9 +96,11 @@ final class SettingsIATests: XCTestCase {
 
     // MARK: - 来源行：异常才给按钮，而且只给一个
 
-    private func status(health: NASSourceHealth, action: NASSourceRequiredAction?, message: String = "") -> NASSourceStatus {
+    private func status(health: NASSourceHealth, action: NASSourceRequiredAction?, message: String = "",
+                        needsOTP: Bool = false) -> NASSourceStatus {
         var s = NASSourceStatus()
         s.health = health; s.requiredAction = action; s.message = message
+        s.needsOTP = needsOTP
         return s
     }
 
@@ -119,6 +121,21 @@ final class SettingsIATests: XCTestCase {
         XCTAssertEqual(row.action, .login)
         XCTAssertEqual(row.detail, "需要重新登录")
         XCTAssertEqual(row.action?.buttonTitle, "登录")
+    }
+
+    /// 设备要动态码 → 仍然只给 [登录]，但**说法必须变**。
+    ///
+    /// 真机（2026-10-23）：第二台 NAS 开了两步验证，自动连接必然失败，
+    /// 而列表照旧写着「需要重新登录」——用户于是以为密码又没存住，
+    /// 每次都把密码重输一遍。实际密码好好躺在钥匙串里，缺的只是那 6 位码。
+    func testOTPRequiredSourceRowSaysItNeedsACodeNotALogin() {
+        let row = NASSourceRowModel.make(config: source(),
+                                        status: status(health: .needsAttention, action: .login,
+                                                       message: "设备要求动态码", needsOTP: true),
+                                        ready: false)
+        XCTAssertEqual(row.action, .login, "按钮还是「登录」：点它才会弹动态码输入框")
+        XCTAssertEqual(row.detail, "需要输入动态码",
+                       "要动态码时不能说「需要重新登录」——那句话在说密码没了")
     }
 
     /// 配置不完整 / 需要选位置 / 证书要确认 → [继续设置]。

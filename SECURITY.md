@@ -15,6 +15,23 @@
 | 历史遗留的明文副本 | `~/Library/Application Support/FlashFind2/credentials.json`（目录 `0700`、文件 `0600`） |
 | 证书固定记录 | `~/Library/Application Support/FlashFind2/MyNAS/trust/source-trust.json` |
 
+### 1.1.5 起：所有设备合并成一条记录
+
+1.1.5 之前是「一台设备一条钥匙串条目」——于是每装一个新版本，你要为**每台设备**分别
+授权一次，设备越多越烦。1.1.5 起改为**全部凭据存进同一条**（`service=com.flashfind.v2.credentials`、
+`account=vault`，内容是 `{"v":1,"entries":{"来源账号":"密码"}}`），
+授权次数从此**与设备台数无关**。
+
+代价与约束，一并说清：
+
+- **每装一个新版本仍会弹 1 次。** 本包 ad-hoc 签名，系统按 cdhash 认身份，换版本即换身份，
+  条目访问列表里的旧身份失配。想让这一次也消失，只有 Developer ID 一条路。
+- **搬迁顺序是硬约束**：先写新条目 → **读回确认** → 才删旧条目。写不进或读不回，
+  旧条目一律原样留着（`VaultConsolidation` 里锁死）。
+- **读不懂就不写。** 合并条目解析失败时按 `damaged` 处理，只读不写——
+  否则一次解析错误就可能把全部设备的密码覆盖成空表。
+- 弹框请点 **「始终允许」**；点「允许」只对本次运行有效。
+
 ### 钥匙串的两档，以及现在停在哪一档
 
 钥匙串有经典与 Data Protection（DP）两档。后者要 App 带

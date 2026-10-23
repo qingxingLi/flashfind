@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.3
+- **当前版本**：1.1.6
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -92,13 +92,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1321 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1347 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1321 项
+swift test                       # 1347 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 
@@ -116,6 +116,15 @@ cd MyNASCore && dart test_*.dart # 9 个套件
   `keychain-access-groups` entitlement，所以实际停在**经典钥匙串**那一档；
   签上 Developer ID 后新写入才会走 Data Protection，届时已有的密码由
   `KeychainTierMigration` 搬一次。详见 `SECURITY.md`。
+- **钥匙串授权框：每装一个新版本一次，与 NAS 台数无关。** 1.1.5 起所有设备的密码
+  合并存成**一条**记录，所以你有 5 台 NAS 也只弹 1 次；同一版本内重启、覆盖安装都不再弹。
+  弹框请点 **「始终允许」**——点「允许」只对本次运行有效，下次启动还会再问。
+  这是 ad-hoc 签名的固有代价（系统按 cdhash 认应用身份，换版本即换身份），
+  换成 Developer ID 签名后才会消失。
+- **升级后「完全磁盘访问」可能显示为开、实际已失效。** 同样是换版本即换身份导致的：
+  系统设置里那个开关可能仍停在打开位置，但新版本实际读不到受保护目录
+  （闪寻设置页会显示「未授权」）。修法：把开关**关掉再打开**，然后**完全退出闪寻再启动**。
+  升级后如果发现桌面、文稿里的新文件搜不到，先查这一条。
 - **旧的明文凭据文件会自行消失**：1.0 时期落在
   `~/Library/Application Support/FlashFind2/credentials.json`（目录 0700、文件 0600）。
   1.0.1 起它只剩「迁移来源」一个用途——启动搬进钥匙串，等某次真实登录验证通过后才逐条删除。

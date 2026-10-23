@@ -42,9 +42,17 @@ extension AppModel {
             guard let secret = SecureStorage.read(account: source.credentialAccount,
                                                    identity: source.credentialIdentity),
                   !secret.isEmpty else {
+                // ★ 读不出来有两种完全相反的原因，说法不能混：
+                //   - 没获得授权：密码还在钥匙串里，该做的是在系统弹窗上点「始终允许」；
+                //   - 确实没存过：只能重连一次。
+                // 一律说「本机没有保存密码」会让前一种用户白重输一遍密码，
+                // 而重输完下次启动照样弹——他永远找不到真正的问题。
+                let problem = CredentialStore.currentProblem
                 setSourceStatus(source.id) {
                     $0.health = .needsAttention
-                    $0.message = "本机没有保存密码，请连接一次"
+                    $0.message = problem == .notAuthorized
+                        ? "未获得钥匙串授权：请在系统弹窗上点「始终允许」，密码本身还在"
+                        : "本机没有保存密码，请连接一次"
                     $0.requiredAction = .login
                 }
                 continue

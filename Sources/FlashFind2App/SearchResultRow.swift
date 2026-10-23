@@ -49,21 +49,25 @@ struct SearchResultRow: View {
                 .frame(width: SearchLayout.fileIconSize, height: SearchLayout.fileIconSize)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                Text(result.name).font(.system(size: 14, weight: .medium))
+                    .lineLimit(1).truncationMode(.middle)
                 if showsFullPath {
                     Text(pathText).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
             }
+            .layoutPriority(1)
             Spacer(minLength: 8)
             // 来源标签靠右，视觉上像 Spotlight 的来源分组。
             HStack(spacing: 4) {
                 Image(systemName: badgeSymbol).font(.system(size: 10))
                 Text(badge).font(.system(size: 11))
+                    .lineLimit(1).truncationMode(.middle)
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.5)))
+            // 给来源保留可读空间，同时限制长 NAS 名称占用的宽度。
+            .frame(maxWidth: 140, alignment: .trailing)
+            .layoutPriority(2)
             .help("来源：\(badge)")
             .accessibilityLabel("来源 \(badge)")
         }

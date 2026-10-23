@@ -10,6 +10,11 @@ public enum CredentialStoreProblem: Sendable, Equatable {
     case newerVersion(Int)
     /// 钥匙串后端给出的原因（状态码原文），例如权限或 entitlement 问题。
     case keychain(String)
+    /// **密码还在，只是这次没获得授权**（用户点了拒绝 / 系统没弹出授权框）。
+    ///
+    /// 单列一档是因为说法完全相反：这种情况说「本机没有保存密码」，
+    /// 用户会去重输一遍密码，而真正该做的是在系统弹窗上点一次「始终允许」。
+    case notAuthorized
 
     /// 给用户看的一句话。不含路径，不含任何密文。
     public var summary: String {
@@ -22,6 +27,8 @@ public enum CredentialStoreProblem: Sendable, Equatable {
             return "本机凭据是更新版本的闪寻写入的（版本 \(version)）"
         case let .keychain(reason):
             return "系统钥匙串读不出来（\(reason)）"
+        case .notAuthorized:
+            return "没有获得钥匙串访问授权，密码可能还在里面"
         }
     }
 }

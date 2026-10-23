@@ -508,6 +508,9 @@ final class AppModel: ObservableObject {
             stored: defaults.object(forKey: ExperimentalSources.storageKey) as? Bool)
         loadNativeSources()
         ensureProviderCoordinator()
+        // 升级后第一次启动：先把老布局的凭据合并成一条，再自动连接。
+        // 顺序不能反——见 `consolidateCredentialsIfNeeded` 的说明。
+        consolidateCredentialsIfNeeded()
         // 启动即连已保存的来源：用户打开就能直接搜，不必每次手动走向导输密码。
         // 没记住密码的来源会被跳过（状态里说明原因），不会弹窗打扰。
         autoConnectSavedSources()

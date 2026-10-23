@@ -131,6 +131,9 @@ final class NoKeychainAccessTests: XCTestCase {
     private static let allowedInstantiations: [String: String] = [
         "KeychainTierMigrationTests.swift":
             "只读取 `usesDataProtectionKeychain` 状态位来证明「钉住层级」生效；"
+            + "全程不调用 save/read/delete，因此不会触发任何钥匙串访问",
+        "KeychainLookupTests.swift":
+            "只构造后调用 `acrossTiers`，查询动作由假闭包注入（永不进入 Security 框架）；"
             + "全程不调用 save/read/delete，因此不会触发任何钥匙串访问"
     ]
 

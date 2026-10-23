@@ -38,7 +38,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         // 标题栏再写一遍就是信息重复。
         panel.title = SettingsWindowTitle.text
         panel.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        panel.titlebarAppearsTransparent = false
+        panel.titlebarAppearsTransparent = true
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         // 宽度跟着导航走：去掉 170–230pt 的侧栏列，不需要 880 了。

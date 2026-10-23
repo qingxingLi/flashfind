@@ -35,13 +35,17 @@ struct SearchFieldView: View {
             if searching || syncing { ProgressView().controlSize(.small).accessibilityLabel(searching ? "正在搜索" : "正在同步") }
             if !query.isEmpty {
                 Button { query = ""; focused.wrappedValue = true } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }.buttonStyle(.plain).help("清除搜索").accessibilityLabel("清除搜索")
             }
             // 重新搜索：放在清除按钮与「更多」菜单之间——用户报障时指的就是这一角。
             // 图标而非文字，是为了不挤占关键词输入框的宽度；名字走 help 与读屏。
             Button(action: research) {
                 Image(systemName: "arrow.clockwise").font(.system(size: 17))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             // 关键词为空时重搜没有意义（changedQuery 会直接清空返回），
@@ -60,6 +64,7 @@ struct SearchFieldView: View {
                 HStack(spacing: 4) {
                     if scope != .all { Text(scope.rawValue).font(.caption) }
                     Image(systemName: "ellipsis.circle").font(.system(size: 17))
+                        .frame(width: 28, height: 28)
                 }.foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()

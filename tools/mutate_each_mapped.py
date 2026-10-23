@@ -582,6 +582,44 @@ EXPECT = {
     '禁用自动终止的理由写成空串': (
         'LastWindowClosePolicyTests',
         {'testAutomaticTerminationIsDisabledWithANonEmptyReason'}),
+    # 重启后要重新登录（2026-10-23 用户报「彻底退出就得重新登一次」）：
+    # 根因是「写时降级进经典钥匙串、读时先问 DP 拿到 -25300 却不换层」。
+    # 四条各自守住一层，缺任何一层都会退回「忘了密码」。
+    '策略只认「缺 entitlement」（-25300 不再换层）': (
+        'KeychainLookupTests',
+        {'testMissingItemAndMissingEntitlementBothJustifyAnotherLookup',
+         'testAutomaticTierReadsTheOtherTierAfterAMiss'}),
+    '读不再换层（存在经典钥匙串里的密码被读成「没存过」）': (
+        'KeychainLookupTests', {'testAutomaticTierReadsTheOtherTierAfterAMiss'}),
+    'read 绕过跨层查询（存在经典钥匙串的密码仍读成「没存过」）': (
+        'KeychainLookupTests', {'testReadGoesThroughTheCrossTierLookup'}),
+    '自动档只删一层（关掉记住密码后经典侧仍留着）': (
+        'KeychainLookupTests', {'testDeleteCoversBothTiersInAutomaticMode'}),
+    '要动态码却仍说「需要重新登录」': (
+        'SettingsIATests', {'testOTPRequiredSourceRowSaysItNeedsACodeNotALogin'}),
+    # ---- 凭据合并成一条（2026-10-23，1.1.5）----
+    '合并条目把「读不懂」当成空表（下一次保存覆盖全部密码）': (
+        'CredentialVaultTests', {'testDamagedPayloadIsRefusedRatherThanTreatedAsEmpty'}),
+    '合并条目不看信封版本（把新版本写的当成自己的）': (
+        'CredentialVaultTests', {'testNewerVersionIsRefused'}),
+    '编码不按顺序（同内容两次编码字节不同）': (
+        'CredentialVaultTests', {'testEncodingIsStableRegardlessOfInsertionOrder'}),
+    '空密码也存成一条（读出来是空串，看着像密码是空的）': (
+        'CredentialVaultTests', {'testEmptyValueIsNotAnEntry'}),
+    '账号名不转义（带引号的账号名把自己编码坏）': (
+        'CredentialVaultTests', {'testSpecialCharactersInAccountSurviveRoundTrip'}),
+    '搬迁写失败也删旧条目（唯一副本就此消失）': (
+        'CredentialVaultTests', {'testConsolidationKeepsTheOldEntryWhenTheNewOneCannotBeWritten'}),
+    '搬迁不确认新的一份就删旧条目': (
+        'CredentialVaultTests', {'testConsolidationDoesNotDropTheOldEntryWhenTheNewOneSilentlyVanishes'}),
+    '搬迁不去重（同一账号搬两次、多报一条变更）': (
+        'CredentialVaultTests', {'testConsolidationIgnoresDuplicateAccounts'}),
+    '启动路径上不合并凭据（老用户一直按一台一条要授权）': (
+        'AppLayerStructureTests', {'testCredentialsAreConsolidatedBeforeAutoConnectReadsThem'}),
+    '默认退回「一台 NAS 一条条目」': (
+        'CredentialVaultTests', {'testStoreDefaultsToTheConsolidatedLayout'}),
+    '升迁前不探测 DP（先白读一轮经典钥匙串）': (
+        'KeychainLookupTests', {'testTierMigrationProbesDataProtectionBeforeReadingTheClassicTier'}),
 }
 
 

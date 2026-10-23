@@ -36,9 +36,9 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             panePicker
-            Divider()
             content
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 520, idealWidth: 640, minHeight: 520, idealHeight: 620)
         .onChange(of: pane) { _ in detailSourceID = nil }
         .onAppear {
@@ -50,9 +50,8 @@ struct SettingsView: View {
         }
     }
 
-    /// 一级导航。三页用顶部横向分段控件，不放左侧栏——
-    /// 三页配一条永久侧栏，窗口拉高时左栏会留下大片空白，
-    /// 还要白占 170–230pt 的宽度。分段控件是 macOS 原生控件
+    /// 四个页面共用顶部原生分段控件；限宽居中，避免随窗口拉伸。
+    /// 分段控件是 macOS 原生控件
     ///（`NSSegmentedControl`），Tab 聚焦 + 方向键与 VoiceOver 天然可用。
     private var panePicker: some View {
         Picker("设置页面", selection: $pane) {
@@ -66,13 +65,18 @@ struct SettingsView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .accessibilityIdentifier("settings-pane-picker")
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
+        .frame(maxWidth: SettingsLayout.navigationMaxWidth)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
     }
 
     /// 内容区：限宽并居中，窗口拉宽时表单不再无限横向拉伸。
     private var content: some View {
         detail
+            .scrollContentBackground(.hidden)
             .frame(maxWidth: SettingsLayout.contentMaxWidth)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
@@ -327,13 +331,15 @@ struct SettingsView: View {
 
     /// 来源列表里的一行。整行点击进详情，异常时旁边多一个按钮，最右是启用开关。
     private func sourceRowView(_ source: NASSourceConfig, _ row: NASSourceRowModel) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Button { detailSourceID = source.id } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     Image(systemName: source.vendor.symbol)
-                        .font(.system(size: 17)).foregroundStyle(.secondary).frame(width: 22)
+                        .font(.system(size: 20)).foregroundStyle(.secondary).frame(width: 28)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(row.title).lineLimit(1)
+                        Text(row.title)
+                            .font(.system(size: SettingsTypography.body, weight: .medium))
+                            .lineLimit(1).help(row.title)
                         HStack(spacing: 5) {
                             if row.health == .needsAttention {
                                 Image(systemName: "exclamationmark.triangle.fill")
@@ -342,10 +348,16 @@ struct SettingsView: View {
                             Text(row.detail).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary).lineLimit(1)
                         }
                         if !row.locations.isEmpty {
-                            Text(row.locations).font(.system(size: SettingsTypography.caption)).foregroundStyle(.tertiary).lineLimit(1)
+                            Text(row.locations).font(.system(size: SettingsTypography.caption))
+                                .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                .help(row.locations)
                         }
                     }
                     Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
                 }
                 // 内容区整块可点，但**不包住**右侧的开关与按钮。
                 .contentShape(Rectangle())
@@ -368,7 +380,7 @@ struct SettingsView: View {
                 .help("参与搜索")
                 .accessibilityIdentifier("source-enabled-" + source.id)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 5)
     }
 
     /// 来源详情：名称 / 状态 / 搜索位置 / 账号 / 连接 / 高级 / 移除。
@@ -828,6 +840,9 @@ struct SettingsView: View {
 }
 
 private enum SettingsLayout {
+    /// 顶部四段导航的最大宽度。
+    static let navigationMaxWidth: CGFloat = 440
+
     /// 内容区最大宽度。
     ///
     /// 表单行被拉到 800pt 宽时，标签与控件之间会空出一大片，

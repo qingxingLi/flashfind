@@ -97,7 +97,8 @@ public struct NASSourceRowModel: Equatable, Sendable {
 
         // ④ 未连上且状态里明确写了要做什么 → 只给那一个按钮。
         if let required = status.requiredAction {
-            return NASSourceRowModel(title: title, detail: shortDetail(required, config: config),
+            return NASSourceRowModel(title: title,
+                                     detail: shortDetail(required, config: config, needsOTP: status.needsOTP),
                                      locations: locations, action: required, enabled: true,
                                      health: status.health == .unconfigured ? .offline : status.health)
         }
@@ -114,13 +115,19 @@ public struct NASSourceRowModel: Equatable, Sendable {
     }
 
     /// 列表行上的**短**状态语。完整原因（可能很长）留在详情页，不塞进列表。
+    ///
+    /// `needsOTP` 是必须传下来的：光看 `action == .login` 推不出「密码丢了」
+    /// 还是「只差 6 位动态码」。两者都落在同一行、同一个按钮上，
+    /// 但说法完全不同——设备开了两步验证时还写「需要重新登录」，
+    /// 用户会以为**密码没存住**，于是每次去重输一遍密码，而真正缺的是码。
     static func shortDetail(_ action: NASSourceRequiredAction,
-                            config: NASSourceConfig) -> String {
+                            config: NASSourceConfig,
+                            needsOTP: Bool = false) -> String {
         switch action {
         case .retry:
             return "无法连接"
         case .login:
-            return "需要重新登录"
+            return needsOTP ? "需要输入动态码" : "需要重新登录"
         case .continueSetup:
             return config.scopes.isEmpty ? "需要选择搜索位置" : "需要继续设置"
         }

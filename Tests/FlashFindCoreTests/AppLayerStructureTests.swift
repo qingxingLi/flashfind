@@ -1987,4 +1987,24 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(authority[..<marker.lowerBound].contains("#if DEBUG"),
                       "socket 覆盖必须夹在 `#if DEBUG` 里")
     }
+
+    /// ★ 凭据合并必须排在「启动自动连接」**之前**。
+    ///
+    /// 顺序反了的代价不是错乱而是**多弹一轮窗**：`autoConnectSavedSources` 会按老布局
+    /// 读每台 NAS 的密码，每读一条就是一次系统授权；读完转头再把它们搬进合并条目，
+    /// 用户等于为「马上要被搬走的老条目」白授权一轮。
+    ///
+    /// 这种缺陷编译能过、测试全绿、界面上也看不出——只有用户在那儿点弹窗时才暴露，
+    /// 所以只能拿源码顺序守。
+    func testCredentialsAreConsolidatedBeforeAutoConnectReadsThem() throws {
+        let model = codeOnly(try appSource("AppModel.swift"))
+        let consolidate = try XCTUnwrap(model.range(of: "consolidateCredentialsIfNeeded()"),
+                                        "启动时不再合并凭据 —— 老用户会一直按「一台一条」要授权")
+        let autoConnect = try XCTUnwrap(model.range(of: "autoConnectSavedSources()"),
+                                        "自动连接不见了？先确认它是不是被改名了")
+        XCTAssertLessThan(consolidate.lowerBound, autoConnect.lowerBound,
+                          "合并必须排在自动连接之前，否则要先为老条目白授权一轮")
+        XCTAssertEqual(model.components(separatedBy: "consolidateCredentialsIfNeeded()").count - 1, 1,
+                       "合并只该在启动路径上调一次；多调一次就是多一轮读老条目")
+    }
 }

@@ -236,6 +236,25 @@ public enum CredentialStore {
 
     // MARK: - 层级升迁（经典钥匙串 → Data Protection 钥匙串）
 
+    /// 把老布局（一台 NAS 一条条目）搬进合并条目。**升级后第一次启动调用一次**。
+    ///
+    /// 不搬的代价不是「多几条记录」：系统钥匙串的授权是按条目、按 App 的 cdhash 记的，
+    /// 所以每装一个新版本，每一条老条目都要再问一次用户。合并之后问几次与 NAS 台数无关。
+    ///
+    /// 后端不是钥匙串、或已经是合并布局时，返回空报告（什么都不做）。
+    ///
+    /// - Parameter accounts: 要搬的 account。**钥匙串不能枚举**，由调用方指名。
+    @discardableResult
+    public static func consolidateIntoVault(accounts: [String]) -> VaultConsolidation.Report {
+        lock.lock(); let store = backend; lock.unlock()
+        guard let keychain = store as? KeychainSecretStore,
+              keychain.entryLayout == .vault, !accounts.isEmpty else { return .init() }
+        return VaultConsolidation.run(
+            from: KeychainSecretStore(tier: .automatic, layout: .perAccount),
+            to: keychain,
+            accounts: accounts)
+    }
+
     /// 把指名的凭据从经典钥匙串升到 Data Protection 钥匙串。
     ///
     /// **这一条登记在这里，是为了不让它被忘掉**：今天所有构建都缺
@@ -251,7 +270,13 @@ public enum CredentialStore {
         lock.lock(); let store = backend; lock.unlock()
         // 只有钥匙串后端才有「层级」这回事。文件后端与内存后端直接跳过，
         // 免得把「读经典侧」这套语义套到别的存储上。
-        guard store is KeychainSecretStore, !accounts.isEmpty else { return .init() }
+        guard let keychain = store as? KeychainSecretStore, !accounts.isEmpty else { return .init() }
+        // ★ 先确认 DP 写得进去，再去读经典。
+        //
+        // 顺序反了就是每次启动白读一遍经典钥匙串——而读 = 一次系统授权弹窗，
+        // 每台 NAS 一次。今天所有构建都缺 entitlement，探针必然失败，
+        // 于是这一步直接返回，用户一次弹窗都不用为「注定搬不走」的迁移付账。
+        guard keychain.dataProtectionIsWritable() else { return .init() }
         return KeychainTierMigration.migrate(
             from: KeychainSecretStore(tier: .classic),
             to: KeychainSecretStore(tier: .dataProtection),

@@ -79,8 +79,11 @@ FILES = {
     'CredentialMigration': CLIENT / 'Sources/FlashFindCore/CredentialMigration.swift',
     'KeychainSecretStore': CLIENT / 'Sources/FlashFindCore/KeychainSecretStore.swift',
     'NASSourceConfig': CLIENT / 'Sources/FlashFindCore/NASSourceConfig.swift',
+    'NASSourceRowModel': CLIENT / 'Sources/FlashFindCore/NASSourceRowModel.swift',
     'CredentialIdentity': CLIENT / 'Sources/FlashFindCore/CredentialIdentity.swift',
     'KeychainTierMigration': CLIENT / 'Sources/FlashFindCore/KeychainTierMigration.swift',
+    'CredentialVault': CLIENT / 'Sources/FlashFindCore/CredentialVault.swift',
+    'VaultConsolidation': CLIENT / 'Sources/FlashFindCore/VaultConsolidation.swift',
     'LocalSearchProvider': CLIENT / 'Sources/FlashFindCore/LocalSearchProvider.swift',
     'LocalFolderSearch': CLIENT / 'Sources/FlashFindCore/LocalFolderSearch.swift',
     'MyNASProcessBridge': CLIENT / 'Sources/FlashFindCore/MyNASProcessBridge.swift',
@@ -533,7 +536,7 @@ MUTATIONS = [
      "SEARCH_GLYPH_NAMES = ('ShanXunMenuIcon.png', 'ShanXunMenuIcon@2x.png')"),
     # ── 2026-10-16：重新搜索按钮（用户报障 IncompleteResponse 时的一键重来）──
     ('重新搜索按钮整个被删', FILES['SearchFieldView'],
-     '            // 重新搜索：放在清除按钮与「更多」菜单之间——用户报障时指的就是这一角。\n            // 图标而非文字，是为了不挤占关键词输入框的宽度；名字走 help 与读屏。\n            Button(action: research) {\n                Image(systemName: "arrow.clockwise").font(.system(size: 17))\n            }\n            .buttonStyle(.plain).foregroundStyle(.secondary)\n            // 关键词为空时重搜没有意义（changedQuery 会直接清空返回），\n            // 所以置灰，别给一个点了没反应的按钮。\n            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)\n            .help("重新搜索").accessibilityLabel("重新搜索")\n',
+     '            // 重新搜索：放在清除按钮与「更多」菜单之间——用户报障时指的就是这一角。\n            // 图标而非文字，是为了不挤占关键词输入框的宽度；名字走 help 与读屏。\n            Button(action: research) {\n                Image(systemName: "arrow.clockwise").font(.system(size: 17))\n                    .frame(width: 28, height: 28)\n                    .contentShape(Rectangle())\n            }\n            .buttonStyle(.plain).foregroundStyle(.secondary)\n            // 关键词为空时重搜没有意义（changedQuery 会直接清空返回），\n            // 所以置灰，别给一个点了没反应的按钮。\n            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)\n            .help("重新搜索").accessibilityLabel("重新搜索")\n',
      ''),
     # 按钮还在，但动作被换成空闭包——「画了却没接线」正是本项目最典型的假状态。
     ('重新搜索按钮没接到 changedQuery', FILES['SearchView'],
@@ -743,9 +746,107 @@ MUTATIONS = [
     ('钉在经典层的实例仍自称走 DP', FILES['KeychainSecretStore'],
      '        case .classic: dataProtection.value = false',
      '        case .classic: break'),
+    # ---- 2026-10-23 build 31：「彻底退出后每台 NAS 都要重新登录」----
+    # 真机根因：写的时候 DP 报 -34018 会降级进经典钥匙串，读的新进程却先问 DP，
+    # 拿回 -25300「找不到」；旧实现只认 -34018，不换层，密码被读成 nil。
+    ('读不再换层（存在经典钥匙串里的密码被读成「没存过」）', FILES['KeychainSecretStore'],
+     '        guard LookupPolicy.shouldTryTheOtherTier(after: result.status) else { return result }',
+     '        guard result.status == errSecSuccess else { return result }'),
+    ('策略只认「缺 entitlement」（-25300 不再换层）', FILES['KeychainSecretStore'],
+     '            status == errSecItemNotFound || status == errSecMissingEntitlement',
+     '            status == errSecMissingEntitlement'),
+    # 这条单独锁 read 的**调用点**：策略再正确，read 绕过它也一样读不到。
+    # 变异写成语法等价的立即执行闭包，保证批跑时整包仍能编译
+    # （编译不过会让全部测试一起「红」，那不是证据）。
+    ('read 绕过跨层查询（存在经典钥匙串的密码仍读成「没存过」）', FILES['KeychainSecretStore'],
+     '        let outcome: (status: OSStatus, data: Data?) = acrossTiers { protecting in\n'
+     '            var query = baseQuery(account: account, dataProtection: protecting)\n'
+     '            query[kSecReturnData as String] = true\n'
+     '            query[kSecMatchLimit as String] = kSecMatchLimitOne\n'
+     '            var result: CFTypeRef?\n'
+     '            let status = SecItemCopyMatching(query as CFDictionary, &result)\n'
+     '            return (status, result as? Data)\n'
+     '        }',
+     '        let outcome: (status: OSStatus, data: Data?) = { () -> (status: OSStatus, data: Data?) in\n'
+     '            var query = baseQuery(account: account, dataProtection: dataProtection.value)\n'
+     '            query[kSecReturnData as String] = true\n'
+     '            query[kSecMatchLimit as String] = kSecMatchLimitOne\n'
+     '            var result: CFTypeRef?\n'
+     '            let status = SecItemCopyMatching(query as CFDictionary, &result)\n'
+     '            return (status, result as? Data)\n'
+     '        }()'),
+    ('自动档只删一层（关掉记住密码后经典侧仍留着）', FILES['KeychainSecretStore'],
+     '            _ = SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)\n'
+     '            return finish(SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary))',
+     '            return finish(SecItemDelete(baseQuery(account: account, dataProtection: dataProtection.value) as CFDictionary))'),
+    # 同一现场的另一半：设备要动态码时，列表还说「需要重新登录」，
+    # 用户于是每次都去重输密码 —— 密码其实好好躺着，缺的是那 6 位。
+    ('要动态码却仍说「需要重新登录」', FILES['NASSourceRowModel'],
+     '            return needsOTP ? "需要输入动态码" : "需要重新登录"',
+     '            return "需要重新登录"'),
     ('非钥匙串后端也照跑升迁', FILES['CredentialStore'],
-     '        guard store is KeychainSecretStore, !accounts.isEmpty else { return .init() }',
-     '        guard !accounts.isEmpty else { return .init() }'),
+     '        guard let keychain = store as? KeychainSecretStore, !accounts.isEmpty else { return .init() }',
+     '        let keychain = (store as? KeychainSecretStore) ?? KeychainSecretStore(); guard !accounts.isEmpty else { return .init() }'),
+    # ── 2026-10-23（1.1.5）：凭据合并成一条 ──
+    #
+    # 为什么要合并：系统钥匙串的授权是**按条目**记的，且认 App 的 cdhash
+    # （`codesign -d -r-` = `designated => cdhash H"…"`）。一台 NAS 一条时，
+    # 每换一个版本，用户就要为每台各点一次「始终允许」——两台两次、三台三次。
+    # 合并成一条之后，问几次与 NAS 台数无关。
+    #
+    # 下面这些变异里，第一条（损坏当空表）是**唯一会造成「密码全丢」**的分支。
+    ('合并条目把「读不懂」当成空表（下一次保存覆盖全部密码）', FILES['CredentialVault'],
+     r'''        guard let data = json.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .damaged(.undecodable)
+        }''',
+     r'''        guard let data = json.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .empty
+        }'''),
+    ('合并条目不看信封版本（把新版本写的当成自己的）', FILES['CredentialVault'],
+     '        if let version = root["v"] as? Int, version > currentVersion {',
+     '        if let version = root["v"] as? Int, version > currentVersion + 1000 {'),
+    ('编码不按顺序（同内容两次编码字节不同）', FILES['CredentialVault'],
+     '        let body = accounts.map { account in',
+     '        let body = entries.keys.sorted(by: >).map { account in'),
+    ('空密码也存成一条（读出来是空串，看着像密码是空的）', FILES['CredentialVault'],
+     '        guard !value.isEmpty else {\n            entries.removeValue(forKey: account)\n            return\n        }',
+     '        guard !value.isEmpty else {\n            entries[account] = value\n            return\n        }'),
+    ('账号名不转义（带引号的账号名把自己编码坏）', FILES['CredentialVault'],
+     r'''            case "\"": out += "\\\""''',
+     r'''            case "\"": out += "\""'''),
+    # 搬迁的两条铁律：写不进去 / 写完读不回来，都**不许**动旧条目。
+    ('搬迁写失败也删旧条目（唯一副本就此消失）', FILES['VaultConsolidation'],
+     '            } catch {\n'
+     '                // 写不进去就**绝不删旧的**：删了就是唯一副本没了。\n'
+     '                report.failures.append(account)\n'
+     '                continue\n'
+     '            }',
+     '            } catch {\n'
+     '                _ = legacy.delete(account: account)\n'
+     '                report.failures.append(account)\n'
+     '                continue\n'
+     '            }'),
+    ('搬迁不确认新的一份就删旧条目', FILES['VaultConsolidation'],
+     '            guard vault.read(account: account) != nil else {\n'
+     '                report.failures.append(account)\n'
+     '                continue\n'
+     '            }\n',
+     ''),
+    ('搬迁不去重（同一账号搬两次、多报一条变更）', FILES['VaultConsolidation'],
+     '            if report.attempted.contains(account) { continue }   // 来源列表可能重复',
+     '            if report.attempted.count < 0 { continue }   // 来源列表可能重复'),
+    # 顺序：合并必须排在自动连接之前，否则先按老布局白授权一轮。
+    ('启动路径上不合并凭据（老用户一直按一台一条要授权）', FILES['AppModel'],
+     '        consolidateCredentialsIfNeeded()\n',
+     ''),
+    ('默认退回「一台 NAS 一条条目」', FILES['KeychainSecretStore'],
+     '        self.init(service: service, accessGroup: accessGroup, tier: .automatic, layout: .vault)',
+     '        self.init(service: service, accessGroup: accessGroup, tier: .automatic, layout: .perAccount)'),
+    ('升迁前不探测 DP（先白读一轮经典钥匙串）', FILES['CredentialStore'],
+     '        guard keychain.dataProtectionIsWritable() else { return .init() }',
+     '        _ = keychain.entryLayout'),
     ('启动路径上不登记层级升迁', FILES['FlashFind2App'],
      '            CredentialStore.migrateKeychainTier(accounts: model.nasSources.map { $0.credentialAccount })\n',
      ''),
@@ -2736,6 +2837,28 @@ SINGLE_ONLY = {
 }
 
 EXPECTED = {
+    # ---- 2026-10-23 build 31：重启后必须能自动用已存密码登录 ----
+    # 三条互相独立：策略判据、read 的调用点、delete 的双层清扫。
+    # 前两条在批跑里会同时打上（不同行），但任一条单独生效都能让对应用例红
+    #  —— 逐条由 `mutate_each_mapped.py` 保证（见那里的登记）。
+    'testMissingItemAndMissingEntitlementBothJustifyAnotherLookup',
+    'testAutomaticTierReadsTheOtherTierAfterAMiss',
+    'testReadGoesThroughTheCrossTierLookup',
+    'testDeleteCoversBothTiersInAutomaticMode',
+    'testOTPRequiredSourceRowSaysItNeedsACodeNotALogin',
+    # ---- 凭据合并成一条（2026-10-23，1.1.5）----
+    # 每条对应上面「凭据合并成一条」那一批变异，一一对齐：
+    'testDamagedPayloadIsRefusedRatherThanTreatedAsEmpty',
+    'testNewerVersionIsRefused',
+    'testEncodingIsStableRegardlessOfInsertionOrder',
+    'testEmptyValueIsNotAnEntry',
+    'testSpecialCharactersInAccountSurviveRoundTrip',
+    'testConsolidationKeepsTheOldEntryWhenTheNewOneCannotBeWritten',
+    'testConsolidationDoesNotDropTheOldEntryWhenTheNewOneSilentlyVanishes',
+    'testConsolidationIgnoresDuplicateAccounts',
+    'testCredentialsAreConsolidatedBeforeAutoConnectReadsThem',
+    'testStoreDefaultsToTheConsolidatedLayout',
+    'testTierMigrationProbesDataProtectionBeforeReadingTheClassicTier',
     # ---- 已选文件夹模式接上真实遍历（2026-10-16 审核 OSS-08）----
     # 哨兵 testSpotlightModeDoesNotPretendToBeFolderScope **不在这里**：它守的是
     # 「整台 Mac 那条路不被带偏」，修复前后都该是绿的。

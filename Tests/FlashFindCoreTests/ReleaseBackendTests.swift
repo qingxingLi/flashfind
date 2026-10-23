@@ -66,15 +66,15 @@ final class ReleaseBackendTests: XCTestCase {
     /// 缺 entitlement 的机器上，Data Protection 钥匙串写入会失败（-34018）。
     /// 没有兜底的话，「记住密码」会静默失效——用户只能发现「它又忘了」。
     func testKeychainStoreFallsBackWhenTheEntitlementIsMissing() throws {
-        // 只看**代码行**：注释里提一句「会返回 errSecMissingEntitlement」不代表真的兜了底。
-        let code = try contents("Sources/FlashFindCore/KeychainSecretStore.swift")
-            .split(separator: "\n").map(String.init)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///")
-                && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-            .joined(separator: "\n")
-        XCTAssertTrue(code.contains("errSecMissingEntitlement"),
+        // 只看 `perform` 的**方法体**：
+        // ① 注释里提一句「会返回 errSecMissingEntitlement」不代表真的兜了底；
+        // ② 别处的同名符号也不能替这段背书 —— 查询策略里也判了一次
+        //    「缺 entitlement 就换层」，全文 `contains` 会被它蒙对。
+        let body = try braceBalancedBlock(in: try contents("Sources/FlashFindCore/KeychainSecretStore.swift"),
+                                          anchor: "private func perform(")
+        XCTAssertTrue(body.contains("errSecMissingEntitlement"),
                       "必须有 entitlement 缺失的兜底。实测：ad-hoc 试装包 SecItemAdd(DP) 直接 -34018")
-        XCTAssertTrue(code.contains("dataProtection.value = false"),
+        XCTAssertTrue(body.contains("dataProtection.value = false"),
                       "兜底要真的切换后端（记住这次降级），不能只是把失败吞掉")
     }
 
@@ -93,5 +93,33 @@ final class ReleaseBackendTests: XCTestCase {
         let text = try contents("Sources/FlashFindCore/CredentialStore.swift")
         XCTAssertTrue(text.contains("CredentialEnvelope.wrap"),
                       "保存路径没封身份：写进去的凭据将来无法判断它属于哪个目标")
+    }
+
+    /// 从锚点开始的**花括号**块（方法体），配平取整段。
+    ///
+    /// 与 `MCPBoundaryTests` 里那份同名实现是同一份逻辑，各自拷一份：
+    /// 测试类之间不共享 helper，避免一处改动牵连两个不相干的判据。
+    private func braceBalancedBlock(in text: String, anchor: String) throws -> String {
+        guard let hit = text.range(of: anchor) else { throw BlockNotFound(anchor: anchor) }
+        guard let open = text[hit.upperBound...].firstIndex(of: "{") else {
+            throw BlockNotFound(anchor: anchor)
+        }
+        var depth = 0
+        var index = open
+        while index < text.endIndex {
+            let character = text[index]
+            if character == "{" { depth += 1 }
+            if character == "}" {
+                depth -= 1
+                if depth == 0 { return String(text[open...index]) }
+            }
+            index = text.index(after: index)
+        }
+        throw BlockNotFound(anchor: anchor)
+    }
+
+    private struct BlockNotFound: Error, CustomStringConvertible {
+        let anchor: String
+        var description: String { "找不到配平的块：\(anchor)" }
     }
 }
