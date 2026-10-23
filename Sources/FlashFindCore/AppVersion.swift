@@ -38,7 +38,7 @@ public enum AppVersion {
         return displayText(short: short)
     }
 
-    /// 给协议与日志用的**机器可读**版本号：`1.1.2`。
+    /// 给协议与日志用的**机器可读**版本号：`1.1.3`。
     ///
     /// ★ 与 `current` 是同一个事实（`CFBundleShortVersionString`）的两种形态，所以
     /// 两者都在这里读，别处不许再读一次 Info.plist。区别只在缺值时：

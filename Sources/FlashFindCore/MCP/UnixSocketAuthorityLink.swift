@@ -65,6 +65,26 @@ public struct UnixSocketAuthorityLink: AuthorityLink {
         self.limits = limits
     }
 
+    /// 承载阻塞式 socket 读写的专用队列。
+    ///
+    /// ★ **不能放在 `Task.detached` 里**（2026-10-23 公开仓 CI 首跑实测，两次稳定复现）：
+    ///   `Task.detached` 跑在 Swift 并发的**协作线程池**上，宽度约等于活跃核心数，
+    ///   而且**不允许阻塞**——池里每多一个卡住的线程，就少一份算力给别的任务。
+    ///   一次调用最长要占满 `requestTimeout`（10 s），8 个并发就能把三核机器的池占满；
+    ///   而服务端自己的 `Task.detached { await service.handle(job) }` **也在同一个池**里，
+    ///   抢不到线程 ⇒ 8 个请求里 6 个卡满预算后报 `timeout`。
+    ///   本机 10 核跑不出来（池够宽），`macos-15` runner 的 3 核稳定复现，
+    ///   症状是 `AuthorityServiceTests.testTwoConcurrentRequestsEachReadTheLatestSettings`
+    ///   在 CI 上必红、在本机必绿。
+    ///   GCD 队列允许 overcommit，且完全不参与协作池——阻塞 I/O 该待在这里。
+    ///
+    /// ★ 也别改回「在调用方线程上同步读」：本方法被 `MCPHandler` 放在 SDK 的事件
+    ///   处理路径上，同步阻塞会把整个 MCP 服务器卡住，一次 App 卡顿就会让客户端的
+    ///   `initialize` 也超时。要的是「挪走」，不是「就地阻塞」。
+    private static let ioQueue = DispatchQueue(label: "flashfind.authority.link.io",
+                                               qos: .userInitiated,
+                                               attributes: .concurrent)
+
     // MARK: AuthorityLink
 
     /// 把 Agent 的原话交给权威端。
@@ -75,17 +95,19 @@ public struct UnixSocketAuthorityLink: AuthorityLink {
     /// ★ `context` 只是标签：助手进程把它带上，App 端**仅**用于 History 与诊断，
     /// 不进判定。它可被任何同 UID 进程伪造，所以伪造的代价只能是「标签不准」。
     ///
-    /// ★ 阻塞式 socket 读写放到 `Task.detached` 里跑：本方法被 `MCPHandler` 在
-    /// SDK 的事件处理路径上调用，在那里同步阻塞读会把整个 MCP 服务器卡住——
-    /// 一次 App 卡顿就会让客户端的 `initialize` 也超时。
+    /// ★ 阻塞读写派到 `ioQueue`（见上面的说明），**不是** `Task.detached`。
     public func call(tool: String,
                      arguments: ToolArguments,
                      context: HistoryContext? = nil) async -> ToolOutcome {
         let wire = AuthorityWire.request(tool: tool, arguments: arguments, context: context)
-        return await Task.detached(priority: .userInitiated) { [path, limits] in
-            UnixSocketAuthorityLink.outcome(
-                UnixSocketAuthorityLink.roundTrip(wire, path: path, limits: limits))
-        }.value
+        let path = self.path
+        let limits = self.limits
+        return await withCheckedContinuation { (continuation: CheckedContinuation<ToolOutcome, Never>) in
+            Self.ioQueue.async {
+                continuation.resume(returning: UnixSocketAuthorityLink.outcome(
+                    UnixSocketAuthorityLink.roundTrip(wire, path: path, limits: limits)))
+            }
+        }
     }
 
     // MARK: 往返

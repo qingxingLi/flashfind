@@ -206,6 +206,29 @@ def _plist_build_number() -> str:
 
 HELPER_BUILD = _plist_build_number()
 
+
+# Helper 当前的短版本号。同样**从 plist 现读，不写死**。
+# ★ 2026-10-23 升 1.1.2→1.1.3 时，㊿₈₅ 的锚点还写着 `1.1.2`，批跑直接
+#   `FAIL 变异标记没找到`——因为源文件里已经没有那个串了。和构建号那次是同一个坑，
+#   所以这里连「退一格」都现算，不留任何随发版变化的字面量。
+def _plist_short_version() -> str:
+    import re as _re
+    text = FILES['HelperInfo'].read_text(encoding='utf-8')
+    m = _re.search(r'<key>CFBundleShortVersionString</key>\s*<string>([^<]*)</string>', text)
+    return m.group(1) if m else ''
+
+
+def _previous_patch(_version: str) -> str:
+    """把最后一段减一（1.1.3 → 1.1.2），用来模拟「派生副本忘了跟版本」。"""
+    head, _, patch = _version.rpartition('.')
+    if not head or not patch.isdigit():
+        raise SystemExit(f'版本号形状不认识，无法算出「上一格」：{_version!r}')
+    return f'{head}.{int(patch) - 1}'
+
+
+HELPER_SHORT_VERSION = _plist_short_version()
+HELPER_PREVIOUS_VERSION = _previous_patch(HELPER_SHORT_VERSION)
+
 MUTATIONS = [
     ('外观桥接被删', FILES['AppModel'],
      'appearanceBridge = appearance.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }',
@@ -1397,6 +1420,35 @@ MUTATIONS = [
     #   那样做**零效应**——上层会翻页直到把不同文件取满，结果仍然正确
     #   （2026-10-23 推演：0 效应变异不给它登记，免得变成永久 MISS）。
 
+    # ㊿₁₀₉ 阻塞往返回到协作线程池（2026-10-23 公开仓 CI 首跑的真实回归）：
+    #    8 个并发在 3 核 runner 上 6 个 timeout。根因不是慢，是放置位置——
+    #    `Task.detached` 跑在协作池上，池宽≈核心数且不允许阻塞；调用端把池占满，
+    #    服务端自己的 `Task.detached { await service.handle }` 也在同一个池里，
+    #    于是抢不到线程。本机 10 核恒绿，只有低核机器才看得出（症状是超时，不是崩溃）。
+    ('阻塞往返占用协作线程池', FILES['AuthorityLinkSocket'],
+     '        let path = self.path\n'
+     '        let limits = self.limits\n'
+     '        return await withCheckedContinuation { (continuation: CheckedContinuation<ToolOutcome, Never>) in\n'
+     '            Self.ioQueue.async {\n'
+     '                continuation.resume(returning: UnixSocketAuthorityLink.outcome(\n'
+     '                    UnixSocketAuthorityLink.roundTrip(wire, path: path, limits: limits)))\n'
+     '            }\n'
+     '        }',
+     '        return await Task.detached(priority: .userInitiated) { [path, limits] in\n'
+     '            UnixSocketAuthorityLink.outcome(\n'
+     '                UnixSocketAuthorityLink.roundTrip(wire, path: path, limits: limits))\n'
+     '        }.value'),
+
+    # ㊿₁₁₀ 承载阻塞往返的队列改成串行：不会超时（每个请求都很快），
+    #    但把「并发」悄悄降级成「串行」——八个请求排一队，后到的只能等前面跑完。
+    #    属于「没坏但退化了」那一类，靠结构断言守 `attributes: .concurrent`。
+    ('阻塞往返队列改成串行', FILES['AuthorityLinkSocket'],
+     '    private static let ioQueue = DispatchQueue(label: "flashfind.authority.link.io",\n'
+     '                                               qos: .userInitiated,\n'
+     '                                               attributes: .concurrent)',
+     '    private static let ioQueue = DispatchQueue(label: "flashfind.authority.link.io",\n'
+     '                                               qos: .userInitiated)'),
+
     # ㊽ 响应上限不判：4 MB 的正文直接发出去，客户端只能靠 alloc 撞墙。
     ('响应上限不生效', FILES['AuthorityListener'],
      '        if data.count > limits.maxResponseBytes {',
@@ -2520,9 +2572,10 @@ MUTATIONS = [
     # ── Phase 10（2026-10-22）：Helper 身份 + 打包签名顺序 ──
     # ㊿₈₅ 派生副本落后一格：主 plist 升了版本、HelperInfo.plist 忘了跟。
     #     编译照过、链接照成，只有客户端握手时那行 serverInfo.version 是旧的。
+    #     ★ 两端都现读现算，不写死版本号（见文件头 HELPER_SHORT_VERSION 的说明）。
      ('Helper 版本落后一格', FILES['HelperInfo'],
-      '<string>1.1.2</string>',
-      '<string>1.1.1</string>'),
+      '<string>%s</string>' % HELPER_SHORT_VERSION,
+      '<string>%s</string>' % HELPER_PREVIOUS_VERSION),
     # ㊿₈₆ 构建号留空：`serverInfo.version` 只读短版本，构建号空了在协议上看不出来，
     #     但打包脚本会拿它当身份的一部分（归档名、证据目录）。
      ('Helper 构建号留空', FILES['HelperInfo'],
@@ -3335,6 +3388,12 @@ EXPECTED = {
     'testHelperExecutableNameMatchesThePackagedFileName',     # ㊿₈₈ 可执行名对不上
     'testHelperPlistCarriesOnlyBundleIdentityKeys',           # ㊿₈₉ 混进 App 键
     'testPackagingScriptSignsHelperBeforeTheApp',             # ㊿₉₀ 签名顺序反了
+    # ── build 30：阻塞往返不许占用协作线程池（㊿₁₀₉ / ㊿₁₁₀）──
+    # 公开仓 CI 首跑在 3 核 runner 上暴露的**真实并发缺陷**：`Task.detached` 跑在
+    # Swift 并发的协作池上，池宽≈核心数且不允许阻塞，8 个并发就把池占满，
+    # 服务端的业务 Task 抢不到线程 → 6 个请求卡满 10 秒预算。
+    # 本机 10 核恒绿，所以这条只能靠**结构断言**守（跑行为是测不出来的）。
+    'testTheBlockingRoundTripIsNotParkedOnACooperativeThread', # ㊿₁₀₉ 占协作池 / ㊿₁₁₀ 队列改串行
     # ── Phase 11-lite：客户端 capability 兼容清洗（㊿₉₁–㊿₉₆）──
     # ★ 「进 EXPECTED」与「有变异能打红它」必须成对：下面每一条都点了名。
     # ★ 不进 EXPECTED 的是这组里的**护栏用例**（非 initialize 原样、缺 capabilities

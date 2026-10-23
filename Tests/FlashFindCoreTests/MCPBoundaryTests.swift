@@ -322,6 +322,42 @@ final class MCPBoundaryTests: XCTestCase {
                           "设选项必须发生在交给后台队列之前——serve 里马上就要用它写回包")
     }
 
+    /// 阻塞式 socket 读写不许占用 Swift 并发的**协作线程池**（2026-10-23 公开仓 CI 首跑）。
+    ///
+    /// 症状：8 个并发请求在 3 核 runner 上 6 个报 `timeout`，同一条用例在本机 10 核
+    /// 恒绿。根因不是「算得慢」，是**放错了地方**：`Task.detached` 跑在协作池上，
+    /// 池宽≈活跃核心数且不允许阻塞；调用端一多就把池占满，服务端自己的
+    /// `Task.detached { await service.handle(job) }` 也在同一个池里，于是抢不到线程。
+    ///
+    /// 所以这条断言锁的不是性能数字，是放置位置：阻塞往返必须在 GCD 队列上。
+    ///
+    /// ★ 用括号配平只切 `call(...)` 这一支，不用全文 `contains`：将来别处新增一个
+    /// 低频的 `Task.detached`（比如探活）不该由这条用例判红，反过来
+    /// `roundTrip` 在别处被同步调用也不归它管。
+    func testTheBlockingRoundTripIsNotParkedOnACooperativeThread() throws {
+        let link = try code(of: "Sources/FlashFindCore/MCP/UnixSocketAuthorityLink.swift")
+        let body = try braceBalancedBlock(in: link, anchor: "public func call(tool: String")
+
+        XCTAssertFalse(body.contains("Task.detached"),
+                       """
+                       阻塞读又回到了 Task.detached 上。协作线程池宽度≈核心数且不允许阻塞，
+                       并发一多就会把服务端的业务 Task 饿死（CI 三核必红，本机十核看不出来）。
+                       阻塞 I/O 要放到 GCD 队列：它允许 overcommit，也不参与协作池。
+                       """)
+        guard body.range(of: "Self.ioQueue.async") != nil else {
+            return XCTFail("call 没有把往返派到 ioQueue：这条断言会假绿")
+        }
+
+        // 队列本身必须是 concurrent：串行队列会把 N 个并发请求排成一队。那样不会超时
+        // （每个都很快），但「并发」被悄悄降级成「串行」，是另一类退化。
+        guard let queue = link.range(of: "private static let ioQueue = DispatchQueue(") else {
+            return XCTFail("找不到 ioQueue 的定义：这条断言会假绿")
+        }
+        let definition = String(link[queue.lowerBound...].prefix(240))
+        XCTAssertTrue(definition.contains("attributes: .concurrent"),
+                      "ioQueue 必须声明 .concurrent，否则并发请求会被排成一队")
+    }
+
     /// 打包脚本不许拷贝任何开发期工具（Phase 10 加 `Contents/Helpers/` 时的闸）。
     func testPackagingScriptDoesNotCopyDevTools() throws {
         let url = clientRoot.appendingPathComponent("scripts/build_trial.py")

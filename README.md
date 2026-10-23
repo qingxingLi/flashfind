@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.2
+- **当前版本**：1.1.3
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -41,12 +41,14 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
 | 项 | 说明 |
 |---|---|
 | 助手 | `闪寻.app/Contents/Helpers/flashfind-mcp`，随应用分发，不是单独下载 |
-| 通道 | 本机 unix socket（`~/Library/Application Support/闪寻/ipc/mcp.sock`，权限 `0600`，仅同一登录会话可连），不出网 |
+| 通道 | 本机 unix socket（`~/Library/Application Support/FlashFind2/ipc/mcp.sock`，权限 `0600`，仅同一登录会话可连），不出网 |
 | 工具 | `list_sources` / `search` / `locate` / `locate_many` / `get_metadata` / `recent` |
 
-交出去的只有文件本身的信息（名称、所在来源、大小、修改时间、类型等），
-**不含文件内容，也不含绝对路径**——路径在客户端侧合成，AI 拿到的是一个不透明的
-`file_id`。授权范围跟着你的勾选走：取消勾选某个来源后，连它的旧 `file_id` 也问不到东西
+交出去的只有文件本身的信息（名称、所在来源、**相对路径**、大小、修改时间、类型），
+**不含文件内容**。路径给的是去掉开头 `/` 与卷挂载点的形态（如
+`Users/you/Documents/报告.pdf`）——**如果你把「此 Mac」也授权给它，这个相对路径基本
+就等于完整路径**，请按「它能看到文件名和所在文件夹」来评估。AI 引用文件时用的是
+不透明的 `file_id`。授权范围跟着你的勾选走：取消勾选某个来源后，连它的旧 `file_id` 也问不到东西
 （会像「文件不在了」一样返回 `not_found`，不给专门的拒绝码——拒绝本身也是一种信息）。
 
 想收回随时可以：关掉总开关，或在同一页「清空 AI 历史」。细节见 `PRIVACY.md` 第六节。
@@ -90,13 +92,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1320 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1321 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1320 项
+swift test                       # 1321 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 
