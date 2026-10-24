@@ -14,7 +14,7 @@ private let nasFixtureSource = SearchSource(id: "nas-fixture", name: "NAS 来源
 
 private func nasFixtureConfig() -> NASSourceConfig {
     NASSourceConfig(id: nasFixtureSource.id, name: nasFixtureSource.name, vendor: .synology,
-                    host: "192.168.1.96", port: 5001, username: "nasuser", scope: "/示例共享")
+                    host: "192.168.1.96", port: 5001, username: "flashfind", scope: "/示例共享")
 }
 
 /// 测试闸门：让「取消发生在批次到达之前」变成**确定的顺序**，而不是靠 sleep 赌调度。
@@ -89,20 +89,32 @@ private func nasFixtureConfig() -> NASSourceConfig {
 }
 
 final class NASSearchPipelineTests:XCTestCase {
+    /// 慢来源不许拖住快来源。顺序由闸门**保证**：慢的那个停在闸门前，
+    /// 快的事件必在它之前到达；断言完再放闸门，看慢的那条结果会不会把快的挤掉。
+    ///
+    /// ★ 早先这两条是「睡 50 ms 再断言只有 local」——又是赌 sleep。CI 3 核满载时 50 ms
+    /// 可能拖到 150 ms 之后才醒，而慢来源的延迟正是 150 ms，于是醒来时两个事件都到了：
+    /// 2026-10-24 CI 红在 `["local_mac", "nas-fixture"]` ≠ `["local_mac"]`（本机 10 核复制不出）。
     @MainActor func testFastLocalDoesNotWaitForNASAndNASFailureRetainsLocal() async {
-        let local=ScriptProvider(.local),nas=ScriptProvider(nasFixtureSource,delay:150_000_000,fail:true),c=SearchCoordinator(providers:[local,nas])
+        let gate=ScriptGate()
+        let local=ScriptProvider(.local),nas=ScriptProvider(nasFixtureSource,fail:true),c=SearchCoordinator(providers:[local,nas])
+        nas.gate=gate
         var events=[ProviderEvent]();c.search("资料") { events.append($0) }
-        try? await Task.sleep(nanoseconds:50_000_000)
+        await waitUntil(2) { !events.isEmpty }
         XCTAssertEqual(events.map(\.sourceID),["local_mac"])
-        try? await Task.sleep(nanoseconds:180_000_000)
+        gate.open=true
+        await waitUntil(2) { events.count>=2 }
         XCTAssertEqual(events.flatMap(\.results).count,1);XCTAssertEqual(events.last?.state,.failed)
     }
     @MainActor func testFastNASDoesNotWaitForLocalAndLocalFailureRetainsNAS() async {
-        let local=ScriptProvider(.local,delay:150_000_000,fail:true),nas=ScriptProvider(nasFixtureSource),c=SearchCoordinator(providers:[local,nas])
+        let gate=ScriptGate()
+        let local=ScriptProvider(.local,fail:true),nas=ScriptProvider(nasFixtureSource),c=SearchCoordinator(providers:[local,nas])
+        local.gate=gate
         var events=[ProviderEvent]();c.search("odoo") { events.append($0) }
-        try? await Task.sleep(nanoseconds:50_000_000)
+        await waitUntil(2) { !events.isEmpty }
         XCTAssertEqual(events.first?.sourceID,nasFixtureSource.id)
-        try? await Task.sleep(nanoseconds:180_000_000)
+        gate.open=true
+        await waitUntil(2) { events.count>=2 }
         XCTAssertEqual(events.flatMap(\.results).count,1);XCTAssertEqual(events.last?.state,.failed)
     }
     /// 新查询取代旧查询后，旧查询的迟到批次必须被丢掉，且旧请求必须被取消。
