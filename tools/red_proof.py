@@ -58,6 +58,7 @@ FILES = {
     'SearchQueryParser': CLIENT / 'Sources/FlashFindCore/SearchQueryParser.swift',
     'SearchCoordinator': CLIENT / 'Sources/FlashFindCore/SearchCoordinator.swift',
     'AppSearchProvider': CLIENT / 'Sources/FlashFindCore/AppSearchProvider.swift',
+    'AppCatalog': CLIENT / 'Sources/FlashFindCore/AppCatalog.swift',
     'SearchFieldView': CLIENT / 'Sources/FlashFind2App/SearchFieldView.swift',
     'BrandGlyphMetrics': CLIENT / 'Sources/FlashFindCore/BrandGlyphMetrics.swift',
     'BuildTrial': CLIENT / 'scripts/build_trial.py',
@@ -2472,6 +2473,48 @@ MUTATIONS = [
      '        }\n'
      '        self.context = try container.decodeIfPresent(HistoryContext.self, forKey: .context)?.clamped'),
 
+    # ---- 2026-10-24 「搜不到终端、照片」：目录覆盖 + 本地化显示名 ----
+    # ㊿₁₁₂ 扫描表少了 `Utilities`：终端、活动监视器、磁盘工具全在系统这个子目录里，
+    #      少一行就是「用户搜终端搜不到」——而 `AppSearchTests` 全绿（它只测列目录契约）。
+    ('应用搜索漏掉系统 Utilities 目录', FILES['AppCatalog'],
+     '        URL(fileURLWithPath: "/System/Applications"),\n'
+     '        URL(fileURLWithPath: "/System/Applications/Utilities"),',
+     '        URL(fileURLWithPath: "/System/Applications"),'),
+    # ㊿₁₁₃ 显示名退回文件名：中文系统上「照片」「终端」都变成 Photos / Terminal，
+    #      用户按中文名搜就一条都搜不到。
+    ('应用显示名退回文件名', FILES['AppCatalog'],
+     'name: localized ?? stem',
+     'name: stem'),
+    # ㊿₁₁₄ 不留别名：显示名是「终端」时，敲 terminal 一条都不命中。
+    ('本地化后不保留英文别名', FILES['AppCatalog'],
+     'aliases: localized == nil ? [] : [stem]))',
+     'aliases: []))'),
+    # ㊿₁₁₅ 名次只按显示名算：`Safari浏览器` 靠别名整名命中会被算成前缀（1）。
+    ('名次只按显示名算', FILES['AppCatalog'],
+     'for key in candidate.matchKeys where fold(key).contains(folded) {',
+     'for key in candidate.matchKeys.prefix(1) where fold(key).contains(folded) {'),
+    # ㊿₁₁₆ 显示名不剥 `.app`：结果列表里每行都写成「照片.app」。
+    ('显示名不剥 app 后缀', FILES['AppCatalog'],
+     'let name = trimmed.hasSuffix(".app") ? String(trimmed.dropLast(".app".count)) : trimmed',
+     'let name = trimmed'),
+    # ㊿₁₁₇ 缓存永不命中（等于没有缓存）：每敲一个字符都把 140 个 App 的
+    #      Spotlight 元数据重读一遍，约 50ms 落在主线程上。功能对、手感错。
+    ('应用清单缓存永不命中', FILES['AppSearchProvider'],
+     'if let cached, let cachedAt, Date().timeIntervalSince(cachedAt) < cacheLifetime {',
+     'if let cached, let cachedAt, Date().timeIntervalSince(cachedAt) < -1 {'),
+    # ㊿₁₁₈ 结果行的 rank 改按显示名单算：排序用别名、显示用另一套值，
+    #      于是「排第一的那行 rank 写着 1」。
+    ('结果行 rank 按显示名算', FILES['AppSearchProvider'],
+     'rank: AppCatalog.rank(for: candidate, query: parsed.keywords) ?? 2',
+     'rank: AppCatalog.rank(name: candidate.name, query: parsed.keywords)'),
+    # ㊿₁₁₉ 缓存永不刷新：新装的 App 在进程活着的期间永远搜不到。
+    #      ★ 与 ㊿₁₁₇ 锚在同一行（`< cacheLifetime`），批跑同时打上会报「标记没找到」，
+    #        所以它只能单跑；批跑里 `testProviderRescansAfterTheCacheLifetime` 该是绿的
+    #        ⇒ 该用例**不进** `EXPECTED`，由 `mutate_each_mapped.py` 单跑证红。
+    ('应用清单缓存永不刷新', FILES['AppSearchProvider'],
+     'Date().timeIntervalSince(cachedAt) < cacheLifetime',
+     'Date().timeIntervalSince(cachedAt) >= 0'),
+
     # ---- 只单跑：与批跑里某条互相掩盖（见 SINGLE_ONLY 注释）----
     # ㊿₄₈ 去重键里去掉 `session_id`：两个助手进程从此互相污染。
     #      ★ 这种 bug **只在开两个客户端时才出现** —— 单会话下无论怎么实现都表现正常。
@@ -2834,9 +2877,30 @@ SINGLE_ONLY = {
     #   所以它只能单跑；单跑时 `ClientCapabilitySanitizerTests` 与
     #   `MCPStdioTests/testCodexShapeInitializeIsAccepted` 才会红得有名有姓。
     '清洗层空转',
+    # ★ 与 ㊿₁₁₇ 锚在同一行（`Date().timeIntervalSince(cachedAt) < cacheLifetime`）：
+    #   批跑里 ㊿₁₁₇ 已经把缓存打成永不命中，这条再打上就「标记没找到」。
+    #   单跑它时 `testProviderRescansAfterTheCacheLifetime` 才会红得有名有姓。
+    '应用清单缓存永不刷新',
 }
 
 EXPECTED = {
+    # ---- 2026-10-24「搜不到终端、照片」：目录覆盖 + 本地化显示名 ----
+    # 这组用例是补**覆盖面**：原来的 `AppSearchTests` 只锁「列顶层 .app」，
+    # 对「少扫了 Utilities」和「显示名用文件名」两处都是绿的。
+    'testDefaultDirectoriesIncludeTheFoldersSystemAppsLiveIn',
+    'testRealCatalogFindsTerminalWhichLivesUnderUtilities',
+    'testScanUsesTheSpotlightNameAndKeepsTheFileStemAsAlias',
+    'testNormalizeDisplayNameStripsTheBundleSuffix',
+    'testNormalizeDisplayNameRejectsValuesThatWouldRenderBlank',
+    'testLocalizedNameAndFileStemAreBothSearchable',
+    'testAliasExactMatchRanksZeroInsteadOfPrefix',
+    'testResultRowRankComesFromTheMatchedNameNotTheDisplayName',
+    'testProviderReusesTheCatalogAcrossKeystrokes',
+    # 注：`testProviderRescansAfterTheCacheLifetime` **不在**这里——唯一能打红它的
+    # ㊿₁₁₉ 因为锚点冲突只能单跑，批跑里它该是绿的（见 `SINGLE_ONLY`）。
+    # `testAddingSubdirectoriesDidNotTurnScanIntoARecursiveWalk` 与
+    # `testScanFallsBackToTheFileStemWhenThereIsNoSpotlightName` 是「不许发生」型护栏，
+    # 没有变异能打红，按规矩不进 EXPECTED。
     # ---- 2026-10-23 build 31：重启后必须能自动用已存密码登录 ----
     # 三条互相独立：策略判据、read 的调用点、delete 的双层清扫。
     # 前两条在批跑里会同时打上（不同行），但任一条单独生效都能让对应用例红

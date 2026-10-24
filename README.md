@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.6
+- **当前版本**：1.1.7
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -92,13 +92,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1347 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1359 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1347 项
+swift test                       # 1359 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 

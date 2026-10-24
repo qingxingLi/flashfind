@@ -16,17 +16,39 @@ public final class AppSearchProvider: SearchProvider {
     /// 结果上限。应用命中通常很集中，20 条足够铺满一屏。
     public var limit: Int
 
-    private let scan: @Sendable () -> [AppSearchCandidate]
+    /// 目录枚举结果的缓存寿命（秒）。
+    ///
+    /// 名字要取访达显示的那个，就得逐个 App 读 Spotlight 元数据——136 个 App 约 47ms。
+    /// 这条来源不走 600ms 防抖（本机来源立即执行），所以每敲一个字符都要在主线程上
+    /// 花掉这 47ms，打字会发黏。缓存 30 秒把它摊平：新装的 App 最迟半分钟内出现，
+    /// 换来的是每个字符只做一次纯内存比对。
+    public var cacheLifetime: TimeInterval
 
-    public init(limit: Int = 20,
+    private let scan: @Sendable () -> [AppSearchCandidate]
+    private var cached: [AppSearchCandidate]?
+    private var cachedAt: Date?
+
+    public init(limit: Int = 20, cacheLifetime: TimeInterval = 30,
                 scan: @escaping @Sendable () -> [AppSearchCandidate] = { AppCatalog.scan() }) {
         self.limit = limit
+        self.cacheLifetime = cacheLifetime
         self.scan = scan
     }
 
     /// 取消是空操作：搜索在同一次调用里同步跑完，没有可取消的中间态。
     /// 迟到事件的拦截在 `SearchCoordinator`（它只转发 queryID 对得上的事件）。
     public func cancel(queryID: UUID) {}
+
+    /// 取应用清单：缓存没到期就用上次的，到期或第一次才真扫。
+    private func candidates() -> [AppSearchCandidate] {
+        if let cached, let cachedAt, Date().timeIntervalSince(cachedAt) < cacheLifetime {
+            return cached
+        }
+        let fresh = scan()
+        cached = fresh
+        cachedAt = Date()
+        return fresh
+    }
 
     public func search(_ text: String, queryID: UUID, emit: @escaping @MainActor (ProviderEvent) -> Void) async {
         emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .searching))
@@ -38,7 +60,7 @@ public final class AppSearchProvider: SearchProvider {
                                state: .completed, reportedTotal: 0))
             return
         }
-        let hits = AppCatalog.matches(scan(), query: parsed.keywords, limit: limit)
+        let hits = AppCatalog.matches(candidates(), query: parsed.keywords, limit: limit)
         // 就绪判据是拿到 total，不是收到 finished：空结果也要带 0 一起落终态，
         // 否则 SearchCompletionTracker 会一直把这一条记在 pending 里，
         // 状态栏永远显示「正在搜索」。
@@ -52,7 +74,9 @@ public final class AppSearchProvider: SearchProvider {
                                             kind: "app",
                                             size: nil,
                                             localURL: candidate.url,
-                                            rank: AppCatalog.rank(name: candidate.name, query: parsed.keywords))
+                                            // 名次与排序同源：`matches` 已经筛过一遍，
+                                            // 这里若按显示名单算，别名命中的那行会被写成 1。
+                                            rank: AppCatalog.rank(for: candidate, query: parsed.keywords) ?? 2)
                            },
                            state: .completed,
                            reportedTotal: hits.count))

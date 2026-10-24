@@ -620,6 +620,28 @@ EXPECT = {
         'CredentialVaultTests', {'testStoreDefaultsToTheConsolidatedLayout'}),
     '升迁前不探测 DP（先白读一轮经典钥匙串）': (
         'KeychainLookupTests', {'testTierMigrationProbesDataProtectionBeforeReadingTheClassicTier'}),
+    # ---- 应用搜索覆盖面（2026-10-24，搜不到终端/照片）----
+    '应用搜索漏掉系统 Utilities 目录': (
+        'AppSearchCoverageTests', {'testDefaultDirectoriesIncludeTheFoldersSystemAppsLiveIn',
+                                  'testRealCatalogFindsTerminalWhichLivesUnderUtilities'}),
+    '应用显示名退回文件名': (
+        'AppSearchCoverageTests', {'testScanUsesTheSpotlightNameAndKeepsTheFileStemAsAlias'}),
+    '本地化后不保留英文别名': (
+        'AppSearchCoverageTests', {'testScanUsesTheSpotlightNameAndKeepsTheFileStemAsAlias'}),
+    '名次只按显示名算': (
+        'AppSearchCoverageTests', {'testAliasExactMatchRanksZeroInsteadOfPrefix',
+                                   'testResultRowRankComesFromTheMatchedNameNotTheDisplayName',
+                                   'testLocalizedNameAndFileStemAreBothSearchable'}),
+    '显示名不剥 app 后缀': (
+        'AppSearchCoverageTests', {'testNormalizeDisplayNameStripsTheBundleSuffix',
+                                   'testNormalizeDisplayNameRejectsValuesThatWouldRenderBlank'}),
+    '应用清单缓存永不命中': (
+        'AppSearchCoverageTests', {'testProviderReusesTheCatalogAcrossKeystrokes'}),
+    '结果行 rank 按显示名算': (
+        'AppSearchCoverageTests', {'testResultRowRankComesFromTheMatchedNameNotTheDisplayName'}),
+    # ★ 这一条在批跑里会被 ㊿₁₁₇ 掩盖，只能单跑（见 red_proof.py 的 SINGLE_ONLY）。
+    '应用清单缓存永不刷新': (
+        'AppSearchCoverageTests', {'testProviderRescansAfterTheCacheLifetime'}),
 }
 
 
