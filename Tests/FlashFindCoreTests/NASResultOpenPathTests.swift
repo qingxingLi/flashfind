@@ -22,6 +22,26 @@ import XCTest
 @MainActor
 final class NASResultOpenPathTests: XCTestCase {
 
+    func testResolveDoesNotOpenSameNamedFileInAnotherShare() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let wrong = base.appendingPathComponent("wrong")
+        let right = base.appendingPathComponent("right")
+        for root in [wrong, right] {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try Data().write(to: root.appendingPathComponent("file.pdf"))
+        }
+        let config = NASSourceConfig(host: "nas.example.com", port: 5001,
+                                     username: "u", scopes: ["/one", "/two"])
+        let provider = NASSearchProvider(bridge: OpenPathNoopBridge(), config: config, port: 5001)
+        let row = SearchResult(id: "r", name: "file.pdf", relativePath: "/two/file.pdf",
+                               sourceID: provider.source.id, sourceName: "NAS", kind: "file", size: nil, localURL: nil)
+        let mounts = [try XCTUnwrap(SMBMountCandidate.parse(origin: "//nas.example.com/one", mountPath: wrong.path)),
+                      try XCTUnwrap(SMBMountCandidate.parse(origin: "//nas.example.com/two", mountPath: right.path))]
+        XCTAssertEqual(try provider.resolve(row, in: mounts).path,
+                       right.appendingPathComponent("file.pdf").resolvingSymlinksInPath().path)
+    }
+
     private func locator(_ scopes: [String]) -> NASLocator {
         let config = NASSourceConfig(host: "nas.example.com", port: 5001,
                                      username: "u", scopes: scopes)

@@ -21,14 +21,14 @@ extension AppModel {
     var bridgeStateDirectory: URL? { nasConnectionManager.stateDirectory }
     var draftOffersPlainHTTPRetry: Bool { wizard.draftOffersPlainHTTPRetry }
     var draftBusy: Bool { wizard.draftBusy }
+    /// 草稿还在等上一轮收尾落定（此时「已连接 / 可保存」都还不成立）。
+    var draftSettling: Bool { wizard.draftSettling }
     var draftAvailableShares: [String] { wizard.draftAvailableShares }
     var draftConnected: Bool { wizard.draftConnected }
     var draftUsesAdminAccount: Bool { wizard.draftUsesAdminAccount }
     var nasTrustCandidate: NASTrustCandidate? { wizard.nasTrustCandidate }
     var adminAccountWarning: String { wizard.adminAccountWarning }
     var draftIdentityChanged: Bool { wizard.draftIdentityChanged }
-    var hasStoredPasswordForDraft: Bool { wizard.hasStoredPasswordForDraft }
-    var keychainHint: String? { wizard.keychainHint }
     var canConnectDraft: Bool { wizard.canConnectDraft }
     var connectDisabledReason: String? { wizard.connectDisabledReason }
     var draftCredentialResetHint: String? { wizard.draftCredentialResetHint }

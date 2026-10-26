@@ -90,6 +90,12 @@ public final class SearchScheduler {
         let provider: any SearchProvider
         let emit: @MainActor (ProviderEvent) -> Void
         let deadline: Date
+        /// 本次搜索的位置限定（`nil` = 不限定）。
+        ///
+        /// ★ 它是**每条队列项**的状态，不是调度器上的持久状态：
+        /// GUI 限定在「照片」的那一轮与 Agent 不限定的下一轮会先后排在
+        /// 同一个来源上，两条项各自带着自己的限定，谁都不影响谁。
+        let rootLimit: SearchRootLimit?
     }
 
     private let providers: [any SearchProvider]
@@ -145,12 +151,13 @@ public final class SearchScheduler {
                        owner: SearchOwner,
                        provider: any SearchProvider,
                        supersedePrevious: Bool,
+                       rootLimit: SearchRootLimit? = nil,
                        emit: @escaping @MainActor (ProviderEvent) -> Void) {
         reapExpired()
         if supersedePrevious {
             supersedeAll(owner: owner, keeping: queryID)
         }
-        enqueue(text: text, queryID: queryID, owner: owner, provider: provider, emit: emit)
+        enqueue(text: text, queryID: queryID, owner: owner, provider: provider, rootLimit: rootLimit, emit: emit)
     }
 
     /// 提交一次搜索。`sources` 为 nil 表示「这台机器上注册的全部来源」。
@@ -172,6 +179,7 @@ public final class SearchScheduler {
                        owner: SearchOwner,
                        sources: Set<String>? = nil,
                        supersedePrevious: Bool? = nil,
+                       rootLimit: SearchRootLimit? = nil,
                        emit: @escaping @MainActor (ProviderEvent) -> Void) {
         reapExpired()
         let supersede = supersedePrevious ?? owner.isUserInteractive
@@ -183,7 +191,7 @@ public final class SearchScheduler {
             supersedeAll(owner: owner, keeping: queryID)
         }
         for provider in providers where sources == nil || sources!.contains(provider.source.id) {
-            enqueue(text: text, queryID: queryID, owner: owner, provider: provider, emit: emit)
+            enqueue(text: text, queryID: queryID, owner: owner, provider: provider, rootLimit: rootLimit, emit: emit)
         }
     }
 
@@ -191,6 +199,7 @@ public final class SearchScheduler {
                          queryID: UUID,
                          owner: SearchOwner,
                          provider: any SearchProvider,
+                         rootLimit: SearchRootLimit?,
                          emit: @escaping @MainActor (ProviderEvent) -> Void) {
         let sid = provider.source.id
         let entry = Entry(queryID: queryID,
@@ -199,7 +208,8 @@ public final class SearchScheduler {
                           sourceID: sid,
                           provider: provider,
                           emit: emit,
-                          deadline: now().addingTimeInterval(Double(queueWaitMs) / 1000))
+                          deadline: now().addingTimeInterval(Double(queueWaitMs) / 1000),
+                          rootLimit: rootLimit)
 
         // 「能不能立刻跑」要同时看三个容器：槽位可能被正在跑的占着，
         // 也可能被**正在退出的**占着（cancelling）。只看 running 会让新旧两个
@@ -219,7 +229,8 @@ public final class SearchScheduler {
     private func start(_ entry: Entry) {
         running[entry.sourceID] = entry
         Task { @MainActor [weak self] in
-            await entry.provider.search(entry.text, queryID: entry.queryID, owner: entry.owner) { event in
+            await entry.provider.search(entry.text, queryID: entry.queryID, owner: entry.owner,
+                                        rootLimit: entry.rootLimit) { event in
                 entry.emit(event)
             }
             self?.finished(sourceID: entry.sourceID, queryID: entry.queryID)

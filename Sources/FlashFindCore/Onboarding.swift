@@ -301,7 +301,9 @@ public enum SearchHintGuide {
     public static let storageKey = "ff2.searchHints.shown.v1"
 
     /// 与 `SearchKeyRouter` 的实际绑定一致（改键位请同时改这里）。
-    public static let lines = ["↑ ↓ 选择", "Return 打开", "Space 快速查看", "⌘ Return 在 Finder 中显示"]
+    ///
+    /// 输入时保留空格；先用方向键或点击选择结果后，Space 才用于预览。
+    public static let lines = ["↑ ↓ 选择", "Space 预览", "Return 打开", "⌘ Return 在 Finder 中显示"]
 
     public static func shouldShow(preferences: any ClientPreferences) -> Bool {
         !(preferences.object(forKey: storageKey) as? Bool ?? false)

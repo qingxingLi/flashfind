@@ -72,7 +72,10 @@ final class ShortcutController: ObservableObject {
         } else {
             available = true
             registrationRefused = false
-            if status.isEmpty { status = "按 \(spec.displayName) 唤出或收起搜索" }
+            // 成功时**不写任何说明**。界面上快捷键那一行已经把组合显示出来了，
+            // 再补一句「按 ⌥Space 唤出或收起搜索」是同义重复。
+            // `status` 从此只承载一件事：出问题时告诉用户为什么。
+            status = ""
         }
     }
 
@@ -103,7 +106,9 @@ final class ShortcutController: ObservableObject {
         available = true
         registrationRefused = false
         cancelRecording()
-        status = "已保存 \(spec.displayName)；下次启动继续使用，可唤出或收起搜索"
+        // 同上：改成功了就安静。这一行原来会写「已保存 ⌥Space；下次启动继续使用…」，
+        // 而按钮上的组合已经变了，用户看得出改成了什么。
+        status = ""
         return true
     }
 
@@ -117,7 +122,9 @@ final class ShortcutController: ObservableObject {
             return
         }
         isRecording = true
-        status = "按下新的组合键；Esc 取消"
+        // 录制中的提示由那一行自己画（见 `ShortcutSettingRow`），这里只清旧状态，
+        // 免得上一次的失败信息一直挂在正在录制的行下面。
+        status = ""
         // 显式标注 `-> NSEvent?`：返回 nil 表示「这个事件已被消费，别再往下传」。
         // 不标注时 Swift 会把闭包返回类型推断成非可选的 NSEvent（因为多数分支
         // `return event`），两条 `return nil` 就都过不了编译。
@@ -132,7 +139,6 @@ final class ShortcutController: ObservableObject {
             guard (window.firstResponder as? NSTextView)?.hasMarkedText() != true else { return event }
             if event.keyCode == 53 {
                 self.cancelRecording()
-                self.status = "已取消录制，原快捷键保留"
                 return nil
             }
             _ = self.apply(GlobalShortcutSpec(keyCode: UInt32(event.keyCode),
@@ -147,7 +153,8 @@ final class ShortcutController: ObservableObject {
     }
 
     func cancelRecording() {
-        if isRecording { status = "已取消录制，原快捷键保留" }
+        // 取消是用户自己按的 Esc，组合没变，不需要一句话来解释。
+        if isRecording { status = "" }
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         isRecording = false

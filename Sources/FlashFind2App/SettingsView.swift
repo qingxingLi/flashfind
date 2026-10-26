@@ -142,8 +142,6 @@ struct SettingsView: View {
                 ShortcutSettingRow(model: model)
             } header: {
                 sectionHeader("快捷键")
-            } footer: {
-                sectionFooter("再次按下快捷键可隐藏搜索窗口。")
             }
 
             // 外观三选一，选了立即生效（`AppearanceController.set` 里直接应用）。
@@ -178,8 +176,6 @@ struct SettingsView: View {
                 }
             } header: {
                 sectionHeader("权限")
-            } footer: {
-                sectionFooter("搜索桌面、文档这类受保护的位置需要「完全磁盘访问」。网络访问只在添加了 NAS 来源时才用到。")
             }
 
             // 版本号落在「通用」末尾：用户要报问题时会先来这里找，
@@ -517,10 +513,6 @@ struct SettingsView: View {
                     .accessibilityIdentifier("ai-access-enabled")
             } header: {
                 sectionHeader("AI 访问")
-            } footer: {
-                sectionFooter(model.aiAccess.draft.isEnabled
-                              ? "关掉后 AI 立刻失去连接，正在进行的搜索也会停下。"
-                              : "打开后，Claude、Codex、Cursor 这类 AI 工具才能通过闪寻查找文件。默认关闭，也不会预先勾选任何位置。")
             }
 
             // 关着的时候不摆一排灰掉的勾选框：那既点不动，又像是在暗示
@@ -562,8 +554,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     sectionHeader("允许 AI 搜索的位置")
-                } footer: {
-                    sectionFooter("AI 只能看到你在这里勾选的来源。没有勾选的来源，连名字都不会告诉 AI。")
                 }
             }
 
@@ -577,20 +567,16 @@ struct SettingsView: View {
                     }
                 }
                 .accessibilityIdentifier("ai-helper-status")
-                Text(model.mcpHelperStatus.detail)
-                    .font(.system(size: SettingsTypography.caption))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // 健康时不写解释：那一行「正常运行」已经说完了。
+                // 只有真的没在跑才需要第二行说明发生了什么。
+                if !model.mcpHelperStatus.isHealthy {
+                    Text(model.mcpHelperStatus.detail)
+                        .font(.system(size: SettingsTypography.caption))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } header: {
                 sectionHeader("MCP Helper")
-            } footer: {
-                // 这里不写「已连接 N 个客户端」之类的数字：闪寻只知道自己这边在监听，
-                // 谁连上来、连了几个它并不跟踪。编一个数字比不写更糟。
-                //
-                // ★ 必须补最后那句：上面可能写着「正常运行」而 AI 访问是关着的
-                //（socket 一直在监听，判定在服务里）。不说明的话，用户会以为
-                //「正常运行」等于「AI 现在能用」，然后去问为什么搜不到。
-                sectionFooter("这一行说的是闪寻这一侧在不在等待连接。AI 客户端什么时候连上来，由你在那边决定；AI 访问关着时，连上来也会被拒绝。")
             }
 
             // 「怎么接」——这一段是 AI 页里唯一能直接解决用户问题的东西。
@@ -624,22 +610,8 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-
-                    // 刻意不给「Claude / Codex / Cursor」三选一：填进去的永远是同一个路径，
-                    // 选客户端只会让人以为选错了就接不上。这里真正的分支只有
-                    // 「它的配置写法长什么样」，而那件事该由它自己的文档回答。
-                    DisclosureGroup(MCPIntegrationText.otherClientsTitle) {
-                        Text(MCPIntegrationText.otherClientsDetail)
-                            .font(.system(size: SettingsTypography.caption))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 4)
-                    }
-                    .accessibilityIdentifier("ai-prompt-other-clients")
                 } header: {
                     sectionHeader(MCPIntegrationText.title)
-                } footer: {
-                    sectionFooter(MCPIntegrationText.footer)
                 }
             } else if model.aiAccess.draft.isEnabled {
                 Section {
@@ -654,10 +626,15 @@ struct SettingsView: View {
             Section {
                 LabeledContent("记录") { Text(history.title) }
                     .accessibilityIdentifier("ai-history-title")
-                Text(history.detail)
-                    .font(.system(size: SettingsTypography.caption))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // 正常态不写「每次成功找到都会记一条，目前 N 条」这类说明。
+                // 只有历史库打不开时才必须说话——那时 recent 会返回空，
+                // 用户看到的「查不到」需要一句解释。
+                if history.isUnavailable {
+                    Text(history.detail)
+                        .font(.system(size: SettingsTypography.caption))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Button(AIHistoryText.clearButton) { confirmingHistoryClear = true }
                     .disabled(!history.canClear)
                     .accessibilityIdentifier("ai-history-clear")
@@ -669,8 +646,6 @@ struct SettingsView: View {
                 }
             } header: {
                 sectionHeader("AI 历史")
-            } footer: {
-                sectionFooter("历史只记在本机：谁在什么时候看过哪个文件。不记文件内容，不上传。清空不影响 AI 已经拿到的文件编号。")
             }
         }
         .formStyle(.grouped)
@@ -739,8 +714,6 @@ struct SettingsView: View {
                 }
             } header: {
                 sectionHeader("诊断")
-            } footer: {
-                sectionFooter("诊断会刷新所有来源的状态，并用已保存的密码把能连的来源连起来。报告里没有查询词、文件名与密码。")
             }
 
             // 连接生命周期不交给用户手动管：「重连所有 NAS」「刷新已挂载的 SMB 共享」
@@ -758,8 +731,6 @@ struct SettingsView: View {
                     .accessibilityIdentifier("experimental-sources")
             } header: {
                 sectionHeader("实验性功能")
-            } footer: {
-                sectionFooter("打开后，「添加搜索来源」里会出现尚未在真机上验证过的类型（威联通 / 绿联 / 飞牛 / WebDAV）。它们当中有的是已知连不上的，仅供自行尝试。")
             }
 
             // AI 访问已搬到独立的「AI」页（Phase 9-lite，2026-10-22）：
@@ -796,8 +767,6 @@ struct SettingsView: View {
                 }
             } header: {
                 sectionHeader("更新")
-            } footer: {
-                sectionFooter("从 GitHub 的发布页读取最新版本号后比对，只发一个查询请求，不上传任何信息。")
             }
         }
         .formStyle(.grouped)

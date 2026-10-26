@@ -95,6 +95,142 @@ import Foundation
     /// 只有它知道这次恢复有没有被用户中途断开。
     private var autoReconnectInFlight = false
 
+    // MARK: - 改搜索范围的在途请求（取消/返回必须有确定的收束顺序）
+
+    /// 在途的「改搜索范围」请求数。
+    ///
+    /// ★ 为什么必须数它：编辑来源时每勾一下都是**直接对活会话**发
+    ///   `selectScope`，范围要等核心应答回来才真的变。于是「当前范围 ==
+    ///   已保存范围」这句话在**请求还在飞**的时候是假的 ——
+    ///   那时立刻判断「没改过、不用回滚」，等响应落地后范围就变成了新勾的那份：
+    ///   用户点了取消，实际生效的却是他刚勾的范围。
+    private var scopeMutationDepth = 0
+    /// 等「在途请求落定」的调用方（取消 / 返回 / 切换来源）。
+    private var scopeMutationWaiters: [CheckedContinuation<Void, Never>] = []
+    /// 最近**发起**的一次改范围请求的序号（单调递增）。
+    ///
+    /// 迟到的旧应答**不许**覆盖之后发起的那次：否则「取消编辑的回滚」
+    /// 会盖掉用户紧接着的一次保存（`config.scopes` 停在已保存的旧值上，
+    /// 界面却显示保存成功）。
+    private var scopeMutationSequence = 0
+
+    /// 是否有「改搜索范围」的请求还在飞。
+    ///
+    /// 给上层（以及测试）一个**可观察**的判据，而不是让它猜「大概发完了」。
+    public var hasScopeMutationInFlight: Bool { scopeMutationDepth > 0 }
+    /// 有几个调用方（取消 / 返回 / 切换来源）正挂在在途请求上等它落定。
+    ///
+    /// ★ 必须可观察，否则「取消是不是真的在等」无从验证 —— 只看到
+    ///   `hasScopeMutationInFlight` 为真，证明不了收尾方已经进入等待。
+    public var scopeMutationWaiterCount: Int { scopeMutationWaiters.count }
+
+    /// 等本轮在途的改范围请求全部落定。
+    ///
+    /// 取消 / 返回 / 切换来源都必须在**这里**等一下，再决定要不要回滚：
+    /// 不等的话，「当前范围」只是「响应还没回来」，判断必然出错。
+    ///
+    /// ★ 这里**刻意没有自己的时限**。
+    ///
+    /// 曾经给过一个 5 秒兜底：到点就把等待者放行。那不是收尾，是把同一个
+    /// 缺陷往后挪 —— 响应在第 6 秒回来时，收尾早就按「看起来没变过」放行了，
+    /// 范围照样停在用户刚勾的那份，而界面报「取消成功」。
+    /// 一条比核心命令自己还要短的时限，只能制造「收尾成功了」的假象。
+    ///
+    /// 在途请求本身是有界的（`selectScope` 走核心命令通道，受进程看门狗约束），
+    /// 所以这里真正等待不会把界面永久挂住；反过来，任何在这里自造的短时限
+    /// 都会把「慢响应」这条真实路径重新变成缺陷。
+    public func drainScopeMutations() async {
+        guard scopeMutationDepth > 0 else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            scopeMutationWaiters.append(continuation)
+        }
+    }
+
+    /// 收尾开始：记下**此刻为止**最新发起的那次改范围请求的序号。
+    ///
+    /// ★ 收尾与下一轮编辑之间必须有归属：我在等旧请求的时候，用户可能已经
+    ///   取消了这一轮、又开了下一轮并保存了新范围。那份新范围才是结论，
+    ///   而我手里这份「已保存值」已经是上一轮的旧值 —— 拿它去回滚，
+    ///   就是拿旧草稿的结论盖掉刚才那次保存（界面显示已保存，核心却是旧值）。
+    ///   序号核对挡不住它：旧收尾是在**更晚的时刻新发**一次回滚，
+    ///   不是让一条旧应答迟到。
+    @discardableResult
+    public func beginScopeTeardown() -> Int { scopeMutationSequence }
+
+    /// 从 `beginScopeTeardown()` 那个时刻之后，是否又有人发起了新的改范围请求。
+    public func hasScopeMutationNewer(than ticket: Int) -> Bool { scopeMutationSequence > ticket }
+
+    // MARK: - 收尾边界（取消/返回 与 下一草稿 之间必须有先后）
+
+    /// 一次「取消 / 返回 / 切换来源」的收尾正挂着，还没落定。
+    private var teardownPending = false
+    private var teardownWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// 这台来源上是否还有一次未落定的收尾。
+    ///
+    /// ★ 下一草稿**借它之前**必须看这个：收尾还没落定时，活会话的范围
+    ///   **正要**被改回已保存值，此刻复制进草稿的是一份马上失效的快照。
+    public var hasPendingTeardown: Bool { teardownPending }
+    /// 是否已经有「下一草稿」挂在收尾上等它落定。
+    ///
+    /// ★ 「等了没有」必须可观察：只看 `hasPendingTeardown` 证明不了
+    ///   下一草稿真的挂上去过（它可能扫一眼就走，那和不等是一样的）。
+    public var hasTeardownWaiters: Bool { !teardownWaiters.isEmpty }
+
+    /// **同步**认领一次收尾，返回归属票号。
+    ///
+    /// ★ 必须同步：取消动作（按钮）返回之前就要把票号拿在手里。
+    ///   等到收尾 Task 真正跑起来才取票号就太晚了 —— 那期间用户可能已经
+    ///   重新打开同一台来源并改了范围，而晚出发的旧收尾会把票号取成「最新」，
+    ///   于是它反而成了归属者，拿上一轮的已保存值盖掉刚才那次编辑。
+    @discardableResult
+    public func beginTeardown() -> Int {
+        teardownPending = true
+        return scopeMutationSequence
+    }
+
+    /// 收尾落定（无论成功回滚、如实失败还是让位）。
+    public func endTeardown() {
+        teardownPending = false
+        let waiters = teardownWaiters
+        guard !waiters.isEmpty else { return }
+        teardownWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// 等上一轮收尾落定。下一草稿借这台 provider 之前走这一步。
+    ///
+    /// 与 `drainScopeMutations` 同理：**真正等待**，不自造时限
+    /// （收尾里的在途命令本身有界，任何更短的时限都只是把缺陷往后挪）。
+    public func drainTeardown() async {
+        guard teardownPending else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            teardownWaiters.append(continuation)
+        }
+    }
+
+    @discardableResult
+    private func beginScopeMutation() -> Int {
+        scopeMutationSequence += 1
+        scopeMutationDepth += 1
+        return scopeMutationSequence
+    }
+
+    private func endScopeMutation() {
+        scopeMutationDepth = max(0, scopeMutationDepth - 1)
+        guard scopeMutationDepth == 0 else { return }
+        resumeScopeMutationWaiters()
+    }
+
+    /// 唤醒所有等待者。**先清空再逐个 resume**：同一条 continuation
+    /// 被 resume 两次会直接崩，所以「取出 → 清空 → resume」必须是原子的。
+    private func resumeScopeMutationWaiters() {
+        let waiters = scopeMutationWaiters
+        guard !waiters.isEmpty else { return }
+        scopeMutationWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     public var onConnectionEvent: (([String: Any]) -> Void)?
     /// 自动重连钩子（P1-03）。由 AppModel 注入。
     ///
@@ -134,7 +270,8 @@ import Foundation
         let prefixes = config.scopes.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
         return NASLocator(sourceID: sourceID, host: config.hostName,
                           shares: Set(config.scopes.map { String($0.dropFirst()) }),
-                          scopePrefixes: prefixes, preferredSMBUser: config.smbUsername)
+                          scopePrefixes: prefixes, preferredSMBUser: config.smbUsername,
+                          exposesSMBShares: config.vendor.exposesSMBShares)
     }
 
     /// 配置变化后刷新定位快照。scope 改动必须走这里，否则后台核验仍用旧范围。
@@ -255,8 +392,27 @@ import Foundation
     /// 列出该账号可见的共享，供「选择搜索位置」使用。
     public func loadShares() async throws -> [String] {
         let result = try await bridge.command("listShares", sourceID: source.id)
-        availableShares = (result["shares"] as? [String]) ?? []
+        availableShares = Self.decodeShares(result["shares"])
         return availableShares
+    }
+
+    /// 解「共享/存储列表」。**两种形状都要认**，这不是防御性编程，是两个真实契约：
+    ///
+    /// - 群晖原生路径回 `["/共享A", "/共享B"]`（纯路径字符串）；
+    /// - 品牌适配器（`BrandSession`）回对象数组
+    ///   `[{"name": "A0002", "path": "/A0002", "sourceID": …, "sourceName": …}]`
+    ///   —— 一条共享除了路径，还要带它属于哪个来源。
+    ///
+    /// ★ 只认 `[String]` 的后果不是「少显示一条」，而是**品牌来源永远拿到空数组**，
+    /// 界面于是显示「已登录，但这个账号确实没有任何共享目录。请检查账号权限」。
+    /// 这句把责任推给了用户的账号设置，而真实原因是解码形状不匹配 ——
+    /// 2026-10-24 在 App 内实测 OpenList 时就是这么被误导的（核心明明回了 6 个存储）。
+    static func decodeShares(_ raw: Any?) -> [String] {
+        if let plain = raw as? [String] { return plain }
+        if let objects = raw as? [[String: Any]] {
+            return objects.compactMap { ($0["path"] as? String) ?? ($0["name"] as? String) }
+        }
+        return []
     }
 
     /// 绑定用户选择的搜索位置。只有通过共享准入校验才生效。
@@ -264,6 +420,10 @@ import Foundation
     @discardableResult
     public func selectScopes(_ scopes: [String]) async throws -> Bool {
         guard !scopes.isEmpty else { return false }
+        // ★ 本轮改范围**发起**时登记：取消/返回要等它落定才能判断范围；
+        //   序号用来挡住「迟到的旧应答覆盖新的那次」。
+        let sequence = beginScopeMutation()
+        defer { endScopeMutation() }
         // 同上：发起时记下代次，`await` 之后核对。
         let epoch = sessionEpoch
         let result = try await bridge.command("selectScope", sourceID: source.id, fields: ["scopes": scopes])
@@ -271,6 +431,9 @@ import Foundation
         // 这次绑范围是「断开之前」发起的 ⇒ 已过期：不解闸、不抬 ready、也不返回 true
         // （返回 true 等于告诉调用方「恢复成功」，那是谎话）。
         guard epoch == sessionEpoch else { return false }
+        // ★ 这次应答已经不是最新发起的那次（用户在它飞的时候又发了一次）：
+        //   范围归后发起的那次，这条不改 `config.scopes`，否则旧值会盖掉新值。
+        guard sequence == scopeMutationSequence else { return true }
         // 显式绑定范围 = 重新连接流程的一部分，解除断开闸门（见 `sessionClosed`）。
         // 自动重连路径同样不得解闸。
         if !autoReconnectInFlight { sessionClosed = false }
@@ -372,6 +535,20 @@ import Foundation
     /// 所以这里回一个明确的失败，并在 stderr 留一行——这是不变量违规，不是业务错误。
     public func search(_ text: String, queryID: UUID, owner: SearchOwner,
                        emit: @escaping @MainActor (ProviderEvent) -> Void) async {
+        await search(text, queryID: queryID, owner: owner, rootLimit: nil, emit: emit)
+    }
+
+    /// 带位置限定的搜索入口。
+    ///
+    /// ★ 这一条**必须**是协议要求并由本类覆写：走 `any SearchProvider` 调用时，
+    /// 非要求的扩展方法走静态派发，这里的实现根本不会被调用 ——
+    /// 编译期毫无提示，运行时表现为「界面显示限定在照片，设备却仍在扫全部共享」。
+    ///
+    /// ★ `rootLimit` 只在**属于自己**时才应用：一次搜索可能同时打多个来源
+    /// （不限位置时），限定只对那一个来源生效，其余照旧按各自授权范围搜。
+    public func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                       rootLimit: SearchRootLimit?,
+                       emit: @escaping @MainActor (ProviderEvent) -> Void) async {
         if let running = activeMachine, running.session.queryID != queryID, activeOwner != owner {
             FileHandle.standardError.write(Data(
                 "[nasuser] owner-invariant-violation source=\(source.id) running=\(activeOwner.label) incoming=\(owner.label)\n".utf8))
@@ -381,7 +558,18 @@ import Foundation
         }
         pendingOwner = owner
         defer { pendingOwner = nil }
-        await search(text, queryID: queryID, emit: emit)
+        // ★ 只有「限定说的就是这一个来源」时才把限定带下去。
+        //
+        // 限定里的根还必须与**本来源已授权的根**有交集：Swift 侧已经查过一遍，
+        // 这里再查一次是因为客户端与核心之间还隔着协议这一层 ——
+        // 两道门比一道门可靠（Dart 侧还有第三道）。
+        let effectiveRoots: [String]? = {
+            guard let limit = rootLimit, limit.sourceID == source.id else { return nil }
+            let granted = Set(config.scopes)
+            let usable = limit.roots.filter { granted.contains($0) }
+            return usable.isEmpty ? nil : usable
+        }()
+        await search(text, queryID: queryID, rootLimit: effectiveRoots.map { SearchRootLimit(sourceID: source.id, roots: $0) }, emit: emit)
     }
 
     /// 结果是否落在已授权的共享之下。多位置时任一命中即可。
@@ -429,6 +617,16 @@ import Foundation
     }
 
     public func search(_ text: String, queryID: UUID, emit: @escaping @MainActor (ProviderEvent) -> Void) async {
+        await search(text, queryID: queryID, rootLimit: nil, emit: emit)
+    }
+
+    /// 搜索主实现。
+    ///
+    /// - Parameter rootLimit: 本次搜索限定在哪些根里。`nil` = 按本来源
+    ///   已授权的全部根搜（从前就是这个行为）。非 nil 时**只**把限定后的根
+    ///   下发给设备 —— 少一个根就少一次设备侧扫描，检索时间因此真的下降。
+    public func search(_ text: String, queryID: UUID, rootLimit: SearchRootLimit?,
+                       emit: @escaping @MainActor (ProviderEvent) -> Void) async {
         guard NASQueryPolicy.accepted(text) else {
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: .blocked,
                                message: "继续输入以搜索 \(config.displayName)"))
@@ -531,9 +729,17 @@ import Foundation
             // 格式过滤在下面客户端侧完成。等核心能重编并真的把格式下推给 DSM
             // 时，再把字段加回来（同时要升协议修订号）——在那之前发一个没人读的
             // 字段，只会让「到底有没有下推」变成一笔糊涂账。
+            //
+            // ★ `roots` 是**可选**字段：只有真正限定了位置才发。
+            // 不限定时一个字都不发，行为与从前逐字节一致 ——
+            // 这样「没限定」与「限定」在协议上是两种可区分的状态，
+            // 而不是靠「发了个空的 roots」来表达。
+            var fields: [String: Any] = ["query": pattern, "queryBudgetMs": queryBudgetMs]
+            if let rootLimit, !rootLimit.roots.isEmpty {
+                fields["roots"] = rootLimit.roots
+            }
             let response = try await bridge.command("search", sourceID: source.id, queryID: queryID.uuidString,
-                                                    fields: ["query": pattern,
-                                                             "queryBudgetMs": queryBudgetMs]) { [weak self] message in
+                                                    fields: fields) { [weak self] message in
                 guard let self, self.active == queryID, message["queryID"] as? String == queryID.uuidString,
                       message["sourceID"] as? String == self.source.id, message["event"] as? String == "batch" else { return }
                 let rows = (message["files"] as? [[String: Any]] ?? []).compactMap { self.result($0, query: parsed.keywords) }
@@ -559,19 +765,19 @@ import Foundation
                 // 没挂载时保持 canOpen=false：点「打开」会走挂载流程。
                 Task { [weak self] in
                     guard let self else { return }
+                    // ★ 这个来源压根没有 SMB 这一路（OpenList）：连挂载表都不读。
+                    //   放在最外层是**成本**考虑——读一次挂载表要 `getmntinfo` 加一遍
+                    //   statfs 解析，而这类来源的每批结果都会走这里。
+                    // 取值必须在这层拿：`self.config` 是 MainActor 隔离的，
+                    // 进了下面的 detached 任务就变成一次 async 访问。
+                    let exposesSMB = self.config.vendor.exposesSMBShares
+                    guard exposesSMB else { return }
                     let resolved = await Task.detached(priority: .utility) { [self] () -> [SearchResult] in
                         let candidates = self.mountCandidates()
                         guard !candidates.isEmpty else { return [] }
-                        let deadline = ProcessInfo.processInfo.systemUptime + 3
-                        var checked = [SearchResult]()
-                        for var row in rows {
-                            if ProcessInfo.processInfo.systemUptime > deadline || Task.isCancelled { break }
-                            if let url = try? self.resolve(row, in: candidates) {
-                                row.localURL = url; row.openTarget = .mountedFile(url); row.canOpen = true
-                                checked.append(row)
-                            }
-                        }
-                        return checked
+                        return Self.localizedRows(rows, mounts: candidates,
+                                                  exposesSMBShares: exposesSMB,
+                                                  resolve: { try self.resolve($0, in: candidates) })
                     }.value
                     guard self.acceptsLateMetadata(for: queryID), !resolved.isEmpty else { return }
                     emit(ProviderEvent(queryID: queryID, sourceID: self.source.id, results: resolved,
@@ -596,6 +802,13 @@ import Foundation
             // 核心写好的那句话（品牌适配器给的原因）。有了它就不必按 kind 猜 ——
             // 同一个 kind 底下可能是「密码错」，也可能是「协议/端口不对」。
             let reason = errorBody?["reason"] as? String
+            // ★ 核心为「部分搜索位置没搜通」写的那句话（`partialNote`）。
+            //
+            // 这种情况下 `resultState` 仍是 `completed`（那部分结果确实有效），
+            // 于是 `failureMessage` 返回 nil —— 若不在这里把这句话接上，
+            // 界面只会显示「没有找到」，而真相是**有一个位置压根没搜**。
+            let partialNote = response["partialNote"] as? String
+            let failedRoots = response["failedRoots"] as? [String] ?? []
             switch state {
             case .timedOut:
                 failures += 1; degradedUntil = now().addingTimeInterval(15)
@@ -644,8 +857,9 @@ import Foundation
             let duplicates = (response["duplicateCount"] as? NSNumber)?.intValue ?? 0
             emit(ProviderEvent(queryID: queryID, sourceID: source.id, state: state,
                                message: failureMessage(state: state, kind: error, apiCode: apiCode, reason: reason)
+                                        ?? partialNote
                                         ?? skippedNote(unparsed: unparsed, duplicates: duplicates),
-                               resultsIncomplete: terminalIncomplete,
+                               resultsIncomplete: terminalIncomplete || !failedRoots.isEmpty,
                                reportedTotal: response["reportedTotal"] as? Int,
                                cleanupState: cleanupState))
         } catch {
@@ -705,6 +919,17 @@ import Foundation
 
     // MARK: - 结果解析与定位
 
+    /// 本来源的网页 origin（协议 + 主机 + 实际连接端口）。
+    ///
+    /// 协议取**实际连接用的那个**（`config.usesPlainHTTP`），端口取 `resolvedPort`
+    /// （连接时真正用的端口，不是配置里那个可能为 0 的原始字段）。
+    /// 校验必须对着「这条连接实际连到哪」比，而不是对着用户当时在地址栏里的写法比——
+    /// 两者在「端口写进地址栏」「按品牌默认协议」这些情形下并不相同。
+    var webOrigin: WebOrigin? {
+        WebOrigin(scheme: config.usesPlainHTTP ? "http" : "https",
+                  host: config.hostName, port: resolvedPort)
+    }
+
     public func result(_ m: [String: Any], query: String = "") -> SearchResult? {
         guard let path = m["path"] as? String, locatorSnapshot.contains(path: path),
               let name = m["name"] as? String, let id = m["id"] as? String,
@@ -734,7 +959,74 @@ import Foundation
             c.path = "/" + share + "/" + segments.joined(separator: "/")
             if let url = c.url { row.openTarget = .smbLocation(url) }
         }
+        // 网页打开目标（OL-OPEN）。这个 URL 会被 `NSWorkspace.open` **直接交给系统**，
+        // 所以三条都要卡住，一条都不能省：
+        //   ① 只接受 http/https —— 少这条，`file://` 或自定义 scheme 就能借结果行
+        //      触发任意本地动作；
+        //   ② 必须与本来源**同源**：协议、主机、有效端口三项全等 —— 只比主机会放行
+        //      「同主机另一个端口上的别的服务」，也只比主机会让 HTTPS 来源的地址
+        //      降到 HTTP（中间人随便看）。判定统一走 `WebOrigin`，见那边的说明；
+        //   ③ 解码后的路径必须**逐字等于**这条结果的逻辑路径 —— 少这条，
+        //      同一个主机上也能把「打开 /a.pdf」做成「打开 /b.pdf」。
+        // 另外不许带查询串、片段或 user@ 凭据：网页地址里不该有任何秘密。
+        if let target = m["openTarget"] as? [String: Any], target["kind"] as? String == "webLocation",
+           let raw = target["url"] as? String, let url = URL(string: raw),
+           let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+           webOrigin?.admits(url) == true,
+           url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+           url.path == path {
+            row.openTarget = .webURL(url)
+            // 网页目标已经指向确切的路径，不需要先挂载再核对文件存在性。
+            // `canOpen` 由 openTarget 决定，**不读** Dart 的 `canOpen` 字段：
+            // SMB 行那边恒为 false（Dart 也看不到挂载状态），信它反而会误判。
+            row.canOpen = true
+        }
         return row
+    }
+
+    /// 后台元数据补全里**唯一**会改写结果行的那一步：给能靠挂载定位的行补本地路径。
+    ///
+    /// 抽成静态函数不是为了好看，是因为它连着出过一个真机级别的错，而那个错
+    /// 在真实挂载表面前才显形、在测试里根本造不出来 —— 除非把「挂载候选」
+    /// 作为参数传进来（测试可以用临时目录造出**真的能解析成功**的候选）。
+    ///
+    /// ## 两条不许松的规则
+    ///
+    /// 1. **已经拿到网页目标的行，一律不进 SMB 解析。**
+    ///    OpenList 可以部署在任意一台主机上，包括「同一台同时也开着 SMB 的 NAS」。
+    ///    那种情况下挂载表里会有一条 host、共享名都匹配的候选，`resolve` 会
+    ///    真的解析出**另一个同路径文件**，然后把 `.webURL` 覆盖成 `.mountedFile`
+    ///    并写上 `localURL`。用户看到的是结果自己变了，点开的是另一份内容 ——
+    ///    没有共享挂载的本地模拟服务永远覆盖不到这一条。
+    /// 2. **这个来源不通过 SMB 暴露文件时，一条都不许动。**
+    ///    网页目标缺失或校验失败的行会停在 `.unavailable`；如果这时允许 SMB
+    ///    兜底，它就变成「先挂上再说」，把「网页打不开」悄悄翻译成「挂载了个
+    ///    不知道什么东西」。宁可让 `canOpen` 保持 false、由界面说清原因。
+    ///
+    /// - Parameters:
+    ///   - rows: 本批结果。
+    ///   - mounts: 已按本来源过滤过的挂载候选。
+    ///   - exposesSMBShares: 来源是否走 SMB（见 `NASSourceConfig.Vendor.exposesSMBShares`）。
+    ///   - deadline: 整批的解析预算（秒）。超出即停，不再补后面的行。
+    ///   - resolve: 解析一条行的本地路径。用真实 `resolve(_:in:)` 或测试替身。
+    /// - Returns: **被补上本地路径的行**（新的值），没补上的行不在返回里。
+    nonisolated static func localizedRows(_ rows: [SearchResult],
+                                          mounts: [SMBMountCandidate],
+                                          exposesSMBShares: Bool,
+                                          deadline: TimeInterval = 3,
+                                          resolve: (SearchResult) throws -> URL) -> [SearchResult] {
+        guard exposesSMBShares, !mounts.isEmpty else { return [] }
+        let expiresAt = ProcessInfo.processInfo.systemUptime + deadline
+        var checked = [SearchResult]()
+        for var row in rows {
+            if ProcessInfo.processInfo.systemUptime > expiresAt || Task.isCancelled { break }
+            guard !row.hasWebOpenTarget else { continue }
+            if let url = try? resolve(row) {
+                row.localURL = url; row.openTarget = .mountedFile(url); row.canOpen = true
+                checked.append(row)
+            }
+        }
+        return checked
     }
 
     /// 本来源可用的 SMB 挂载候选。按配置的主机与共享过滤；
@@ -754,6 +1046,14 @@ import Foundation
     /// 再解析一次。因此调用方需要 `await`——挂载可能耗时数秒。
     public func verifiedFileURL(_ row: SearchResult) async throws -> URL {
         let snapshot = locatorSnapshot
+        // ★ 这个来源**没有 SMB 这一路**（OpenList）：不许发现、更不许发起挂载。
+        //   走到这里只有一种情形——这条结果的网页目标缺失或没通过同源校验
+        //   （否则动作层在 `.webURL` 那一支就返回了）。这时正确的回答是
+        //   「它在网页上，重新搜一次或直接打开网页」，而不是去挂一个
+        //   和它没有关系的共享：那会弹系统连接窗口、最后打开一个同名文件。
+        guard snapshot.exposesSMBShares else {
+            throw FlashFindError.message("这个来源的文件在网页上（没有 SMB 共享可挂载）。请在结果上按 Return 用浏览器打开。")
+        }
         // 安全校验必须在**挂载之前**完成：不属于本来源、或路径含穿越形态的结果，
         // 绝不能因为「先挂上再说」而去动用户的文件系统。
         try Self.validate(row: row, against: snapshot)
@@ -802,6 +1102,10 @@ import Foundation
     /// 非挂载态的定位入口（供结果行的 canOpen 判定使用，不触发挂载）。
     public nonisolated func verifiedFileURLWithoutMounting(_ row: SearchResult) throws -> URL {
         let snapshot = locatorSnapshot
+        // 与 `verifiedFileURL` 同一条理由：没有 SMB 的来源连挂载表都不该读。
+        guard snapshot.exposesSMBShares else {
+            throw FlashFindError.message("这个来源的文件在网页上，没有本地路径")
+        }
         let mounts = prioritized((try? SMBMountCandidate.discover())?
             .filter { $0.host == snapshot.host && snapshot.shares.contains($0.shareName) } ?? [],
             by: snapshot.preferredSMBUser)
@@ -825,6 +1129,8 @@ import Foundation
         let inside = RelativePath.relative(row.path, under: root)
         try RelativePath.validate(inside)
         for mount in mounts {
+            guard mount.host.lowercased() == locator.host.lowercased(),
+                  mount.shareName == locator.owningShare(root: root) else { continue }
             let root = mount.mountRoot.resolvingSymlinksInPath().standardizedFileURL
             let target = root.appendingPathComponent(inside).resolvingSymlinksInPath().standardizedFileURL
             if target.path.hasPrefix(root.path + "/"),
@@ -848,6 +1154,13 @@ public struct NASLocator: Sendable {
     /// 与 shares 对应的逻辑路径前缀（带尾斜杠），如 ["/示例共享/", "/docker/"]。
     public let scopePrefixes: [String]
     public let preferredSMBUser: String?
+    /// 这个来源是否靠 SMB 挂载拿到文件。
+    ///
+    /// 放进快照是为了**非挂载态的定位入口**（`verifiedFileURLWithoutMounting`，
+    /// `nonisolated`）能用上：它读不到 MainActor 上的 `config`，而它恰恰要在
+    /// 碰文件系统之前就把「这个来源根本没有 SMB」拦下来。默认 `true` 保持
+    /// 旧行为，只有明确不走 SMB 的品牌（OpenList）才传 `false`。
+    public var exposesSMBShares: Bool = true
     /// 未配置来源时的占位：任何结果都不可能通过校验。
     public static let empty = NASLocator(sourceID: "", host: "", shares: [], scopePrefixes: [], preferredSMBUser: nil)
 

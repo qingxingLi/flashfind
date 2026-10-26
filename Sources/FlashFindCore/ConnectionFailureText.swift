@@ -96,24 +96,59 @@ public enum ConnectionFailureText {
     ///
     /// `OTPRejected` 也算：用户填错一次码之后，要能再弹一次让他重填，
     /// 而不是把他扔在「设备拒绝了这个动态验证码」上无路可走。
-    public static func isOTPRequired(_ error: Error) -> Bool {
-        if let flash = error as? FlashFindError {
-            if case let .coreFailure(kind, _, _) = flash {
-                return kind == "NeedsOTP" || kind == "OTPRejected"
-            }
+    public static func isOTPRequired(_ error: Error) -> Bool { otpFailure(error) != nil }
+
+    /// 把失败的**哪一种** OTP 判出来。
+    ///
+    /// ★ 这一层是 2026-10-26 加的：只判「是不是 OTP」不够用。
+    /// 用户报障原话：
+    ///
+    ///   「输入 OTP 验证码错误，不会提示验证码错误，而是没有什么反应，
+    ///     还是在外边提示需要动态码，需再次点击登陆。」
+    ///
+    /// 成因就是这里只回了一个 Bool —— 上层于是只能拿同一句话去问，
+    /// 「还没填过码」与「填了但被拒」被说成一回事，用户看不出自己错在哪。
+    /// 现在两种分开：`.required` 说明这台设备要两步验证，`.rejected` 直说码不对。
+    public static func otpFailure(_ error: Error) -> OTPFailure? {
+        if let flash = error as? FlashFindError,
+           case let .coreFailure(kind, _, _) = flash {
+            if kind == "OTPRejected" { return .rejected }
+            if kind == "NeedsOTP" { return .required }
+            return nil
         }
         // 兼容：错误不是 FlashFindError、但描述里带了旧版 kind 字面量。
+        // 先判 `OTPRejected`：它的字面量里不含 `NeedsOTP`，但顺序写死了更不怕以后被改写。
         let text = error.localizedDescription
-        return text.contains("NeedsOTP") || text.contains("OTPRejected")
+        if text.contains("OTPRejected") { return .rejected }
+        if text.contains("NeedsOTP") { return .required }
+        return nil
     }
 
     /// 需要用户补一个动态验证码时，弹窗里该说什么。
     ///
     /// 文案住 Core：这句要同时出现在弹窗标题、说明与状态卡片上，
     /// 三处各写一遍必然走样（同 kind 不得两种说法）。
-    public static func otpPromptText(sourceName: String) -> String {
-        "「\(sourceName)」开启了登录两步验证。动态验证码是手机验证器或短信里那 6 位数字，"
-            + "每次登录都不一样，本机不会保存它，所以这次需要你重新填一个。"
+    ///
+    /// - Parameter failure: `nil` / `.required` = 还没填过码；`.rejected` = 刚填的那个被拒。
+    public static func otpPromptText(sourceName: String, failure: OTPFailure? = nil) -> String {
+        switch failure {
+        case .rejected:
+            // ★ 首句必须直说「输入错误」。用户原话要求：
+            //   「对话框内容里说明动态码输入错误，请再次输入」。
+            return "动态码输入错误，请再次输入。「\(sourceName)」没有接受刚才那 6 位数字"
+                + "（验证器每 30 秒换一个新码，别用刚用过的那个，前后也别带空格）。"
+        case .required, .none:
+            return "「\(sourceName)」开启了登录两步验证。动态验证码是手机验证器或短信里那 6 位数字，"
+                + "每次登录都不一样，本机不会保存它，所以这次需要你重新填一个。"
+        }
+    }
+
+    /// 弹窗标题按失败类型选。
+    ///
+    /// 码错时标题必须换：NSAlert 里最显眼的是标题，用户扫一眼就该知道
+    /// 「刚才那个码不对」，而不是去正文第三行找原因。
+    public static func otpDialogTitle(for failure: OTPFailure?) -> String {
+        failure == .rejected ? otpRejectedTitle : otpDialogTitle
     }
 
     /// 动态码弹窗的标题。
@@ -124,14 +159,36 @@ public enum ConnectionFailureText {
     /// 三处各写一遍必然走样（同 kind 不得两种说法）。
     public static let otpDialogTitle = "输入两步验证动态码"
 
+    /// 上一次填的码被设备拒了：标题直接说错在哪。
+    ///
+    /// 与 `otpDialogTitle` 并列而不是在调用点写三元：
+    /// 「两种说法」这类走样都是散在调用点开始积累的。
+    public static let otpRejectedTitle = "动态码输入错误"
+
     /// 弹窗被取消之后，状态行里补的那一句：下一次怎么把它叫回来。
     ///
     /// ★ 上一版写的是「请在下方『该账号需要动态口令？』里填…」，
     /// 而那块折叠区改成弹窗式之后**已经不在界面上了** —— 指路指到一个
     /// 不存在的位置，等于没说；这正是上一版报障的成因。
-    /// 现在只指一个确定还在的控件：**「连接」按钮**。
-    public static let otpRetryHint =
-        "已跳过。再点一次「连接」会重新弹出动态码输入框，填上手机验证器或短信中的 6 位数字即可。"
+    ///
+    /// ★ 2026-10-26：改成带按钮名。两个入口的按钮**叫法本来就不一样**——
+    /// 向导里是「连接」，来源卡片上是「登录」。写死一个名字，另一半用户就会
+    /// 去找一个界面上不存在的按钮（同一条「不许指错控件」的教训）。
+    /// 所以按钮名由调用方给，句子的其余部分仍只有一处，不会走样。
+    public static func otpRetryHint(buttonTitle: String = "连接") -> String {
+        "已跳过。再点一次「\(buttonTitle)」会重新弹出动态码输入框，填上手机验证器或短信中的 6 位数字即可。"
+    }
+}
+
+/// 设备到底要的是「还没填过的码」还是「换个码」。
+///
+/// 单独的 enum 而不是两个 Bool：这两种情况的文案、标题、状态标记全都不一样，
+/// 用一个类型带着走，调用点就不可能只处理其中一种。
+public enum OTPFailure: Sendable, Equatable {
+    /// 设备要求两步验证（码还没发上去）。
+    case required
+    /// 设备拒了刚才那个码。
+    case rejected
 }
 
 /// 连接尝试的序号闸门：让「上一次尝试」在飞行途中失效。

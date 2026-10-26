@@ -11,6 +11,8 @@ struct NASSourceWizardView: View {
     /// 默认不列——用户要的是 NAS，混着同事的 Mac 与打印机反而找不到。
     /// 但**认不出的设备不在这里藏**：判不明的一律保留，由用户自己挑。
     @State private var showAllNearbyDevices = false
+    /// 「附近的设备」小窗是否开着。
+    @State private var showingNearbyDevices = false
     /// 局域网设备发现。跟着向导窗口的生命周期起停——
     /// 关窗就停掉浏览，免得窗口没了还在收广播。
     @StateObject private var discovery = LocalNetworkDiscovery()
@@ -59,11 +61,27 @@ struct NASSourceWizardView: View {
             if !isEditing { nameFocused = true }
             portText = PortField.text(for: model.draftSource.port)
             basePathText = BasePathField.text(for: model.draftSource.basePath)
-            // 编辑已有来源时不去扫局域网：用户是来改配置的，不是来找设备的，
-            // 白白扫一遍网段还会让窗口弹出一串无关设备。
-            if !isEditing { discovery.start(existing: model.nasSources) }
         }
         .onDisappear { discovery.stop() }
+        // 「附近的设备」放在小窗里：列表可能几十台（含电脑与打印机），
+        // 铺在主界面上会把「填地址 + 填账号」这个主任务挤出第一屏。
+        // 选中一台就自动关窗，主流程一步没多。
+        .sheet(isPresented: $showingNearbyDevices, onDismiss: { discovery.stop() }) {
+            NearbyDevicesSheet(
+                devices: visibleDevices,
+                hiddenCount: hiddenDeviceCount,
+                showingAll: showAllNearbyDevices,
+                isScanning: discovery.isScanning,
+                message: discovery.statusMessage,
+                onPick: { device in
+                    model.applyDiscoveredDevice(device)
+                    showingNearbyDevices = false
+                },
+                onToggleAll: { showAllNearbyDevices.toggle() },
+                onRescan: { discovery.rescan(existing: model.nasSources) },
+                onClose: { showingNearbyDevices = false }
+            )
+        }
         // 切换来源（新建 ↔ 编辑另一台）时端口文本要跟着换。
         .onChange(of: model.draftSource.id) { _ in
             portText = PortField.text(for: model.draftSource.port)
@@ -125,141 +143,110 @@ struct NASSourceWizardView: View {
         if model.draftBusy { return "正在连接…" }
         if model.draftConnected && !model.draftSource.scope.isEmpty { return "已连接，可以搜索了" }
         if model.draftConnected { return "已连接，请选择搜索位置" }
-        // 只有一种可选类型时不再有「选类型」这一步，步数表述跟着变，
-        // 否则用户会去找一个不存在的第 1 步（UI 简化）。
-        if model.selectableVendors.count > 1 && host.isEmpty { return "第 1 步，共 4 步" }
+        // 入口三块是常驻的第一屏：地址还空着就是第 1 步。
+        // 选了设备或手填了地址，就进到「填账号密码」这一步。
+        if !isEditing, host.isEmpty { return "第 1 步，共 4 步" }
         return "第 2 步，共 4 步"
     }
 
     @ViewBuilder private var sections: some View {
-        // 选类型这一步只在**确实有多种可选**时才有意义。默认只开放群晖，
-        // 铺一个只有一项的网格等于让用户白点一次；这时改成直接给这一项的说明。
-        // 想让其它类型重新可选，打开「高级 ▸ 实验性功能 ▸ 显示实验性搜索来源」。
-        if model.selectableVendors.count > 1 {
-            vendorSection
-        } else {
-            Text(model.draftSource.vendor.serviceHint)
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        // 证书确认已改为 alert，不再占页面位置。
-        // 「附近的设备」只在**地址还空着、也还没连上**时出现：用户一旦选了
-        // 一台或开始手填地址，这块列表就只剩占地方的作用。
+        // 第 1 步是**入口**：群晖 / OpenList / 附近的设备，三块平铺。
+        // 选群晖或 OpenList 就是在选「走哪套接口」——下面的表单、默认协议、
+        // 端口都跟着换（见 `setDraftVendor`）；附近的设备是一个动作，
+        // 点开小窗挑一台，挑完自动关窗并回填地址。
         //
-        // 扫描没结果时**仍然显示这一块**（只是写着「没找到」+ 一个「重新查找」），
-        // 而不是整块消失——否则用户根本不知道有「自动找设备」这件事，
-        // 只会以为地址必须自己去路由器后台翻。
-        if !model.draftConnected, host.isEmpty, !isEditing {
-            nearbySection
+        // 连接成功之后不再摆这三块：那时候用户要做的是勾搜索位置，
+        // 再让他点一次品牌只会误触（换品牌会清空已填的地址与账号）。
+        if !model.draftConnected, !isEditing {
+            typeEntrySection
         }
         if model.nasTrustCandidate == nil { connectionSection }
         sharesSection
         if !model.draftStatus.isEmpty { statusSection }
     }
 
-    // MARK: 附近的设备
+    // MARK: 第 1 步 入口
 
-    /// 同局域网里找到的候选设备。
+    /// 群晖 / OpenList / 附近的设备。
     ///
-    /// 这一块是为了**省掉「去路由器后台翻 IP」这一步**。列出的是
-    /// `LocalNetworkDiscovery` 的结果：设备自己广播的（有名字）排在前面，
-    /// 端口探测命中的排在后面（只有地址）。
-    ///
-    /// 选中只预填地址与端口，不自动连接——用户还要填账号密码，
-    /// 也该先核对一眼这个地址对不对。
-    private var nearbySection: some View {
-        FFSettingsSection(title: "附近的设备",
-                          footer: visibleDevices.isEmpty
-                              ? discovery.statusMessage
-                              : "选中一台会自动填好地址，再填账号密码即可。") {
-            if discovery.devices.isEmpty, discovery.isScanning {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在查找…").font(.caption).foregroundStyle(.secondary)
+    /// 前两块决定**走哪套接口**（品牌一换，下面的表单、默认协议、端口全跟着换），
+    /// 后一块是一次动作：打开小窗挑一台设备，挑完自动关窗并回填地址。
+    /// 把「附近的设备」从一整块列表压成一个入口，是因为那串设备名会把
+    /// 「填地址 + 填账号」这个主任务挤到第一屏之外。
+    private var typeEntrySection: some View {
+        FFSettingsSection(title: "搜索来源") {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+                      spacing: 8) {
+                ForEach(entryVendors) { vendor in
+                    vendorEntry(vendor)
                 }
-            }
-            ForEach(visibleDevices) { device in
-                Button {
-                    model.applyDiscoveredDevice(device)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: device.vendorHint?.symbol ?? "server.rack")
-                            .frame(width: 18).foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(device.name.isEmpty ? device.host : device.name)
-                                .font(.callout).lineLimit(1)
-                            Text(device.addressText)
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 0)
-                        // 认不出类型的照实标出来——用户需要知道「这台是什么没人能替他判断」。
-                        // 判成 NAS 的不标，那本来就是默认视图里该有的东西。
-                        if device.kind != .nas {
-                            Text(device.kind.title)
-                                .font(.caption2).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("nearby-kind-" + device.id)
-                        }
-                        // 已在来源列表里的照实说，但**不禁用**：
-                        // 同一台 NAS 用另一个账号再添加一次是合理需求。
-                        if device.alreadyAdded {
-                            Text("已添加").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.25)))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("nearby-device-" + device.id)
-            }
-            if hiddenDeviceCount > 0 || showAllNearbyDevices {
-                Button(showAllNearbyDevices ? "只看 NAS 与文件服务器" : "显示全部局域网设备（还有 \(hiddenDeviceCount) 台已隐藏）") {
-                    showAllNearbyDevices.toggle()
-                }
-                .controlSize(.small)
-                .accessibilityIdentifier("nearby-show-all")
-            }
-            if !discovery.isScanning {
-                Button("重新查找") { discovery.rescan(existing: model.nasSources) }
-                    .controlSize(.small)
-                    .accessibilityIdentifier("nearby-rescan")
+                nearbyEntry
             }
         }
     }
 
-    // MARK: Step 1 类型
+    /// 要画成入口的品牌。
+    ///
+    /// 通常是 `model.selectableVendors`（群晖 + OpenList，开了实验开关再多个别的）。
+    /// 但「附近的设备」里可能选到一台**不在这个列表里**的机器（局域网里有台威联通，
+    /// 而实验开关关着）——那一刻 `applyDiscoveredDevice` 已经把品牌换过去了，
+    /// 下面的表单也换成了那一套。此时若入口里没有这一项，界面上就没有任何一处
+    /// 显示「现在选的是哪一种」，用户只会看到三块全是灰的。
+    /// 所以补一块进去，不改变可选集合，只补上当前真实在用的那一个。
+    private var entryVendors: [NASSourceConfig.Vendor] {
+        let list = model.selectableVendors
+        return list.contains(model.draftSource.vendor) ? list : list + [model.draftSource.vendor]
+    }
 
-    private var vendorSection: some View {
-        FFSettingsSection(title: "你的 NAS 类型",
-                          footer: model.draftSource.vendor.serviceHint) {
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                ForEach(model.selectableVendors) { vendor in
-                    Button {
-                        // 换类型等于放弃当前这次连接：已建立的会话、待确认的证书
-                        // 都属于原来那个类型，必须一起收掉。
-                        // 明文 HTTP 的显式选择也一起清掉——它属于原品牌，
-                        // 留着会盖住新品牌的默认协议（见 `setDraftVendor`）。
-                        model.setDraftVendor(vendor)
-                        if !vendor.nativelySupported { model.setDraftStatus(vendor.supportMessage) }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: vendor.symbol).frame(width: 18)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(vendor.title).font(.callout)
-                            }
-                            Spacer(minLength: 0)
-                            if model.draftSource.vendor == vendor { Image(systemName: "checkmark").font(.caption) }
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(model.draftSource.vendor == vendor ? Color.accentColor.opacity(0.16) : Color(nsColor: .quaternaryLabelColor).opacity(0.35)))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+    private func vendorEntry(_ vendor: NASSourceConfig.Vendor) -> some View {
+        let picked = model.draftSource.vendor == vendor
+        return Button {
+            // 换品牌会清掉上一类型的地址/端口/账号（见 `adoptVendor`）：
+            // 那些值对新品牌只有误导作用。重复点同一块是空操作。
+            model.setDraftVendor(vendor)
+            if !vendor.nativelySupported { model.setDraftStatus(vendor.supportMessage) }
+        } label: {
+            entryLabel(vendor.symbol, vendor.shortTitle, picked: picked)
         }
+        .buttonStyle(.plain)
+        .help(vendor.title)
+        .accessibilityIdentifier("source-type-" + vendor.rawValue)
+    }
+
+    private var nearbyEntry: some View {
+        Button(action: openNearby) {
+            entryLabel("antenna.radiowaves.left.and.right", "附近的设备", picked: false)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("nearby-open")
+    }
+
+    /// 一个入口块。选中态靠描边与淡底，不再加一行「已选」的文字。
+    private func entryLabel(_ symbol: String, _ title: String, picked: Bool) -> some View {
+        VStack(spacing: 7) {
+            Image(systemName: symbol)
+                .font(.system(size: 22))
+                .foregroundStyle(picked ? Color.accentColor : Color.secondary)
+                .frame(height: 26)
+            Text(title).font(.callout).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 11)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(picked ? Color.accentColor.opacity(0.14)
+                         : Color(nsColor: .quaternaryLabelColor).opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(picked ? Color.accentColor : Color.clear, lineWidth: 1.5))
+        .contentShape(Rectangle())
+    }
+
+    /// 打开「附近的设备」。
+    ///
+    /// 扫描只在窗口开着的时候跑：它是一次 UDP 广播，用户还在填账号密码时
+    /// 没必要占着网络。关窗即停（见 `.sheet` 的 `onDismiss`）。
+    private func openNearby() {
+        showingNearbyDevices = true
+        discovery.start(existing: model.nasSources)
     }
 
     // MARK: Step 2 地址与账号
@@ -268,11 +255,11 @@ struct NASSourceWizardView: View {
         if !model.draftConnected {
             // IP / 端口 / 账号 / 密码合并成一个「连接信息」模块，四项一次填完。
             // 分成两段会让用户以为要先弄地址、再弄账号，实际上它们是一组。
-            FFSettingsSection(title: "连接信息", footer: "在浏览器打开 NAS 管理页面，地址栏里的就是 IP 和端口。群晖常见端口是 5001。") {
+            FFSettingsSection(title: "连接信息") {
                 VStack(spacing: 10) {
                     HStack(spacing: 10) {
-                        labeledField("IP") {
-                            TextField("192.168.1.96", text: $model.draftSource.host)
+                        labeledField("IP/域名") {
+                            TextField("192.0.2.96", text: $model.draftSource.host)
                                 .textFieldStyle(.roundedBorder)
                         }
                         labeledField("端口") {
@@ -296,31 +283,23 @@ struct NASSourceWizardView: View {
                                 .accessibilityIdentifier("nas-base-path")
                                 .onChange(of: basePathText) { value in model.setDraftBasePath(value) }
                         }
-                        rowHint("WebDAV 服务所在的路径。OpenList / Alist 填 /dav，NextCloud 填 /remote.php/dav；服务直接挂在根目录时留空。整条地址粘进「IP」栏也可以，这里会自动带出来。")
                     }
-                    // 协议开关。品牌默认值不够用：WebDAV 的默认是 https，
-                    // 但只开明文 HTTP 的设备并不少见（已真机验证的飞牛 5005 就是），
-                    // 而端口是用户自填的，客户端无从猜测。没有这个开关，
-                    // 这类设备在界面上就没有任何可用的接入方式。
-                    // 群晖不给这个开关：它走证书固定，核心只接受 https。
+                    // 协议选择。**不能做成开关**：开关天生是「某项功能开着/关着」，
+                    // 而协议是二选一，两边都是有效状态、只是安全性不同。
+                    // 原来这里用 Toggle，标签在关着时写「使用加密连接 HTTPS」，
+                    // 于是「勾上」被读成「启用加密」，实际却是切到明文——
+                    // 与用户预期正好相反，且界面看上去一切正常。
+                    // 现在两段并列，两个选项都写在脸上、当前生效的被选中。
                     if model.draftAllowsPlainHTTPChoice {
-                        Toggle(isOn: Binding(get: { model.draftUsesPlainHTTP },
-                                             set: { model.setDraftPlainHTTP($0) })) {
-                            Text(model.draftUsesPlainHTTP
-                                 ? "使用明文 HTTP（不加密）"
-                                 : "使用加密连接 HTTPS")
-                                .font(.callout)
-                        }
-                        .toggleStyle(.switch)
-                        .accessibilityIdentifier("nas-plain-http")
-                        if model.draftUsesPlainHTTP {
-                            rowHint("明文 HTTP 下账号与密码不会被加密，同一网络内的其他人可能看到。仅在该设备只提供 http 时使用。")
-                        } else {
-                            // 只在「还没打开」时提示。原因：不少 NAS 的 WebDAV 端口
-                            // 只讲明文 HTTP，端口填对也连不上，而失败信息（TLS 握手失败）
-                            // 不会自己告诉用户「去打开那个开关」。
-                            // 这是**提示**，不是自动降级——是否放行明文仍由用户自己决定。
-                            rowHint("连不上时先看这里：不少 NAS 的 WebDAV 端口只提供明文 HTTP（浏览器里访问的是 http://）。那种情况下请打开这个开关；闪寻不会替你自动改用不加密的连接。")
+                        labeledField("协议") {
+                            Picker("协议", selection: protocolChoiceBinding) {
+                                ForEach(NASProtocolChoice.allCases) { choice in
+                                    Text(choice.title).tag(choice)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .accessibilityIdentifier("nas-protocol-choice")
                         }
                     }
                     // 失败之后的**一键重试**。上面的静态提示实测不够用：
@@ -341,20 +320,18 @@ struct NASSourceWizardView: View {
                                 .accessibilityIdentifier("nas-user")
                         }
                         labeledField("密码") {
-                            VStack(alignment: .leading, spacing: 3) {
-                                PlainSecureField(text: $model.nativeNASPassword, placeholder: "必填",
-                                                accessibilityID: "nas-password")
-                                    .frame(height: 22)
-                                // 【不要在这里放依赖 nativeNASPassword 的条件视图。】
-                                // 它会随每次按键增删子视图，导致 SwiftUI 重建整个 VStack、
-                                // 销毁并重建 PlainSecureField——重建瞬间按钮可用性判断读到空值，
-                                // 于是「填了密码却点不了连接」。
-                                // 改成用 keychainHint（不随输入变化）做唯一条件。
-                                if model.keychainHint != nil {
-                                    Text(model.keychainHint!)
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
+                            // 这里**只有**输入框。
+                            //
+                            // 原来下面还挂着一句「将使用本机保存的密码」——
+                            // 那是提示备注，2026-10-24 用户明确要求删掉。
+                            // 删掉它顺带把「依赖 `nativeNASPassword` 的条件视图」这一整类风险消掉了：
+                            // 条件视图会随每次按键增删子视图，导致 SwiftUI 重建整个 VStack、
+                            // 销毁并重建 PlainSecureField——重建瞬间按钮可用性判断读到空值，
+                            // 于是「填了密码却点不了连接」。
+                            // 现在这个位置没有任何条件子视图，按钮可用性只看模型层。
+                            PlainSecureField(text: $model.nativeNASPassword, placeholder: "必填",
+                                            accessibilityID: "nas-password")
+                                .frame(height: 22)
                         }
                     }
                     // 【这里不要再放 OTP 输入框。】
@@ -365,7 +342,7 @@ struct NASSourceWizardView: View {
                     // 填完自动接着连（见 `promptForOTPThenReconnect`）。
                     // 表单里放了，用户就会先去填它；而多数账号根本用不到。
                     if !model.draftSource.host.isEmpty, model.draftSource.hostName.isEmpty {
-                        rowError("IP 格式不对，请填 IP 或主机名")
+                        rowError("格式不对，请填 IP 或域名")
                     }
                     if model.draftSource.port != 0, !model.draftSource.hasPort {
                         rowError("端口需在 1～65535 之间")
@@ -376,28 +353,14 @@ struct NASSourceWizardView: View {
                     HStack(spacing: 8) {
                         // 关闭时立刻删掉已存的旧凭据，不能只改标记——
                         // 否则用户以为「不保存了」，密码其实还躺在文件里被自动使用。
-                        Toggle("记住这台 NAS 的密码", isOn: Binding(
+                        Toggle("记住密码", isOn: Binding(
                             get: { model.draftSource.rememberPassword },
                             set: { model.setDraftRememberPassword($0) }))
                             .font(.callout)
                         Spacer()
                     }
-                    if model.draftSource.rememberPassword {
-                        // 落点必须如实写出来。以前这里写的是「保存到钥匙串」，
-                        // 而钥匙串那套会因为每次重新构建而反复要求授权——
-                        // 见 `CredentialStore` 的文档注释，那里有完整实测。
-                        rowHint("密码存到本机凭据文件（~/Library/Application Support/FlashFind2/credentials.json，权限 600，磁盘上由 FileVault 加密）。闪寻不再向系统钥匙串索取，因此**不会再每次启动都弹授权框**。它的保护边界是：任何以你这个登录账户身份运行的进程都能读到——与你以前在钥匙串弹窗上点「允许」之后相当。")
-                    } else {
-                        rowHint("密码只用于本次会话，不写入本机文件。")
-                    }
                     TextField("设备名称（可留空，默认用类型名）", text: $model.draftSource.name)
                         .textFieldStyle(.roundedBorder)
-                    // 填了名字就告诉用户它会出现在哪里——
-                    // 否则这个框既没人读也没人解释，很容易被当成垃圾输入框乱敲。
-                    let named = model.draftSource.displayName
-                    if named != model.draftSource.vendor.title {
-                        rowHint("搜索结果里会标成「\(named)」，方便你区分多台 NAS。")
-                    }
                 }
             }
             // 按钮的可用性**只有一个来源**：`enabled:` 参数。
@@ -435,16 +398,32 @@ struct NASSourceWizardView: View {
     }
 
     /// 两列布局里的一个字段：左侧固定宽度的标签，右侧输入。
+    ///
+    /// 宽度按最长那个标签（「IP/域名」）定，四个标签左对齐才不会上下错位。
     private func labeledField<Content: View>(_ label: String,
                                              @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .leading)
+                .frame(width: 58, alignment: .leading)
             content()
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// 协议选择器的绑定。
+    ///
+    /// 这里有一处**方向相反**的转换：界面选的是「协议」（加密 / 明文），
+    /// 而模型存的是「是否用明文」（`usePlainHTTP`）。
+    ///
+    /// 转换必须收在这一处 —— 反过来写成 `get: { model.draftUsesPlainHTTP }`
+    /// 就会让「加密」这一段去写 `usePlainHTTP = true`，也就是选加密反而变明文。
+    /// 那种错在界面上完全看不出来（两段都点得动），只能靠这条绑定守着。
+    private var protocolChoiceBinding: Binding<NASProtocolChoice> {
+        Binding(
+            get: { NASProtocolChoice(usesPlainHTTP: model.draftUsesPlainHTTP) },
+            set: { model.setDraftPlainHTTP($0.usesPlainHTTP) })
     }
 
     private func rowError(_ text: String) -> some View {
@@ -500,6 +479,11 @@ struct NASSourceWizardView: View {
         }
     }
 
+    /// 连接结果。
+    ///
+    /// ★ 这一段**必须保留**：连接失败时它是界面上唯一的反馈，删掉就成了
+    /// 「点了一下，什么也没发生」——用户会反复点，或者以为程序坏了。
+    /// 也不做精简裁剪：里面那句原因与错误类型，是用户报障时唯一能提供的线索。
     private var statusSection: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: model.draftStatus.contains("失败") || model.draftStatus.contains("找不到") ? "exclamationmark.circle" : "info.circle")
@@ -511,32 +495,31 @@ struct NASSourceWizardView: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 6) {
-            HStack {
-                if model.draftConnected {
-                    FFSecondaryButton("断开", action: model.disconnectDraft)
-                }
-                Spacer()
-                // 「取消」必须真的取消：关闭窗口的同时收掉这次连接留下的一切
-                // （后台任务、暂存密码、待确认证书、已建立的 DSM 会话）。
-                FFSecondaryButton("取消") {
-                    model.cancelDraft()
-                    NASWizardWindow.shared.close()
-                }
-                // 可用性同样只走 `enabled:`，不再在外层叠 `.disabled`——
-                // 已连接但还没选搜索位置时不能保存，否则会存下一台
-                // 「连得上却搜不了」的 NAS，用户以为加好了，实际搜不到。
-                FFPrimaryButton(primaryActionTitle,
-                                enabled: !(model.draftBusy || (model.draftConnected && model.draftSource.scopes.isEmpty)),
-                                action: {
-                    model.commitDraft(); NASWizardWindow.shared.close()
-                })
+        HStack {
+            if model.draftConnected {
+                FFSecondaryButton("断开", action: model.disconnectDraft)
             }
-            if !isEditing, primaryActionTitle == "仅保存" {
-                Text("还没连上或还没选搜索位置。现在保存只会记下地址与账号，之后还要回来点「连接」并勾选目录。")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+            // 「取消」必须真的取消：关闭窗口的同时收掉这次连接留下的一切
+            // （后台任务、暂存密码、待确认证书、已建立的 DSM 会话）。
+            FFSecondaryButton("取消") {
+                model.cancelDraft()
+                NASWizardWindow.shared.close()
             }
+            // 可用性同样只走 `enabled:`，不再在外层叠 `.disabled`——
+            // 已连接但还没选搜索位置时不能保存，否则会存下一台
+            // 「连得上却搜不了」的 NAS，用户以为加好了，实际搜不到。
+            // ★ 保存不再是无条件「点了就关」：`commitDraft` 现在会先把搜索位置
+            //   绑定等出结果——被核心拒绝或出错时**不保存**，并给出可重试的说明。
+            //   只有它回 true（配置真的落盘、范围真的生效）才关窗口。
+            FFPrimaryButton(primaryActionTitle,
+                            enabled: !(model.draftBusy || model.draftSettling
+                                       || (model.draftConnected && model.draftSource.scopes.isEmpty)),
+                            action: {
+                Task { @MainActor in
+                    if await model.commitDraft() { NASWizardWindow.shared.close() }
+                }
+            })
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
     }
@@ -548,5 +531,105 @@ struct NASSourceWizardView: View {
     private var primaryActionTitle: String {
         if isEditing { return "保存" }
         return model.draftConnected && !model.draftSource.scopes.isEmpty ? "完成" : "仅保存"
+    }
+}
+
+/// 「附近的设备」小窗。
+///
+/// ## 为什么独立成窗
+///
+/// 局域网里可能几十台设备（同事的 Mac、打印机、电视盒子都在广播），
+/// 铺在向导第一屏会把「填地址 + 填账号」这个主任务挤到看不见的地方。
+/// 收成一个小窗之后，选一台就自动关窗回填地址，主流程一步没多。
+///
+/// 扫描随窗口开关：开着才跑，关掉就停（见调用点的 `onDismiss`）。
+private struct NearbyDevicesSheet: View {
+    let devices: [DiscoveredDevice]
+    let hiddenCount: Int
+    let showingAll: Bool
+    let isScanning: Bool
+    let message: String
+    let onPick: (DiscoveredDevice) -> Void
+    let onToggleAll: () -> Void
+    let onRescan: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text("附近的设备").font(.headline)
+                if isScanning { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("关闭", action: onClose)
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 6) {
+                    if devices.isEmpty {
+                        Text(isScanning ? "正在查找…" : message)
+                            .font(.callout).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                    }
+                    ForEach(devices) { device in
+                        Button { onPick(device) } label: { row(device) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("nearby-device-" + device.id)
+                    }
+                }
+                .padding(16)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                if hiddenCount > 0 || showingAll {
+                    Button(showingAll ? "只看 NAS 与文件服务器" : "显示全部（还有 \(hiddenCount) 台）",
+                           action: onToggleAll)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("nearby-show-all")
+                }
+                Spacer()
+                Button("重新查找", action: onRescan)
+                    .controlSize(.small)
+                    .disabled(isScanning)
+                    .accessibilityIdentifier("nearby-rescan")
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .frame(width: 440, height: 420)
+    }
+
+    private func row(_ device: DiscoveredDevice) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: device.vendorHint?.symbol ?? "server.rack")
+                .frame(width: 18).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(device.name.isEmpty ? device.host : device.name)
+                    .font(.callout).lineLimit(1)
+                Text(device.addressText)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            // 认不出类型的照实标出来——判成 NAS 的不标，那本来就是默认该有的。
+            if device.kind != .nas {
+                Text(device.kind.title)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("nearby-kind-" + device.id)
+            }
+            // 已在来源列表里的照实说，但**不禁用**：
+            // 同一台 NAS 用另一个账号再添加一次是合理需求。
+            if device.alreadyAdded {
+                Text("已添加").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.25)))
+        .contentShape(Rectangle())
     }
 }

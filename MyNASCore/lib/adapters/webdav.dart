@@ -212,6 +212,11 @@ class WebDavAdapter implements NasBrandAdapter {
   ///
   /// `verifiedOnDevice = true` —— **有真机证据**，不是「移植完就点亮」。
   /// 已验证范围仅此一台设备与该账号，`notes` 里逐条写明验到什么、没验什么。
+  /// 结果可以用同一主机的 SMB 共享打开：这台设备本身就是 SMB 服务器，
+  /// 搜索结果的逻辑路径与共享路径同构。见 `NasBrandAdapter.exposesSMBShares`。
+  @override
+  bool get exposesSMBShares => true;
+
   @override
   BrandCapabilities get capabilities => const BrandCapabilities(
     nativeSearch: false,
@@ -495,7 +500,11 @@ class WebDavAdapter implements NasBrandAdapter {
   /// 契约要求：设备没有服务端搜索时**必须**抛 UnsupportedApi，且**不得**回退成
   /// 客户端递归遍历 —— 上游那个「返回空列表」的写法正是契约要修掉的坑。
   @override
-  Future<List<FileItem>> search(String query, {required List<String> roots}) async {
+  Future<List<FileItem>> search(
+    String query, {
+    required List<String> roots,
+    void Function(RootSearchFailure failure)? onRootFailure,
+  }) async {
     _cancel?.check();
     _log.w('WebDavAdapter: search 被调用，但 WebDAV 无服务端搜索');
     throw AdapterFailures.unsupported('WebDAV 不提供服务端搜索');

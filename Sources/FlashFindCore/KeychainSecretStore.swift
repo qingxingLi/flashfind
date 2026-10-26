@@ -163,6 +163,19 @@ public struct KeychainSecretStore: SecretStore {
         }
     }
 
+    /// 未主动登录时只用进程内缓存；经典钥匙串的查询仍可能触发系统授权。
+    public func read(account: String, allowInteraction: Bool) -> String? {
+        guard !account.isEmpty else { return nil }
+        if allowInteraction { return read(account: account) }
+        guard let vault = vaultCache.value else {
+            lastStatus.value = errSecInteractionNotAllowed
+            return nil
+        }
+        let value = vault.value(for: account)
+        lastStatus.value = value == nil ? errSecItemNotFound : errSecSuccess
+        return value
+    }
+
     @discardableResult
     public func delete(account: String) -> Bool {
         guard !account.isEmpty else { return false }
@@ -240,6 +253,8 @@ public struct KeychainSecretStore: SecretStore {
             return (code, data: nil as Bool?)
         }.status
         lastStatus.value = status
+        // 用户取消授权不能被缓存成空表，否则重试读不到密码，写入还可能覆盖原凭据。
+        guard status == errSecSuccess || status == errSecItemNotFound else { return nil }
         switch CredentialVault.decode(raw) {
         case .empty:
             // 条目不存在 ≠ 出错：首次运行、或用户把 NAS 全删了。

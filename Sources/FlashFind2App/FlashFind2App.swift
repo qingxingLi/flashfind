@@ -20,7 +20,7 @@ enum SearchScope: String, CaseIterable, Identifiable {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ★ 凭据后端必须赶在 `model` 之前装配：存储属性按声明顺序初始化，
-    /// 而 AppModel 起来就要读已保存的密码，晚一步它读到的就是空的内存后端。
+    /// 默认后端必须在模型初始化前确定；启动不再读取真实钥匙串。
     /// 不写进 `init` 是因为 init 的函数体在所有属性初始化**之后**才跑。
     private let credentialBackendInstalled: Void = {
         // GUI 的默认后端是**系统钥匙串**：密码不再以任何形式落到 ~/Library 下的明文文件。
@@ -70,17 +70,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 旧明文 → 钥匙串的一次性迁移。只写不读（不读回校验）；
-        // 明文删在最后：要等某次真实登录用新后端的密码连上了才删（见 confirmCredentialVerified）。
-        // 这里不看返回报告：迁移可重入，这次没迁成的下次启动再试。
-        if !AppEnvironment.isPreview {
-            CredentialStore.migrateLegacyPlaintext()
-            // 经典钥匙串 → Data Protection 钥匙串。今天所有构建都缺 entitlement，
-            // 于是它每次都整批中止、什么都不做；签上 Developer ID 的那一天，
-            // 同一句就会把老密码真的搬过去（顺序与规则见 KeychainTierMigration）。
-            // account 必须指名：钥匙串不能枚举，来源列表只有这里有。
-            CredentialStore.migrateKeychainTier(accounts: model.nasSources.map { $0.credentialAccount })
-        }
         // 外观要在任何窗口出现之前应用：用户上次选了深色，重启后第一帧就得是深色，
         // 不能先闪一下浅色再变。启动路径上漏这一句，设置页里选了也不生效——
         // 那种缺陷编译能过、运行也不报错。
@@ -185,7 +174,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         OnboardingWindow.shared.show(model: model)
     }
+    private weak var lastPreferencesWindow: NSWindow?
+
+    func applicationWillResignActive(_ notification: Notification) {
+        let key = NSApp.keyWindow
+        let window = key?.sheetParent ?? key ?? NSApp.mainWindow
+        if let window,
+           window === NASWizardWindow.shared.presentedWindow || window === SettingsWindow.shared.presentedWindow {
+            lastPreferencesWindow = window
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // 主动唤起搜索或仍有应用内模态窗口时，不抢它们的焦点。
+        guard searchPanel?.isKeyWindow != true, NSApp.modalWindow == nil else { return }
+        restorePresentedPreferencesWindow(preferred: lastPreferencesWindow)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if restorePresentedPreferencesWindow(preferred: lastPreferencesWindow) {
+            NSApp.activate(ignoringOtherApps: true)
+            return true
+        }
         searchPanel?.show()
         return true
     }

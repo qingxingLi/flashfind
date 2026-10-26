@@ -30,7 +30,7 @@ struct SearchStatusBar: View {
     @State private var showWarnings = false
     var body: some View {
         HStack(spacing: 12) {
-            Text(message.isEmpty ? "↑↓ 选择   ↵ 打开   ⌘↵ Finder   space 预览   esc 隐藏" : message)
+            Text(message.isEmpty ? "↑↓ 选择   Space 预览   ↵ 打开   ⌘↵ Finder   esc 隐藏" : message)
                 .lineLimit(1).truncationMode(.middle).help(message)
             Spacer(minLength: 8)
             if !warnings.isEmpty {

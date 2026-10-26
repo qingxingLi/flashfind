@@ -110,10 +110,14 @@ class BrandSession {
       switch (outcome) {
         case LoginSuccess():
           break;
-        case LoginNeedsOTP(:final methods):
+        case LoginNeedsOTP(:final methods, :final rejected):
+          // 「还没给码」与「给了被拒」是两个不同的 User 处置：
+          // 前者要弹框问，后者要告诉用户刚才那 6 位不对（并让他重填），
+          // 混成一个 kind 的话，输错一次之后界面仍然只说「请填写动态码」。
+          final suffix = methods.isEmpty ? '' : '（${methods.join('/')}）';
           throw AdapterFailure(
-            ErrorKind.needsOTP,
-            '该账号需要动态验证码${methods.isEmpty ? '' : '（${methods.join('/')}）'}',
+            rejected ? ErrorKind.otpRejected : ErrorKind.needsOTP,
+            rejected ? '动态验证码没有被接受，请重新填写$suffix' : '该账号需要动态验证码$suffix',
           );
         case LoginRejected(:final reason, :final apiCode):
           throw AdapterFailure(ErrorKind.authenticationFailed, reason, apiCode: apiCode);
@@ -193,6 +197,36 @@ class BrandSession {
     return v;
   }
 
+  /// 一条结果的「点开之后去哪」。
+  ///
+  /// 只有三种答案：SMB 位置、网页地址、没有。**不许返回一个猜的地址** ——
+  /// 用户点下去才失败，比一开始就说「打不开」更糟。
+  OpenTarget? _openTargetFor({
+    required String path,
+    required String owningRoot,
+    required List<String> segments,
+  }) {
+    if (adapter.exposesSMBShares && smbHost.isNotEmpty && owningRoot.isNotEmpty) {
+      return SMBLocation(
+        smbHost,
+        owningRoot.startsWith('/') ? owningRoot.substring(1) : owningRoot,
+        segments,
+      );
+    }
+    // `WebOpenableAdapter` 与 `NasBrandAdapter` 是两个无关接口，Dart 不会把
+    // 「NasBrandAdapter 且 WebOpenableAdapter」这个交叉类型提升出来，只能显式转。
+    if (adapter is WebOpenableAdapter && path.isNotEmpty) {
+      try {
+        return WebLocation((adapter as WebOpenableAdapter).webURLFor(path));
+      } on CoreError {
+        // 适配器拼出了不合规的地址（跨源 / 带查询串 / 空路径）。这里吞掉并
+        // 退回「不可打开」：一条结果打不开，不该让整次搜索失败。
+        return null;
+      }
+    }
+    return null;
+  }
+
   /// 结果行（与 SynologyCore.result 同形）。
   Map<String, Object?> row(FileItem item, String owningRoot) {
     final path = normalizeLogicalPath(item.path);
@@ -202,13 +236,15 @@ class BrandSession {
         ? path.substring(owningRoot.length)
         : '';
     final segments = relative.split('/').where((s) => s.isNotEmpty).toList();
-    final open = smbHost.isEmpty || owningRoot.isEmpty
-        ? null
-        : SMBLocation(
-            smbHost,
-            owningRoot.startsWith('/') ? owningRoot.substring(1) : owningRoot,
-            segments,
-          ).toJson();
+    // openTarget 的优先顺序：**能用 SMB 就用 SMB，否则用网页，两者都没有就不发**。
+    //
+    // · 群晖 / 威联通 / 绿联 / 跑在 NAS 上的 WebDAV：主机本身就是 SMB 服务器，
+    //   `smb://主机/共享/…` 是能直达文件的本地化入口（Finder 会挂载）。
+    // · OpenList：网页聚合器，主机只讲 HTTP。以前这里给它拼 `smb://…`，
+    //   真机实测双击只弹「连接服务器时出现问题」——一个**必然失败**的假目标。
+    //   现在改发网页地址：那是它唯一能到达文件的入口，不是降级。
+    // · 两者都没有（未实现网页接口的品牌）：宁可不发，也不要造一个错地址。
+    final OpenTarget? open = _openTargetFor(path: path, owningRoot: owningRoot, segments: segments);
     return {
       'id': '$sourceID:$path',
       'name': item.name,
@@ -222,10 +258,11 @@ class BrandSession {
       'sourceName': sourceName,
       'sourceType': 'nas',
       'isOnline': true,
-      // 打开能力由 Swift 侧按 SMB 挂载可达性判定；这里恒为 false，
-      // 与群晖路径一致（那边也是先发结构、后台核对存在性再刷新）。
-      'canOpen': false,
-      if (open != null) 'openTarget': open,
+      // SMB 行恒为 false：能不能打开要等 Swift 侧核对挂载与文件是否存在。
+      // 网页行给 true：地址已经由适配器用**已核验的 origin** 拼好，点开就能到，
+      // 不存在「先挂载再看在不在」这一步。
+      'canOpen': open is WebLocation,
+      if (open != null) 'openTarget': open.toJson(),
     };
   }
 
@@ -260,6 +297,7 @@ class BrandSession {
     String query,
     String queryID, {
     Duration? budget,
+    List<String>? roots,
   }) async {
     cancel();
     final out = SearchOutcome();
@@ -289,8 +327,25 @@ class BrandSession {
 
     try {
       scope.check(scope.root);
+      // ★ 本次搜索实际生效的根：没传限定就用全部已授权根；传了就收窄。
+      //
+      // 收窄在**这里**做（而不是信任客户端）：客户端传的根必须落在已授权
+      // 范围之内，否则报 ScopeDenied。
+      final effective = (roots == null || roots.isEmpty) ? scope : scope.narrowTo(roots);
       emit(queryID, 'sourceState', {'state': 'starting'});
-      final items = await adapter.search(query, roots: scope.roots.toList());
+      // ★ 下发给设备的是**收窄后**的根：品牌适配器逐根各发一次请求，
+      // 少一个根就少一次设备侧扫描——检索时间因此真的下降。
+      // ★ 部分根没搜通的记录：结果照发，但这次搜索**不许**说成完整。
+      //
+      // 以前的写法是「只要有根搜通（哪怕零命中）就把别的根的错误吞掉」，
+      // 于是「有一个存储的上游失效」被界面显示成「没有找到」——
+      // 用户以为这台设备上根本没有这个文件，而真相是有一个位置没搜过。
+      final failedRoots = <RootSearchFailure>[];
+      final items = await adapter.search(
+        query,
+        roots: effective.roots.toList(),
+        onRootFailure: failedRoots.add,
+      );
       run.token.check();
 
       out.reportedTotal = items.length;
@@ -319,8 +374,13 @@ class BrandSession {
       if (batch.isNotEmpty) {
         emit(queryID, 'batch', {'files': batch, 'isComplete': false});
       }
+      if (failedRoots.isNotEmpty) {
+        _markIncomplete(out, failedRoots);
+      }
       out.state = 'completed';
-      out.complete = true;
+      // ★ 有位置没搜通就不是一次完整的搜索：`isComplete=false` 会让界面
+      //   如实显示「结果不完整」，而不是拿一份局部结果冒充全范围结论。
+      out.complete = failedRoots.isEmpty;
     } on CoreError catch (e) {
       _recordFailure(out, run, e);
     } on AdapterFailure catch (e) {
@@ -331,6 +391,23 @@ class BrandSession {
       timer.cancel();
     }
     return out;
+  }
+
+  /// ★ 「有几个位置没搜通」既不是失败，也不是「全都没有找到」。
+  ///
+  /// 三件事必须一起做，缺一件就退化成原来那句骗人的「没有找到」：
+  ///   · `partial` —— 结果不完整；
+  ///   · `failedRoots` —— 是**哪几个**位置没搜通（不给名字用户无从判断）；
+  ///   · `partialNote` —— 给界面的一句话，说明为什么结果只覆盖其余位置。
+  void _markIncomplete(SearchOutcome out, List<RootSearchFailure> failures) {
+    out.partial = true;
+    out.failedRoots.addAll(failures.map((f) => f.root));
+    final first = failures.first;
+    out.error = toCoreError(first.failure);
+    final names = failures.map((f) => f.root).join('、');
+    out.partialNote = failures.length == 1
+        ? '搜索位置 $names 这次没能检索（${first.failure.message}）；结果只覆盖其余位置。'
+        : '有 ${failures.length} 个搜索位置这次没能检索：$names（${first.failure.message}）；结果只覆盖其余位置。';
   }
 
   void _recordFailure(SearchOutcome out, _Run run, CoreError error) {

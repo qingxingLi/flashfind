@@ -47,7 +47,10 @@ extension AppModel {
     func confirmDraftTrust() { wizard.confirmDraftTrust() }
     func rejectDraftTrust() { wizard.rejectDraftTrust() }
     func toggleDraftScope(_ scope: String) { wizard.toggleDraftScope(scope) }
-    func commitDraft() { wizard.commitDraft() }
+    /// - Returns: 是否真的保存成功。**调用方据此决定关不关窗口、说不说「已保存」**：
+    ///   搜索位置绑定被核心拒绝时，这里是 false，窗口必须留在原地让用户重试。
+    @discardableResult
+    func commitDraft() async -> Bool { await wizard.commitDraft() }
     func disconnectDraft() { wizard.disconnectDraft() }
     func cancelDraft() { wizard.cancelDraft() }
     /// 打开「重新连接」向导，并把**为什么还要输密码**这句话带进去。

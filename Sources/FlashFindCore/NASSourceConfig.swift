@@ -7,7 +7,9 @@ import Foundation
 public struct NASSourceConfig: Codable, Identifiable, Hashable {
     public enum Vendor: String, Codable, CaseIterable, Identifiable {
         // 与 MyNAS 上游 `SourceType` 的存储类源对齐（上游还含 ftp/sftp/s3/upnp/local 等）。
-        case synology, qnap, ugreen, fnos, webdav, smb, generic
+        // `openlist` 不是 NAS 品牌，是聚合网盘服务；放在这里是因为它对闪寻而言
+        // 与 NAS 同形：一个地址 + 一个账号 + 一个可搜索的目录树。
+        case synology, qnap, ugreen, fnos, webdav, smb, generic, openlist
         public var id: String { rawValue }
         public var title: String {
             switch self {
@@ -18,6 +20,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             case .webdav: return "WebDAV"
             case .smb: return "SMB / CIFS"
             case .generic: return "其他 NAS"
+            case .openlist: return "OpenList"
             }
         }
         public var symbol: String {
@@ -29,6 +32,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             case .webdav: return "globe"
             case .smb: return "network"
             case .generic: return "questionmark.circle"
+            case .openlist: return "cloud"
             }
         }
 
@@ -46,16 +50,20 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             case .webdav: return "WebDAV"
             case .smb: return "SMB"
             case .generic: return "网络存储"
+            case .openlist: return "OpenList"
             }
         }
 
-        /// 向导里**当前开放选择**的类型。
+        /// 向导里**正式开放**的类型：不依赖「显示实验性搜索来源」也看得见。
         ///
-        /// 选型只开放群晖：其余品牌的适配器、枚举与模型先原样留在代码里
-        /// （旧配置要能解码、以后要能再开放），只是从「选类型」这一步撤下来，
-        /// 不再让用户选到一条当前没人维护的路径。
-        /// 需要「全部类型」的地方（如契约测试）仍走 `allCases`。
-        public static let selectableVendors: [Vendor] = [.synology]
+        /// 这是 `ExperimentalSources.vendors(includingExperimental: false)` 的基线，
+        /// 所以新增一项等于对所有用户开放，别往里塞没在真机上跑通的东西。
+        /// 其余品牌（qnap / ugreen / webdav）仍需在高级里打开实验性开关。
+        ///
+        /// `openlist` 于 2026-10-24 在真实实例（v4.1.10 / commit e3c664f）上完成
+        /// 登录、列存储、限定目录搜索与分页的实测，证据见
+        /// `00-项目管理/任务交付/OL-AUTH-02-OpenList真实契约验证-20261024.md`。
+        public static let selectableVendors: [Vendor] = [.synology, .openlist]
 
         /// 该品牌在闪寻里的接入状态。
         ///
@@ -90,7 +98,8 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             switch self {
             // WebDAV 已在飞牛 fnOS 的 5005 端口上真机跑通完整链路，
             // 故与群晖同列「已验证」。qnap / ugreen 仍只有适配器、无真机证据。
-            case .synology, .webdav: return .deviceVerified
+            // OpenList 于 2026-10-24 在真实实例 v4.1.10 上量过登录/列存储/限定目录搜索/分页。
+            case .synology, .webdav, .openlist: return .deviceVerified
             case .qnap, .ugreen: return .portedUnverified
             // 飞牛的适配器已下线：真机探测量到它的登录/列目录/搜索全走 WebSocket，
             // 而既有实现走 HTTP 兼容层（`/api/v1/*` 一律 404）。核心侧的
@@ -108,7 +117,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         public var defaultInsecureHTTP: Bool {
             switch self {
             case .qnap, .fnos, .ugreen: return true
-            case .synology, .webdav, .smb, .generic: return false
+            case .synology, .webdav, .smb, .generic, .openlist: return false
             }
         }
 
@@ -143,9 +152,26 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             switch self {
             // fnos 不在其列：它的适配器已从核心下线，没有 `capabilities` 可对齐，
             // 说它有服务端搜索等于凭空给一个已证伪的路径加能力。
-            case .synology, .qnap, .ugreen: return true
+            // openlist 有 `/api/fs/search`（服务端索引搜索），真机实测可用。
+            case .synology, .qnap, .ugreen, .openlist: return true
             case .fnos, .webdav, .smb, .generic: return false
             }
+        }
+
+        /// 该品牌的搜索结果能不能靠 **SMB 挂载**落到本机文件。
+        ///
+        /// 取值必须与核心适配器的 `exposesSMBShares` 一致
+        /// （`MyNASCore/lib/adapter_contract.dart`）：OpenList 是聚合网盘服务，
+        /// 它的「存储」不是 SMB 共享，逻辑路径也不与本机任何挂载同构。
+        ///
+        /// ★ 这条判断有两个作用，缺一个就会出真机 Bug：
+        ///   * 搜索结果的**后台元数据补全**不许拿它去挂载表里找文件 —— 否则
+        ///     「同主机同名路径」会把网页目标悄悄改成另一份本地文件；
+        ///   * 网页目标缺失/校验失败时也**不许**退化成「先挂上再说」。
+        /// 两者都以「这个来源根本没有 SMB 这一路」为前提，所以判断放在这里，
+        /// 而不是在各调用点各写一遍 `vendor == .openlist`。
+        public var exposesSMBShares: Bool {
+            self != .openlist
         }
 
         /// 已接入**且已验证**的原生搜索类型 = 有服务端搜索 ∩ 真机验证过。
@@ -178,6 +204,9 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             case .webdav: return "WebDavAdapter"
             case .smb: return "SmbAdapter"
             case .generic: return nil
+            // OpenList 不是 NAS 品牌，MyNAS 上游没有对应适配器——
+            // 闪寻这一份就是实现本身，没有「上游已有、移植即可」这回事。
+            case .openlist: return nil
             }
         }
 
@@ -231,6 +260,8 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
                 return "这一项走的是飞牛的**管理口**接口（管理口在 5666，其登录实际走 WebSocket）。要连飞牛的 **WebDAV 文件服务**（常见 5005），请改选「WebDAV」，并按那项服务自己的协议填。"
             case .webdav:
                 return "填 WebDAV 服务自己的地址与端口。端点不在站点根时（OpenList / Alist 在 /dav）再填下面的「路径」。**多数设备只提供明文 HTTP**：如果浏览器里访问的是 http://，请把下面的协议开关切到明文。"
+            case .openlist:
+                return "填 OpenList **网站本身**的地址与端口（默认 5244）——不是 WebDAV 那个 /dav 端点。用 OpenList 的账号登录。**「搜索位置」要勾具体的存储**：这个服务按目录检索，不勾任何存储就搜不到东西。"
             case .synology:
                 return "填 DSM 的地址与端口（走 HTTPS，证书固定），用 NAS 账号登录即可。"
             case .qnap, .ugreen:
@@ -239,6 +270,35 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
                 return "SMB 只用于打开文件，不参与索引搜索。要能搜，需要另配上面几种类型之一。"
             case .generic:
                 return "先用上面最接近的类型试；都不行时地址与账号可以先存下来。"
+            }
+        }
+
+        /// 「连接信息」这一块下面的页脚：**去哪看地址与端口**。
+        ///
+        /// 与 [serviceHint] 分工不同：那个说「这一类设备该怎么填、别填错什么」，
+        /// 这个只说「去哪儿找这串地址」。
+        ///
+        /// ★ 这段话原本是硬编码在视图里的，写的是「群晖常见端口是 5001」——
+        /// 于是**所有品牌**的用户都被指去开「NAS 管理页面」找 5001。
+        /// 2026-10-24 用户把 OpenList 的站点地址填给这个框时，
+        /// 页面下方还在提示他去看群晖的 5001，等于把人往错的方向推。
+        /// 端口数字没有通用值，必须按品牌说；不知道的就不说数字。
+        public var connectionFooter: String {
+            switch self {
+            case .synology:
+                return "在浏览器打开 DSM 管理页面，地址栏里的就是地址与端口。群晖常见端口是 5001（HTTPS）。"
+            case .openlist:
+                return "在浏览器打开 OpenList 网站，地址栏里的地址与端口就是这里要填的（默认 http://…:5244）。"
+            case .qnap, .ugreen:
+                return "在浏览器打开设备的管理页面，地址栏里的就是地址与端口（这类管理口出厂多为明文 HTTP）。"
+            case .webdav:
+                return "填能在浏览器里列出文件的那个地址。路径见上面的「路径」框。"
+            case .smb:
+                return "填提供 SMB 共享的那台机器的地址与端口（默认 445）。"
+            case .fnos:
+                return "填飞牛管理口的地址与端口；文件服务请改用「WebDAV」。"
+            case .generic:
+                return "填这台设备的地址与端口。不确定就先存下来。"
             }
         }
 
@@ -269,7 +329,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
     public var id: String
     public var name: String
     public var vendor: Vendor
-    /// 用户填写的地址。允许 `192.168.1.96`、`nas.local` 或 `192.168.1.96:5003`。
+    /// 用户填写的地址。允许 `192.0.2.96`、`nas.local` 或 `192.0.2.96:5003`。
     public var host: String
     /// 用户填写的端口。**必填**——自动探测在自签名证书的 NAS 上不可靠
     /// （标准 URLSession 会在 TLS 握手阶段失败，把「端口通」误判成「端口不通」，
@@ -400,7 +460,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
 
     /// 从地址文本里取出用户顺带写进去的端口。
     ///
-    /// 用户的直觉是「地址栏就该把 `192.168.1.96:5001` 一次写完」，
+    /// 用户的直觉是「地址栏就该把 `192.0.2.96:5001` 一次写完」，
     /// 而端口另有独立输入框——两者都写、只写地址、只写端口，都得能用。
     /// 这里只负责解析；真正决定连接用哪个端口的是 `effectivePort`。
     public static func portFromHost(_ text: String) -> Int? {
@@ -419,7 +479,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
 
     /// 本次连接**实际会使用**的端口。
     ///
-    /// 真实故障：用户把 `192.168.1.96:5001` 整串写进地址栏、端口框留空，
+    /// 真实故障：用户把 `192.0.2.96:5001` 整串写进地址栏、端口框留空，
     /// 而「连接」按钮的可点判定只看端口字段（`hasPort`），于是按钮一直是灰的——
     /// 用户看到的是「我明明写了端口，为什么点不了」。
     /// 现在判定改用这个值：端口字段优先，字段为空时从地址里取。
@@ -442,7 +502,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
 
     /// 是否具备发起搜索的最低配置。
     ///
-    /// 端口判定一律走 `hasEffectivePort`：用户把 `192.168.1.96:5001` 整串
+    /// 端口判定一律走 `hasEffectivePort`：用户把 `192.0.2.96:5001` 整串
     /// 写进地址栏时端口字段是空的，只看字段会把「明明填了端口」判成未配置。
     public var isSearchConfigured: Bool {
         !hostName.isEmpty && hasEffectivePort
@@ -461,7 +521,7 @@ public extension NASSourceConfig {
     /// 规范化用户输入：去掉协议前缀、路径与空白；地址里若带了端口，顺手记进端口字段。
     ///
     /// 端口不再由「自动探测」决定（探测已在自签名证书的 NAS 上证明不可靠），
-    /// 但用户把 `192.168.1.96:5001` 整串写进地址是常见写法，
+    /// 但用户把 `192.0.2.96:5001` 整串写进地址是常见写法，
     /// 所以这里把端口**搬**到端口字段，让后续流程与界面显示一致。
     mutating func normalizeHost() {
         var text = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -577,6 +637,12 @@ public struct NASSourceStatus: Sendable {
     /// 详情页的「重新登录…」要先弹 OTP 输入框，再把码带进去重连；
     /// 连接成功后必须清掉，否则用户下次点重新登录还会被问 OTP。
     public var needsOTP: Bool = false
+    /// 最近一次失败是不是**上一次那个码被拒了**（而不是「还没填过码」）。
+    ///
+    /// `needsOTP` 只回答「要不要问码」，回答不了「问的时候该说什么」。
+    /// 用户点取消、过一会儿再点「登录」时，弹窗必须还能说出
+    /// 「动态码输入错误，请再次输入」——那件事只存在于状态里，不在调用栈里。
+    public var otpRejected: Bool = false
     public init() {}
 }
 
@@ -692,7 +758,7 @@ public enum ConnectButtonState {
     ///   - busy: 是否有连接正在进行。
     ///   - host: 规范化后的主机名（已通过格式校验）。
     ///   - hasPort: **有效**端口是否可用。调用方应传 `hasEffectivePort`
-    ///     ——端口写在地址里（`192.168.1.96:5001`）时端口字段可能是空的，
+    ///     ——端口写在地址里（`192.0.2.96:5001`）时端口字段可能是空的，
     ///     只看字段会让按钮永远点不亮。
     ///   - username: 账号是否非空。
     ///   - hasTypedPassword: 本次是否输入了密码。
@@ -716,7 +782,7 @@ public enum ConnectButtonState {
                                        hasStoredPassword: Bool) -> String? {
         if busy { return nil }   // 正在连接，不需要解释
         if host.isEmpty { return "请填写 NAS 地址" }
-        if !hasPort { return "请填写端口（也可以直接写进地址，像 192.168.1.96:5001）。闪寻不做自动探测——自签名证书的 NAS 在探测阶段就会被误判为不可用。" }
+        if !hasPort { return "请填写端口（也可以直接写进地址，像 192.0.2.96:5001）。闪寻不做自动探测——自签名证书的 NAS 在探测阶段就会被误判为不可用。" }
         if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写 NAS 账号" }
         if !hasTypedPassword && !hasStoredPassword { return "请输入密码" }
         return nil

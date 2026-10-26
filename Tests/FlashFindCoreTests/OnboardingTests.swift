@@ -49,7 +49,7 @@ final class OnboardingTests: XCTestCase {
 
     // MARK: - 从真实配置推导状态
 
-    private func source(host: String = "192.168.1.96", username: String = "nasuser",
+    private func source(host: String = "192.0.2.96", username: String = "nasuser",
                         scopes: [String] = ["/示例共享文件夹", "/项目资料"],
                         name: String = "公司 NAS") -> NASSourceConfig {
         NASSourceConfig(name: name, vendor: .synology, host: host, port: 5001,
@@ -280,10 +280,12 @@ final class OnboardingTests: XCTestCase {
         XCTAssertFalse(SearchHintGuide.shouldShow(preferences: preferences), "重复标记不该翻回来")
     }
 
-    /// 提示的四条键位要和实际绑定对得上（见 `SearchKeyRouter`）。
+    /// 提示的键位要和实际绑定对得上（见 `SearchKeyRouter`）。
+    ///
+    /// 输入时保留空格，先用方向键选择结果后可按 Space 预览。
     func testSearchHintLinesMatchRealBindings() {
-        XCTAssertEqual(SearchHintGuide.lines.count, 4)
-        XCTAssertEqual(SearchHintGuide.lines, ["↑ ↓ 选择", "Return 打开", "Space 快速查看", "⌘ Return 在 Finder 中显示"])
+        XCTAssertEqual(SearchHintGuide.lines,
+                       ["↑ ↓ 选择", "Space 预览", "Return 打开", "⌘ Return 在 Finder 中显示"])
     }
 
     // MARK: - 本机搜索范围的三选一

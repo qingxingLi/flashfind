@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.7
+- **当前版本**：1.1.17
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -16,11 +16,24 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
 闪寻做的是：**不挂载、直接搜**。搜索请求由客户端直连 NAS 发出，
 结果列出后点一下才按需挂载、用系统方式打开。
 
+## 怎么用
+
+按 **⌥Space** 呼出搜索框，直接打字。
+
+- **`\` 选位置**：列出「全部位置 / 此 Mac / 各来源下的每个搜索根」。选中后限定会**下推到设备侧**——
+  只扫那一个根，不是把结果拉回来再过滤，所以检索时间是真的少了。
+  没连上的来源也在列表里（副标题写「· 未连接」），选中它先连上再搜。
+- **`/` 选类型**：pdf / word / excel / ppt / 照片 / 视频 / 音乐 / 压缩包 / 文档。
+  类型过滤在客户端做，可以和位置叠加。
+- 两个面板的候选都带数字，**按数字直接选中**；最后一条「打开设置…」固定按 **0**。
+- 结果列表里 **↓** 选中、**空格** 预览、再按 **空格** 关闭，**↩** 用系统方式打开。
+
 ## 支持什么设备
 
 | 类型 | 协议 | 说明 |
 |---|---|---|
 | 群晖 Synology | DSM `SYNO.FileStation.Search` v2 | 走 DSM 的 Web API，支持 OTP 双因子登录 |
+| OpenList | OpenList 的 `/api/fs/search` | 自带账号体系，支持 2FA 动态码；按搜索根逐根查询 |
 | 通用 WebDAV | WebDAV `PROPFIND` / `SEARCH` | 含飞牛 fnOS 等；OpenList 的入口是 `/dav` 且必须 https |
 | SMB/CIFS | 系统 `mount_smbfs` | 只用于打开结果，不用于搜索 |
 
@@ -92,13 +105,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1359 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1563 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1359 项
+swift test                       # 1563 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 

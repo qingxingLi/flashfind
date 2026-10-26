@@ -244,6 +244,13 @@ class Dio {
   /// 兼容上游写法：`_dio.options.baseUrl`。
   String get baseUrl => options.baseUrl;
 
+  /// 站点源地址（scheme + host + port，不含路径）。
+  ///
+  /// 「网页打开目标」要用它拼地址。**故意从这里取**而不是让适配器自己
+  /// 再解析一遍 `baseUrl`：同一份 origin 已经过这里的 scheme 白名单与
+  /// 明文 HTTP 开关校验，另写一份就会出现「请求被拒、网页链接却放行」的分叉。
+  Uri get siteOrigin => _origin;
+
   /// 已解析的 origin。所有请求都要落在这里面。
   Uri get _origin {
     final parsed = Uri.tryParse(options.baseUrl);

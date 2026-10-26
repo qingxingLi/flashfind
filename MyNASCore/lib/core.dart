@@ -25,6 +25,13 @@ class SearchOutcome {
   /// 处置完全不同。见 `_search` 里的分页循环。
   int duplicateCount = 0;
   bool partial = false, truncated = false, complete = false;
+  /// 本次搜索**没搜通**的搜索根（逐根搜索的品牌才会有）。
+  ///
+  /// ★ 必须如实列出：只说「结果不完整」而不说是哪几个位置，用户无从判断
+  ///   「是这些位置真的没有，还是这几个位置压根没搜」。
+  final failedRoots = <String>[];
+  /// 「不完整」的一句话说明（给界面用）。完整时为 null。
+  String? partialNote;
   final cleanupErrors = <String>[];
   /// 本次搜索**开始前**回收旧 DSM 任务的结果。
   ///
@@ -33,7 +40,7 @@ class SearchOutcome {
   DrainReport? pendingBefore;
   /// 本次搜索**结束后**再回收一次的结果（本次 clean 失败的东西也进队列）。
   DrainReport? pendingAfter;
-  Map<String,Object?> toJson() => {'resultState':state,'cleanupState':cleanup,'error':error?.toJson(),'isComplete':complete,'partial':partial,'truncated':truncated,'reportedTotal':reportedTotal,'fetchedCount':fetchedCount,'unparsedCount':unparsedCount,'duplicateCount':duplicateCount,'publishedCount':files.length,'cleanupErrors':cleanupErrors,'partialReason':error?.kind ?? limitReason,if (pendingBefore != null) 'pendingBefore':pendingBefore!.toJson(),if (pendingAfter != null) 'pendingAfter':pendingAfter!.toJson()};
+  Map<String,Object?> toJson() => {'resultState':state,'cleanupState':cleanup,'error':error?.toJson(),'isComplete':complete,'partial':partial,'truncated':truncated,'reportedTotal':reportedTotal,'fetchedCount':fetchedCount,'unparsedCount':unparsedCount,'duplicateCount':duplicateCount,'publishedCount':files.length,'failedRoots':failedRoots,if (partialNote != null) 'partialNote':partialNote,'cleanupErrors':cleanupErrors,'partialReason':error?.kind ?? limitReason,if (pendingBefore != null) 'pendingBefore':pendingBefore!.toJson(),if (pendingAfter != null) 'pendingAfter':pendingAfter!.toJson()};
 }
 class Lease {
   final String queryID;
@@ -120,16 +127,16 @@ class SynologyCore {
     try { await api.logout(t); } finally { timer.cancel(); active = null; }
   }
   Future<SearchOutcome>? _running;
-  Future<SearchOutcome> search(String query, String queryID,{Duration? budget}) {
+  Future<SearchOutcome> search(String query, String queryID,{Duration? budget,List<String>? roots}) {
     cancel(); final previous = _running;
     final l = Lease(queryID,api.sessionEpoch,api.accountIdentity,budget ?? queryBudget); active = l;
-    final f = _searchAfter(previous,l,query); _running = f; return f;
+    final f = _searchAfter(previous,l,query,roots); _running = f; return f;
   }
-  Future<SearchOutcome> _searchAfter(Future<SearchOutcome>? previous, Lease l, String query) async {
+  Future<SearchOutcome> _searchAfter(Future<SearchOutcome>? previous, Lease l, String query, List<String>? roots) async {
     await Future<void>.delayed(Duration.zero); // Allow queued controls before submission.
     // One task per source; control channel remains asynchronous while waiting.
     if (previous != null) { await previous; }
-    final out = await _search(l,query);
+    final out = await _search(l,query,roots);
     if (identical(active,l) && l.epoch == api.sessionEpoch) emit(l.queryID,'terminal',out.toJson());
     return out;
   }
@@ -164,7 +171,7 @@ class SynologyCore {
       if (p.rawCount == 0) throw const CoreError('DirectoryUnstable');
     }
   }
-  Future<SearchOutcome> _search(Lease l, String query) async {
+  Future<SearchOutcome> _search(Lease l, String query, List<String>? roots) async {
     final out = SearchOutcome();
     final timer = Timer(l.budget,()=>l.token.cancel('TimedOut'));
     try {
@@ -179,13 +186,20 @@ class SynologyCore {
       // 不是索引坏了，是我们自己占住了设备的搜索资源。
       final drained = await drainPendingTasks();
       if (!drained.isEmpty) out.pendingBefore = drained;
+      // ★ 本次搜索实际生效的根：没传限定就用全部已授权根；传了就收窄。
+      //
+      // 收窄在**这里**做（而不是信任客户端）���客户端传的根必须落在已授权
+      // 范围之内，否则报 ScopeDenied——一次越权就能把整个盘扫一遍。
+      final effective = (roots == null || roots.isEmpty) ? scope : scope.narrowTo(roots);
       scope.check(scope.root); publish(l,'sourceState',{'state':'starting'});
       l.starting=true; l.startSubmitted=true;
       // Cancellation after submission waits a bounded grace for a late task ID.
       final startToken = Cancellation(); Timer? grace;
       void startCancel() { grace ??= Timer(startGrace,()=>startToken.cancel(l.token.reason)); }
       l.token.listeners.add(startCancel);
-      try { l.task=await api.startSearch(scope.roots.toList(),query,startToken); }
+      // ★ 下发给设备的是**收窄后**的根：少一个根就少扫一个共享，
+      // 检索时间因此真的下降，而不是界面层做个过滤。
+      try { l.task=await api.startSearch(effective.roots.toList(),query,startToken); }
       on CoreError catch (e) { if (e.kind == 'NetworkFailure' || e.kind == 'TimedOut' || e.kind == 'Cancelled') throw const CoreError('UnknownSubmission'); rethrow; }
       finally { l.starting=false; grace?.cancel(); l.token.listeners.remove(startCancel); }
       l.token.check();

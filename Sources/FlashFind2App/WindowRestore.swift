@@ -33,3 +33,15 @@ func restoreSearchPanelIfNeeded(closing: NSWindow?, model: AppModel?) {
     }
     model?.showPanel?()
 }
+
+
+/// 系统授权切走焦点后恢复原表单，不重新 show，避免重建视图或清空登录草稿。
+@MainActor
+@discardableResult
+func restorePresentedPreferencesWindow(preferred: NSWindow? = nil) -> Bool {
+    let candidates = [NASWizardWindow.shared.presentedWindow, SettingsWindow.shared.presentedWindow]
+        .compactMap { $0 }.filter { !$0.isMiniaturized }
+    guard let window = candidates.first(where: { $0 === preferred }) ?? candidates.first else { return false }
+    window.makeKeyAndOrderFront(nil)
+    return true
+}

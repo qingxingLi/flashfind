@@ -116,6 +116,56 @@ final class ConnectionFailureTextTests: XCTestCase {
         XCTAssertTrue(text.contains("每次登录都不一样"), "要说清动态码为什么必须重填，实际：\(text)")
     }
 
+    // MARK: - 「码填错了」必须和「还没填过码」分开说（2026-10-26 报障）
+
+    /// ★ 只回一个 Bool 的判定不够用 —— 这是本轮报障的根因。
+    ///
+    /// 用户原文：「输入 OTP 验证码错误，不会提示验证码错误，而是没有什么反应，
+    /// 还是在外边提示需要动态码，需再次点击登陆。」
+    ///
+    /// `isOTPRequired` 只说「跟 OTP 有关」，上层于是只能拿同一句话去问第二次：
+    /// 用户看到「这台设备需要两步验证」，会以为自己那个码根本没发出去。
+    func testOTPFailureTellsRequiredApartFromRejected() {
+        XCTAssertEqual(ConnectionFailureText.otpFailure(
+            FlashFindError.coreFailure(kind: "NeedsOTP", reason: nil, apiCode: 403)), .required,
+                       "NeedsOTP = 还没填过码")
+        XCTAssertEqual(ConnectionFailureText.otpFailure(
+            FlashFindError.coreFailure(kind: "OTPRejected", reason: nil, apiCode: 402)), .rejected,
+                       "OTPRejected = 刚才那个码不对")
+        XCTAssertNil(ConnectionFailureText.otpFailure(
+            FlashFindError.coreFailure(kind: "AuthenticationFailed", reason: nil, apiCode: nil)),
+                     "密码错不是 OTP 问题")
+        XCTAssertNil(ConnectionFailureText.otpFailure(URLError(.timedOut)), "超时不是 OTP 问题")
+    }
+
+    /// ★ 码错时，弹窗里必须直说「输入错误、请再次输入」。
+    ///
+    /// 这是用户原话要求的那一句，不是文案偏好：
+    /// 「对话框内容里说明动态码输入错误，请再次输入」。
+    func testRejectedOTPPromptSaysTheCodeWasWrong() {
+        let text = ConnectionFailureText.otpPromptText(sourceName: "OpenList", failure: .rejected)
+        XCTAssertTrue(text.contains("输入错误"), "码错必须直说，实际：\(text)")
+        XCTAssertTrue(text.contains("请再次输入"), "要说清下一步是再输一次，实际：\(text)")
+        XCTAssertTrue(text.contains("OpenList"), "要指出是哪台设备，实际：\(text)")
+
+        XCTAssertEqual(ConnectionFailureText.otpDialogTitle(for: .rejected),
+                       ConnectionFailureText.otpRejectedTitle)
+        XCTAssertNotEqual(ConnectionFailureText.otpDialogTitle(for: .rejected),
+                          ConnectionFailureText.otpDialogTitle(for: .required),
+                          "码错与要码的标题必须不同——NSAlert 里最显眼的是标题，"
+                          + "扫一眼就该知道「刚才那个码不对」")
+    }
+
+    /// 反过来：还没填过码时**不许**说「错误」，否则等于冤枉用户填错过一次。
+    func testRequiredOTPPromptDoesNotClaimAWrongCode() {
+        let text = ConnectionFailureText.otpPromptText(sourceName: "OEC", failure: .required)
+        XCTAssertFalse(text.contains("输入错误"), "第一次要码就说「输入错误」是在冤枉用户，实际：\(text)")
+        XCTAssertTrue(text.contains("两步验证"), "要说清为什么突然要码，实际：\(text)")
+        XCTAssertEqual(ConnectionFailureText.otpDialogTitle(for: nil),
+                       ConnectionFailureText.otpDialogTitle,
+                       "没失败类型时仍用原本的标题")
+    }
+
     // MARK: - 弹窗式动态码（2026-10-22 起所有登录路径统一）
 
     /// 弹窗标题与「再点一次就能叫回来」那句提示必须同时存在。
@@ -132,7 +182,7 @@ final class ConnectionFailureTextTests: XCTestCase {
     /// 并且要求弹窗标题本身非空、住 Core（两处登录路径共用同一句）。
     func testTheOTPRetryHintPointsAtAButtonThatStillExists() {
         XCTAssertFalse(ConnectionFailureText.otpDialogTitle.isEmpty, "弹窗标题不能是空的")
-        let hint = ConnectionFailureText.otpRetryHint
+        let hint = ConnectionFailureText.otpRetryHint()
         XCTAssertTrue(hint.contains("「连接」"), "指路只能指界面上确定还在的控件，实际：\(hint)")
         XCTAssertFalse(hint.contains(ConnectionFailureText.otpDialogTitle),
                        "弹窗标题不该再被拼进状态行：怎么说填是弹窗的事，两处各说一遍必然走样")
@@ -140,9 +190,23 @@ final class ConnectionFailureTextTests: XCTestCase {
 
     /// 取消弹窗之后，用户还得知道「填什么、怎么再来一次」。
     func testTheOTPRetryHintSaysWhatToTypeAndHowToComeBack() {
-        let hint = ConnectionFailureText.otpRetryHint
+        let hint = ConnectionFailureText.otpRetryHint()
         XCTAssertTrue(hint.contains("6 位数字"), "要说清填什么，实际：\(hint)")
         XCTAssertTrue(hint.contains("再点一次"), "要说清怎么把它叫回来，实际：\(hint)")
+    }
+
+    /// ★ 取消后的提示必须说出**那个界面上真有的按钮名**。
+    ///
+    /// 向导底部按钮叫「连接」，来源卡片上叫「登录」。写死一个名字，另一半用户
+    /// 就会去找一个界面上不存在的按钮——这与 1.1.9 那次「指路指到折叠区」
+    /// 是同一类错误，只是这次错在**名字**而不是位置。
+    func testOTPRetryHintNamesTheButtonOfThatSurface() {
+        XCTAssertTrue(ConnectionFailureText.otpRetryHint().contains("「连接」"),
+                      "默认是向导那条路，按钮叫「连接」")
+        let sourceRow = ConnectionFailureText.otpRetryHint(buttonTitle: "登录")
+        XCTAssertTrue(sourceRow.contains("「登录」"), "来源卡片上按钮叫「登录」，实际：\(sourceRow)")
+        XCTAssertFalse(sourceRow.contains("「连接」"),
+                       "设置页没有「连接」按钮，说了等于让用户白找")
     }
 
     // MARK: - 连接尝试闸门

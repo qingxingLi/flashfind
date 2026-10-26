@@ -112,6 +112,15 @@ public struct SearchResult: Identifiable, Hashable, Sendable {
     public var sourceType: SearchSourceType = .nas
     public var isOnline = true
     public var openTarget: SearchOpenTarget = .unavailable
+    /// 这条结果是否只能通过**网页**打开。
+    ///
+    /// 视图层只关心这一个布尔（决定右键菜单显示哪些动作），不必在每个菜单项里
+    /// 展开 `case .webURL`。判定只认 `openTarget`：`canOpen` 表示「此刻可定位」，
+    /// 语义不同，混用会让 SMB 行也被当成网页行。
+    public var hasWebOpenTarget: Bool {
+        if case .webURL = openTarget { return true }
+        return false
+    }
     public var canOpen = false
     public var path: String { relativePath }
     public var fileType: String = "file"

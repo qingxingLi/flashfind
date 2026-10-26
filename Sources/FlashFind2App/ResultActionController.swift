@@ -37,6 +37,9 @@ final class ResultActionController: ObservableObject {
     var fileURLWithoutMounting: (SearchResult) throws -> URL = { _ in
         throw FlashFindError.message("尚未就绪")
     }
+    var preferredOpenTarget: (SearchResult) async throws -> SearchOpenTarget = { _ in
+        throw FlashFindError.message("尚未就绪")
+    }
     /// 状态栏文案。动作过程中的「正在连接…」和最后的提示都走这里。
     var onStatus: (String) -> Void = { _ in }
     /// 让浮窗收起。定位到访达后必须让位，否则浮窗还压在访达上面。
@@ -49,14 +52,28 @@ final class ResultActionController: ObservableObject {
         guard let row = resolveRow(result) else {
             onStatus("搜索或权限已变化，请重新选择结果"); return
         }
-        // 挂载可能耗时，期间给一句明确状态，避免界面像卡死。
-        if !row.canOpen { onStatus("正在连接 NAS 共享…") }
+        onStatus("正在检查打开位置…")
         Task {
             do {
-                let url = try await fileURL(row)
-                guard FileManager.default.fileExists(atPath: url.path) else {
-                    throw FlashFindError.message("文件已移动、已删除或共享未连接")
+                let target = try await preferredOpenTarget(row)
+                guard resolveRow(row) != nil else {
+                    onStatus("搜索或权限已变化，请重新选择结果"); return
                 }
+                if case .webURL(let url) = target {
+                    guard !reveal else {
+                        onStatus("此文件没有可用的本机挂载路径，请直接打开以使用浏览器"); return
+                    }
+                    if NSWorkspace.shared.open(url) {
+                        onStatus(""); onHidePanel()
+                    } else {
+                        onStatus("系统没有可用的浏览器打开这个链接")
+                    }
+                    return
+                }
+                guard case .mountedFile(let url) = target else {
+                    throw FlashFindError.message("没有可用的打开位置，请重新搜索")
+                }
+                // 网络路径已在后台核验；这里再次 stat 会把等待带回主线程。
                 if reveal {
                     // 系统默认的文件查看器可能是 Path Finder，这里显式要 Finder。
                     // activateFileViewerSelecting(_:) 走 Launch Services 而不是
@@ -94,6 +111,12 @@ final class ResultActionController: ObservableObject {
         guard let row = resolveRow(result) else {
             onStatus("搜索或权限已变化，请重新选择结果"); return
         }
+        if case .webURL = row.openTarget {
+            // 快速查看只认本地文件。这里显式说清「该怎么做」，而不是弹一句
+            // 「文件可能已被移动或删除」——那句会让用户以为文件没了。
+            onStatus("这个来源的文件在网页上，无法快速查看；按 Return 用浏览器打开")
+            return
+        }
         Task {
             do {
                 let url = try await fileURL(row)
@@ -107,9 +130,36 @@ final class ResultActionController: ObservableObject {
         }
     }
 
+    /// 复制网页链接。**只有网页来源有**，与「复制路径」是两件不同的事。
+    ///
+    /// 路径是「站点里的位置」（`/A0002/…`），粘到哪里都得先知道是哪个站；
+    /// 链接是「能直接点开的地址」（带域名、带百分号编码）。两个菜单项都给，
+    /// 标题写清各是什么——只留一个，用户复制出来的东西经常不是他想要的。
+    func copyWebLink(_ result: SearchResult) {
+        guard !AppEnvironment.isPreview, let row = resolveRow(result) else { return }
+        guard case .webURL(let url) = row.openTarget else {
+            onStatus("这条结果没有网页链接")
+            return
+        }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(url.absoluteString, forType: .string)
+        onStatus("已复制网页链接")
+    }
+
     /// 复制路径。**不需要挂载**：没挂载时给 NAS 逻辑路径比给一个不存在的本地路径更有用。
+    ///
+    /// 网页来源（OpenList）复制的是**站点内的逻辑路径**（`/A0002/…`），
+    /// 不是能直接点开的网页链接——那是另一个菜单项。状态栏要如实说一句，
+    /// 否则用户粘到浏览器地址栏里会得到「找不到页面」。
     func copyPath(_ result: SearchResult) {
         guard !AppEnvironment.isPreview, let row = resolveRow(result) else { return }
+        if case .webURL = row.openTarget {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(row.relativePath, forType: .string)
+            onStatus("已复制站点内路径（要在浏览器打开请用「复制网页链接」）")
+            return
+        }
         let text = (try? fileURLWithoutMounting(row).path) ?? row.relativePath
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)

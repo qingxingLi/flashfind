@@ -11,16 +11,16 @@ final class NASSourceConfigTests: XCTestCase {
     // MARK: 地址解析
 
     func testHostAcceptsIPv4AndDNSName() {
-        XCTAssertEqual(EndpointProbe.host(of: "192.168.1.96"), "192.168.1.96")
-        XCTAssertEqual(EndpointProbe.host(of: "192.168.1.88"), "192.168.1.88")
+        XCTAssertEqual(EndpointProbe.host(of: "192.0.2.96"), "192.0.2.96")
+        XCTAssertEqual(EndpointProbe.host(of: "192.0.2.88"), "192.0.2.88")
         XCTAssertEqual(EndpointProbe.host(of: "  nas.local "), "nas.local")
         XCTAssertEqual(EndpointProbe.host(of: "nas"), "nas")
     }
 
     func testHostStripsSchemePathAndUserInfo() {
-        XCTAssertEqual(EndpointProbe.host(of: "https://192.168.1.96:5001/webapi/query.cgi"), "192.168.1.96")
+        XCTAssertEqual(EndpointProbe.host(of: "https://192.0.2.96:5001/webapi/query.cgi"), "192.0.2.96")
         XCTAssertEqual(EndpointProbe.host(of: "http://nas.local/"), "nas.local")
-        XCTAssertEqual(EndpointProbe.host(of: "user@192.168.1.96"), "192.168.1.96")
+        XCTAssertEqual(EndpointProbe.host(of: "user@192.0.2.96"), "192.0.2.96")
     }
 
     func testHostRejectsTraversalAndGarbage() {
@@ -34,30 +34,30 @@ final class NASSourceConfigTests: XCTestCase {
     func testHostDiscardsPathInsteadOfFailing() {
         // 路径部分直接被丢弃，剩下的仍然是合法主机名。
         // 这里验证的是「路径不会进入 endpoint」，不是「带路径的输入要报错」。
-        XCTAssertEqual(EndpointProbe.host(of: "192.168.1.96/../etc/passwd"), "192.168.1.96")
+        XCTAssertEqual(EndpointProbe.host(of: "192.0.2.96/../etc/passwd"), "192.0.2.96")
     }
 
     // MARK: 端口规范化
 
     func testNormalizeHostKeepsUserTypedPort() {
-        var config = NASSourceConfig(host: "192.168.1.88:5003")
+        var config = NASSourceConfig(host: "192.0.2.88:5003")
         config.normalizeHost()
-        XCTAssertEqual(config.hostName, "192.168.1.88")
+        XCTAssertEqual(config.hostName, "192.0.2.88")
         XCTAssertEqual(config.port, 5003)
     }
 
     func testNormalizeHostStripsSchemeAndPath() {
-        var config = NASSourceConfig(host: "https://192.168.1.96:5001/webapi")
+        var config = NASSourceConfig(host: "https://192.0.2.96:5001/webapi")
         config.normalizeHost()
-        XCTAssertEqual(config.hostName, "192.168.1.96")
+        XCTAssertEqual(config.hostName, "192.0.2.96")
         XCTAssertEqual(config.port, 5001)
     }
 
     func testNormalizeHostRejectsOutOfRangePort() {
         // 99999 不是合法端口：应当整体拒绝，而不是当作主机名的一部分。
-        var config = NASSourceConfig(host: "192.168.1.96:99999")
+        var config = NASSourceConfig(host: "192.0.2.96:99999")
         config.normalizeHost()
-        XCTAssertNotEqual(config.hostName, "192.168.1.96:99999")
+        XCTAssertNotEqual(config.hostName, "192.0.2.96:99999")
     }
 
     func testNormalizeHostLeavesEmptyAlone() {
@@ -69,7 +69,7 @@ final class NASSourceConfigTests: XCTestCase {
     // MARK: 来源身份
 
     func testSourceIDIsProtocolSafeAndStable() {
-        let config = NASSourceConfig(id: "abc-123_XYZ", host: "192.168.1.96")
+        let config = NASSourceConfig(id: "abc-123_XYZ", host: "192.0.2.96")
         // 已经是合法协议标识就原样使用，不重复加前缀。
         XCTAssertEqual(config.sourceID, "abc-123_XYZ")
         // 同一个配置必须永远得到同一个身份，否则重启后会变成「新来源」。
@@ -84,15 +84,15 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testTwoSourcesGetDistinctIDs() {
-        let a = NASSourceConfig(id: "nas-a", host: "192.168.1.96")
-        let b = NASSourceConfig(id: "nas-b", host: "192.168.1.88")
+        let a = NASSourceConfig(id: "nas-a", host: "192.0.2.96")
+        let b = NASSourceConfig(id: "nas-b", host: "192.0.2.88")
         XCTAssertNotEqual(a.sourceID, b.sourceID)
     }
 
     // MARK: 配置就绪判定
 
     func testSearchConfiguredRequiresScope() {
-        var config = NASSourceConfig(host: "192.168.1.96", port: 5001, username: "nasuser")
+        var config = NASSourceConfig(host: "192.0.2.96", port: 5001, username: "nasuser")
         XCTAssertTrue(config.isConnectConfigured)
         XCTAssertFalse(config.isSearchConfigured, "没选搜索位置时不能算可搜索")
         config.scopes = ["/示例共享"]
@@ -100,42 +100,42 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testSearchConfiguredRejectsRootScope() {
-        var config = NASSourceConfig(host: "192.168.1.96", port: 5001, username: "nasuser", scopes: ["/"])
+        var config = NASSourceConfig(host: "192.0.2.96", port: 5001, username: "nasuser", scopes: ["/"])
         XCTAssertFalse(config.isSearchConfigured, "整盘范围不是合法的搜索位置")
     }
 
     func testConnectConfiguredRequiresUsername() {
-        let config = NASSourceConfig(host: "192.168.1.96", port: 5001, username: "  ")
+        let config = NASSourceConfig(host: "192.0.2.96", port: 5001, username: "  ")
         XCTAssertFalse(config.isConnectConfigured)
     }
 
     /// 端口写在地址里时，就绪判定必须和界面一致。
     ///
-    /// 判定只看端口字段的话，用户把 `192.168.1.96:5001` 写进地址栏后
+    /// 判定只看端口字段的话，用户把 `192.0.2.96:5001` 写进地址栏后
     /// 界面看着没问题、后台却判「未配置」——同一件事两套判定，
     /// 表现就是「点了没反应」。
     func testConnectConfiguredWhenPortOnlyInAddress() {
-        let config = NASSourceConfig(host: "192.168.1.96:5001", username: "nasuser")
+        let config = NASSourceConfig(host: "192.0.2.96:5001", username: "nasuser")
         XCTAssertFalse(config.hasPort)
         XCTAssertTrue(config.hasEffectivePort)
         XCTAssertTrue(config.isConnectConfigured)
     }
 
     func testSearchConfiguredWhenPortOnlyInAddress() {
-        let config = NASSourceConfig(host: "192.168.1.96:5001", username: "nasuser",
+        let config = NASSourceConfig(host: "192.0.2.96:5001", username: "nasuser",
                                      scopes: ["/示例共享"])
         XCTAssertTrue(config.isSearchConfigured)
     }
 
     func testNotConfiguredWithoutAnyPort() {
-        let config = NASSourceConfig(host: "192.168.1.96", username: "nasuser")
+        let config = NASSourceConfig(host: "192.0.2.96", username: "nasuser")
         XCTAssertFalse(config.isConnectConfigured)
     }
 
     /// 非群晖品牌**不再被判定为「不可配置」**。
     /// 品牌只影响能不能真的连上，不该影响用户能不能把配置留着、试一次。
     func testNonSynologyVendorIsStillConnectConfigured() {
-        let config = NASSourceConfig(vendor: .qnap, host: "192.168.1.50", port: 8080,
+        let config = NASSourceConfig(vendor: .qnap, host: "192.0.2.50", port: 8080,
                                      username: "admin")
         XCTAssertFalse(config.vendor.nativelySupported)
         XCTAssertTrue(config.isConnectConfigured)
@@ -169,26 +169,26 @@ final class NASSourceConfigTests: XCTestCase {
 
     func testFirstWorkingTriesPortsInOrder() async {
         var tried: [Int] = []
-        let hit = await EndpointProbe.firstWorking(host: "192.168.1.88", ports: [5001, 5003, 443]) { port in
+        let hit = await EndpointProbe.firstWorking(host: "192.0.2.88", ports: [5001, 5003, 443]) { port in
             tried.append(port)
-            return port == 5003 ? EndpointProbe.Candidate(port: port, endpoint: "https://192.168.1.88:5003", hasFileStation: true) : nil
+            return port == 5003 ? EndpointProbe.Candidate(port: port, endpoint: "https://192.0.2.88:5003", hasFileStation: true) : nil
         }
         XCTAssertEqual(tried, [5001, 5003], "找到就停，不该继续往后试")
         XCTAssertEqual(hit?.port, 5003)
     }
 
     func testFirstWorkingReturnsNilWhenNothingAnswers() async {
-        let hit = await EndpointProbe.firstWorking(host: "192.168.1.88", ports: [5001, 5000]) { _ in nil }
+        let hit = await EndpointProbe.firstWorking(host: "192.0.2.88", ports: [5001, 5000]) { _ in nil }
         XCTAssertNil(hit)
     }
 
     // MARK: 授权范围前缀
 
     func testScopePrefixMatchesOnlyAuthorizedShare() throws {
-        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.88", scope: "/示例共享"), port: 5003)
+        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.88", scope: "/示例共享"), port: 5003)
         let locator = provider.locatorSnapshot
         XCTAssertEqual(locator.scopePrefixes, ["/示例共享/"])
-        XCTAssertEqual(locator.host, "192.168.1.88")
+        XCTAssertEqual(locator.host, "192.0.2.88")
         XCTAssertEqual(locator.shares, ["示例共享"])
         XCTAssertTrue(locator.contains(path: "/示例共享/质量/a.xlsx"))
         XCTAssertFalse(locator.contains(path: "/照片/a.jpg"), "别的共享不能被当成本来源的结果")
@@ -197,8 +197,8 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testTwoSourcesDoNotAcceptEachOthersPaths() throws {
-        let first = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.96", scope: "/示例共享"), port: 5001)
-        let second = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.88", scope: "/工程部"), port: 5003)
+        let first = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.96", scope: "/示例共享"), port: 5001)
+        let second = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.88", scope: "/工程部"), port: 5003)
         let row = SearchResult(id: "x", name: "a.txt", relativePath: "/示例共享/a.txt",
                                sourceID: second.source.id, sourceName: second.source.displayName,
                                kind: "file", size: nil, localURL: nil)
@@ -207,7 +207,7 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testPathTraversalInsideScopeIsRejected() throws {
-        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.96", scope: "/示例共享"), port: 5001)
+        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.96", scope: "/示例共享"), port: 5001)
         for bad in ["/示例共享/../../etc/passwd", "/示例共享/..", "/示例共享/a//b"] {
             let row = SearchResult(id: "x", name: "b", relativePath: bad,
                                    sourceID: provider.source.id, sourceName: provider.source.displayName,
@@ -217,9 +217,9 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testLocatorUpdatesWhenScopeChanges() async throws {
-        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.168.1.96", scope: "/示例共享"), port: 5001)
+        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.96", scope: "/示例共享"), port: 5001)
         XCTAssertEqual(provider.locatorSnapshot.shares, ["示例共享"])
-        provider.updateConfig(fixture(host: "192.168.1.96", scope: "/工程部"))
+        provider.updateConfig(fixture(host: "192.0.2.96", scope: "/工程部"))
         XCTAssertEqual(provider.locatorSnapshot.scopePrefixes, ["/工程部/"], "换范围后后台核验必须跟着换")
     }
 
@@ -227,7 +227,7 @@ final class NASSourceConfigTests: XCTestCase {
 
     func testConfigRoundTripsThroughJSON() throws {
         var original = NASSourceConfig(id: "s1", name: "办公室 NAS", vendor: .synology,
-                                       host: "192.168.1.88", port: 5003, username: "nasuser",
+                                       host: "192.0.2.88", port: 5003, username: "nasuser",
                                        scope: "/示例共享", certificateSHA256: "abc", enabled: true,
                                        smbUsername: "nasuser", rememberPassword: true)
         original.normalizeHost()
@@ -237,7 +237,7 @@ final class NASSourceConfigTests: XCTestCase {
     }
 
     func testConfigNeverStoresPassword() throws {
-        let config = fixture(host: "192.168.1.96", scope: "/示例共享")
+        let config = fixture(host: "192.0.2.96", scope: "/示例共享")
         let text = String(decoding: try JSONEncoder().encode(config), as: UTF8.self)
         // rememberPassword 只是「是否记住」的布尔开关；真正的密码只能进钥匙串。
         // 判据是：不能出现任何承载口令内容的字段。
@@ -313,7 +313,7 @@ final class NASPortAndMountTests: XCTestCase {
     // MARK: 端口
 
     func testPortIsRequiredForConnect() {
-        var config = NASSourceConfig(host: "192.168.1.96", username: "nasuser")
+        var config = NASSourceConfig(host: "192.0.2.96", username: "nasuser")
         XCTAssertFalse(config.hasPort, "端口没填时不算配置完整")
         XCTAssertFalse(config.isConnectConfigured)
         config.port = 5001
@@ -322,7 +322,7 @@ final class NASPortAndMountTests: XCTestCase {
     }
 
     func testOutOfRangePortIsRejected() {
-        var config = NASSourceConfig(host: "192.168.1.96", port: 0, username: "nasuser")
+        var config = NASSourceConfig(host: "192.0.2.96", port: 0, username: "nasuser")
         XCTAssertFalse(config.hasPort)
         config.port = 70000
         XCTAssertFalse(config.hasPort, "越界端口不可用")
@@ -331,35 +331,35 @@ final class NASPortAndMountTests: XCTestCase {
     }
 
     func testPortTypedInHostIsExtracted() {
-        var config = NASSourceConfig(host: "192.168.1.88:5003")
+        var config = NASSourceConfig(host: "192.0.2.88:5003")
         config.normalizeHost()
-        XCTAssertEqual(config.hostName, "192.168.1.88")
+        XCTAssertEqual(config.hostName, "192.0.2.88")
         XCTAssertEqual(config.port, 5003)
         XCTAssertTrue(config.hasPort)
     }
 
     func testSecondSynologyUsesItsOwnPort() {
         // 实机事实：.88 的 5001 关闭，真实入口在 5003。
-        var config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "nasuser")
+        var config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "nasuser")
         config.normalizeHost()
         XCTAssertEqual(config.port, 5003)
-        XCTAssertEqual(EndpointProbe.host(of: config.host), "192.168.1.88")
+        XCTAssertEqual(EndpointProbe.host(of: config.host), "192.0.2.88")
     }
 
     // MARK: 挂载
 
     func testMountTargetBuildsSafeSMBURL() throws {
-        let target = SMBMountService.Target(host: "192.168.1.96", share: "示例共享", username: "nasuser")
+        let target = SMBMountService.Target(host: "192.0.2.96", share: "示例共享", username: "nasuser")
         let url = try XCTUnwrap(target.smbURL)
         XCTAssertEqual(url.scheme, "smb")
-        XCTAssertEqual(url.host, "192.168.1.96")
+        XCTAssertEqual(url.host, "192.0.2.96")
         XCTAssertNil(url.password, "URL 里绝不能出现密码")
     }
 
     func testMountRejectsTraversalInShareName() async {
         let service = SMBMountService()
         for bad in ["../etc", "a/b", "", ".."] {
-            let target = SMBMountService.Target(host: "192.168.1.96", share: bad)
+            let target = SMBMountService.Target(host: "192.0.2.96", share: bad)
             do {
                 _ = try await service.mount(target)
                 XCTFail("共享名 \(bad) 不应被接受")
@@ -369,7 +369,7 @@ final class NASPortAndMountTests: XCTestCase {
 
     func testMountRejectsMalformedHost() async {
         let service = SMBMountService()
-        for bad in ["", "192.168.1.96/../x", "a/b"] {
+        for bad in ["", "192.0.2.96/../x", "a/b"] {
             let target = SMBMountService.Target(host: bad, share: "示例共享")
             do {
                 _ = try await service.mount(target)
@@ -456,7 +456,7 @@ final class SourceReviewRegressionTests: XCTestCase {
     func testSourceIDNeverEmitsCharactersDartRejects() {
         let dartAllowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         for raw in ["nas.office", "a.b.c", "with space", "with/slash", "中文", "a.b-c_d"] {
-            let generated = NASSourceConfig(id: raw, host: "192.168.1.96").sourceID
+            let generated = NASSourceConfig(id: raw, host: "192.0.2.96").sourceID
             XCTAssertTrue(generated.allSatisfy { dartAllowed.contains($0) },
                           "\(raw) 生成的 sourceID 含 Dart 不接受的字符：\(generated)")
             XCTAssertLessThanOrEqual(generated.count, 64, "sourceID 超长会被 Dart 拒绝")
@@ -536,7 +536,7 @@ final class SourceReviewRegressionTests: XCTestCase {
 final class MultiScopeSelectionTests: XCTestCase {
 
     func testConfigKeepsMultipleScopesInOrder() {
-        let config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "u",
+        let config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "u",
                                     scopes: ["/docker", "/home", "/示例共享"])
         XCTAssertEqual(config.scopes, ["/docker", "/home", "/示例共享"])
         // 兼容旧字段：单值访问返回第一个
@@ -552,13 +552,13 @@ final class MultiScopeSelectionTests: XCTestCase {
 
     func testLegacySingleScopeInitializerStillWorks() {
         // 旧配置只有一个 scope 字段，读出来必须仍然是有效的可搜索配置。
-        let config = NASSourceConfig(host: "192.168.1.96", port: 5001, username: "u", scope: "/示例共享")
+        let config = NASSourceConfig(host: "192.0.2.96", port: 5001, username: "u", scope: "/示例共享")
         XCTAssertEqual(config.scopes, ["/示例共享"])
         XCTAssertTrue(config.isSearchConfigured)
     }
 
     func testLocatorAcceptsAnySelectedShare() throws {
-        let config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "u",
+        let config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "u",
                                     scopes: ["/示例共享", "/docker", "/home"])
         let locator = NASSearchProvider(bridge: NoopBridge(), config: config, port: 5003).locatorSnapshot
         for path in ["/示例共享/a.xlsx", "/docker/compose.yml", "/home/b.md"] {
@@ -570,7 +570,7 @@ final class MultiScopeSelectionTests: XCTestCase {
     }
 
     func testOwningRootAndShareResolveCorrectlyPerPath() throws {
-        let config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "u",
+        let config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "u",
                                     scopes: ["/示例共享", "/docker"])
         let locator = NASSearchProvider(bridge: NoopBridge(), config: config, port: 5003).locatorSnapshot
         // Finder 定位靠这个推导共享名——算错就会指到别的目录。
@@ -581,7 +581,7 @@ final class MultiScopeSelectionTests: XCTestCase {
     }
 
     func testTraversalInAnySelectedShareIsRejected() async throws {
-        let config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "u",
+        let config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "u",
                                     scopes: ["/示例共享", "/docker"])
         let provider = NASSearchProvider(bridge: NoopBridge(), config: config, port: 5003)
         let locator = provider.locatorSnapshot
@@ -596,13 +596,13 @@ final class MultiScopeSelectionTests: XCTestCase {
     }
 
     func testEmptyScopesMeansNotSearchConfigured() {
-        let config = NASSourceConfig(host: "192.168.1.88", port: 5003, username: "u", scopes: [])
+        let config = NASSourceConfig(host: "192.0.2.88", port: 5003, username: "u", scopes: [])
         XCTAssertTrue(config.isConnectConfigured)
         XCTAssertFalse(config.isSearchConfigured, "没勾选位置时不能算可搜索")
     }
 
     func testScopesRoundTripThroughJSON() throws {
-        let original = NASSourceConfig(id: "s1", host: "192.168.1.88", port: 5003, username: "u",
+        let original = NASSourceConfig(id: "s1", host: "192.0.2.88", port: 5003, username: "u",
                                       scopes: ["/示例共享", "/docker"])
         let data = try JSONEncoder().encode([original])
         let decoded = try JSONDecoder().decode([NASSourceConfig].self, from: data)
@@ -703,7 +703,7 @@ final class SourceReadinessTests: XCTestCase {
     private func provider(_ bridge: ScriptedBridge,
                           scopes: [String]) -> NASSearchProvider {
         NASSearchProvider(bridge: bridge,
-                          config: NASSourceConfig(host: "192.168.1.96", port: 5001,
+                          config: NASSourceConfig(host: "192.0.2.96", port: 5001,
                                                    username: "nasuser", scopes: scopes),
                           port: 5001)
     }
@@ -858,8 +858,8 @@ final class SearchSessionMemoryTests: XCTestCase {
 @MainActor
 final class ConnectButtonStateTests: XCTestCase {
 
-    private func canConnect(busy: Bool = false, host: String = "192.168.1.96", hasPort: Bool = true,
-                            username: String = "admin1", typed: Bool = true,
+    private func canConnect(busy: Bool = false, host: String = "192.0.2.96", hasPort: Bool = true,
+                            username: String = "fixture-user", typed: Bool = true,
                             stored: Bool = false) -> Bool {
         ConnectButtonState.canConnect(busy: busy, host: host, hasPort: hasPort,
                                       username: username, hasTypedPassword: typed,
@@ -895,7 +895,7 @@ final class ConnectButtonStateTests: XCTestCase {
     // MARK: 原因文案——灰按钮必须解释自己
 
     func testDisabledReasonNamesTheMissingThing() {
-        func reason(host: String = "192.168.1.96", hasPort: Bool = true, username: String = "admin1",
+        func reason(host: String = "192.0.2.96", hasPort: Bool = true, username: String = "fixture-user",
                     typed: Bool = false, stored: Bool = false) -> String? {
             ConnectButtonState.disabledReason(busy: false, host: host, hasPort: hasPort,
                                               username: username, hasTypedPassword: typed,
@@ -903,7 +903,7 @@ final class ConnectButtonStateTests: XCTestCase {
         }
         XCTAssertEqual(reason(host: ""), "请填写 NAS 地址")
         XCTAssertEqual(reason(hasPort: false), ConnectButtonState.disabledReason(
-            busy: false, host: "192.168.1.96", hasPort: false, username: "admin1",
+            busy: false, host: "192.0.2.96", hasPort: false, username: "fixture-user",
             hasTypedPassword: true, hasStoredPassword: false))
         XCTAssertNotNil(reason(hasPort: false))
         XCTAssertEqual(reason(username: ""), "请填写 NAS 账号")
@@ -932,11 +932,11 @@ final class ConnectButtonStateTests: XCTestCase {
             (true, true, true, true, true),
         ]
         for (busy, host, hasPort, username, typed) in cases {
-            let can = ConnectButtonState.canConnect(busy: busy, host: host ? "192.168.1.96" : "",
-                                                    hasPort: hasPort, username: username ? "admin1" : "",
+            let can = ConnectButtonState.canConnect(busy: busy, host: host ? "192.0.2.96" : "",
+                                                    hasPort: hasPort, username: username ? "fixture-user" : "",
                                                     hasTypedPassword: typed, hasStoredPassword: false)
-            let reason = ConnectButtonState.disabledReason(busy: busy, host: host ? "192.168.1.96" : "",
-                                                           hasPort: hasPort, username: username ? "admin1" : "",
+            let reason = ConnectButtonState.disabledReason(busy: busy, host: host ? "192.0.2.96" : "",
+                                                           hasPort: hasPort, username: username ? "fixture-user" : "",
                                                            hasTypedPassword: typed, hasStoredPassword: false)
             if can {
                 XCTAssertNil(reason, "能点就不该说缺东西（host=\(host) port=\(hasPort) user=\(username) typed=\(typed)）")
@@ -949,7 +949,7 @@ final class ConnectButtonStateTests: XCTestCase {
 
 /// 明文 HTTP 协议选择的回归测试。
 ///
-/// 背景（打包前自查）：WebDAV 适配器已在飞牛 fnOS（192.168.2.2:5005，
+/// 背景（打包前自查）：WebDAV 适配器已在飞牛 fnOS（192.0.2.2:5005，
 /// **明文 HTTP**）上真机跑通，但产品的来源向导里从来没有「协议」这个控件——
 /// `NASSourceConfig.usePlainHTTP` 在模型层建好了、注释也写了「用户可以显式改」，
 /// 界面却一直没落。而 `Vendor.webdav.defaultInsecureHTTP == false`（走 https），
@@ -978,7 +978,7 @@ final class PlainHTTPProtocolTests: XCTestCase {
 
     private func config(vendor: NASSourceConfig.Vendor, usePlainHTTP: Bool?) -> NASSourceConfig {
         var c = NASSourceConfig(id: "nas_test", name: "测试", vendor: vendor,
-                                host: "192.168.2.2", port: 5005, username: "admin1",
+                                host: "192.0.2.2", port: 5005, username: "fixture-user",
                                 scopes: ["/team"])
         c.usePlainHTTP = usePlainHTTP
         return c
@@ -1013,11 +1013,11 @@ final class PlainHTTPProtocolTests: XCTestCase {
         let provider = NASSearchProvider(bridge: bridge,
                                          config: config(vendor: .webdav, usePlainHTTP: true),
                                          port: 5005)
-        XCTAssertEqual(provider.endpoint, "http://192.168.2.2:5005",
+        XCTAssertEqual(provider.endpoint, "http://192.0.2.2:5005",
                        "真机 5005 是明文 HTTP，不能按 https 发")
 
         try await provider.discover()
-        XCTAssertEqual(bridge.lastFields["endpoint"] as? String, "http://192.168.2.2:5005")
+        XCTAssertEqual(bridge.lastFields["endpoint"] as? String, "http://192.0.2.2:5005")
         XCTAssertEqual(bridge.lastFields["allowInsecureHTTP"] as? Bool, true,
                        "要让核心显式放行明文，而不是让它默默降级")
         XCTAssertEqual(bridge.lastFields["vendor"] as? String, "webdav")
@@ -1030,7 +1030,7 @@ final class PlainHTTPProtocolTests: XCTestCase {
         let provider = NASSearchProvider(bridge: bridge,
                                          config: config(vendor: .webdav, usePlainHTTP: nil),
                                          port: 5005)
-        XCTAssertEqual(provider.endpoint, "https://192.168.2.2:5005")
+        XCTAssertEqual(provider.endpoint, "https://192.0.2.2:5005")
         try await provider.discover()
         XCTAssertEqual(bridge.lastFields["allowInsecureHTTP"] as? Bool, false)
     }
@@ -1139,7 +1139,7 @@ final class WebDAVBasePathTests: XCTestCase {
         }
     }
 
-    private func webdav(host: String = "192.168.2.2", port: Int = 5005,
+    private func webdav(host: String = "192.0.2.2", port: Int = 5005,
                         basePath: String? = nil) -> NASSourceConfig {
         NASSourceConfig(id: "nas_dav", name: "Alist", vendor: .webdav, host: host, port: port,
                         username: "admin", scopes: ["/team"], basePath: basePath)
@@ -1155,7 +1155,7 @@ final class WebDAVBasePathTests: XCTestCase {
         XCTAssertEqual(BasePathField.parse("dav"), "/dav")
         XCTAssertEqual(BasePathField.parse("  /dav  "), "/dav", "两端空白应被忽略")
         // 整条 URL 粘进来（从 OpenList / Alist 后台复制出来的就是这种）。
-        XCTAssertEqual(BasePathField.parse("http://192.168.2.2:5244/dav"), "/dav")
+        XCTAssertEqual(BasePathField.parse("http://192.0.2.2:5244/dav"), "/dav")
         XCTAssertEqual(BasePathField.parse("https://nas.example/remote.php/dav/"), "/remote.php/dav")
         // 查询串与锚点不属于路径。
         XCTAssertEqual(BasePathField.parse("/dav?token=abc"), "/dav")
@@ -1193,19 +1193,19 @@ final class WebDAVBasePathTests: XCTestCase {
         config.usePlainHTTP = true
         provider.updateConfig(config)
 
-        XCTAssertEqual(provider.endpoint, "http://192.168.2.2:5005/dav",
+        XCTAssertEqual(provider.endpoint, "http://192.0.2.2:5005/dav",
                        "端点必须带上路径，否则连到站点根")
 
         try await provider.discover()
-        XCTAssertEqual(bridge.lastFields["endpoint"] as? String, "http://192.168.2.2:5005/dav")
+        XCTAssertEqual(bridge.lastFields["endpoint"] as? String, "http://192.0.2.2:5005/dav")
     }
 
     func testEmptyBasePathKeepsTheEndpointAtTheSiteRoot() {
         let provider = NASSearchProvider(bridge: CapturingBridge(), config: webdav(), port: 5005)
-        XCTAssertEqual(provider.endpoint, "https://192.168.2.2:5005",
+        XCTAssertEqual(provider.endpoint, "https://192.0.2.2:5005",
                        "没填路径时地址不能多出斜杠或空段")
         let slash = NASSearchProvider(bridge: CapturingBridge(), config: webdav(basePath: "/"), port: 5005)
-        XCTAssertEqual(slash.endpoint, "https://192.168.2.2:5005", "只填一个 / 等于没填")
+        XCTAssertEqual(slash.endpoint, "https://192.0.2.2:5005", "只填一个 / 等于没填")
     }
 
     func testOnlyWebDAVOffersAPathField() {
@@ -1220,7 +1220,7 @@ final class WebDAVBasePathTests: XCTestCase {
         // 配置里残留了 `/dav` 也不能跑到群晖的端点上 —— 那会拼出
         // `https://nas:5001/dav`，一个谁也解释不了的地址。
         var config = NASSourceConfig(id: "nas_syn", name: "群晖", vendor: .synology,
-                                     host: "192.168.1.96", port: 5001, username: "u",
+                                     host: "192.0.2.96", port: 5001, username: "u",
                                      scopes: ["/share"], basePath: "/dav")
         XCTAssertEqual(config.effectiveBasePath, "")
         config.adoptVendor(.webdav)
@@ -1241,9 +1241,9 @@ final class WebDAVBasePathTests: XCTestCase {
     // MARK: - 3. 地址栏里粘贴的整条 URL 会被搬运到路径
 
     func testPastedURLMovesItsPathIntoBasePath() {
-        var config = webdav(host: "http://192.168.2.2:5244/dav")
+        var config = webdav(host: "http://192.0.2.2:5244/dav")
         config.normalizeHost()
-        XCTAssertEqual(config.hostName, "192.168.2.2", "主机里不能残留路径")
+        XCTAssertEqual(config.hostName, "192.0.2.2", "主机里不能残留路径")
         XCTAssertEqual(config.port, 5244, "端口要从地址里搬过来")
         XCTAssertEqual(config.basePath, "/dav", "路径不能被悄悄丢掉")
         XCTAssertEqual(config.effectiveBasePath, "/dav")
@@ -1251,10 +1251,10 @@ final class WebDAVBasePathTests: XCTestCase {
 
     func testPastedURLForOtherVendorsDoesNotInventABasePath() {
         var config = NASSourceConfig(id: "nas_syn", name: "群晖", vendor: .synology,
-                                     host: "https://192.168.1.96:5001/whatever",
+                                     host: "https://192.0.2.96:5001/whatever",
                                      port: 0, username: "u")
         config.normalizeHost()
-        XCTAssertEqual(config.hostName, "192.168.1.96")
+        XCTAssertEqual(config.hostName, "192.0.2.96")
         XCTAssertEqual(config.port, 5001)
         XCTAssertNil(config.basePath, "不提供路径选择的品牌不该凭空多出一个字段")
     }
@@ -1312,6 +1312,45 @@ final class VendorServiceHintTests: XCTestCase {
             XCTAssertFalse(vendor.serviceHint.contains("下面的「路径」"),
                            "\(vendor.rawValue) 不该引导用户去填路径")
         }
+    }
+}
+
+// MARK: - 连接信息页脚（connectionFooter）
+
+/// 「连接信息」下面那行「去哪儿看地址与端口」，**必须按品牌说话**。
+///
+/// 2026-10-24 用户把 OpenList 的站点地址（`openlist.example.invalid:443`）
+/// 填进向导，界面下方还在提示「在浏览器打开 NAS 管理页面…群晖常见端口是 5001」——
+/// 因为那句话是硬编码在视图里的。端口数字没有通用值：群晖是 5001、
+/// OpenList 是 5244、SMB 是 445，写死一个就是把其他品牌的用户往错的方向推。
+final class VendorConnectionFooterTests: XCTestCase {
+    func testEveryVendorHasAFooter() {
+        for vendor in NASSourceConfig.Vendor.allCases {
+            XCTAssertFalse(vendor.connectionFooter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           "\(vendor.rawValue) 缺少连接信息页脚")
+        }
+    }
+
+    /// ★ 只有群晖可以说 5001。
+    ///
+    /// 这条是本次 bug 的直接回归：任何人把品牌文案合并回一句通用话，
+    /// 都会在这里红——而不会等到用户把 OpenList 地址填进群晖类型才发现。
+    func testOnlySynologyMentionsTheDiskStationPort() {
+        for vendor in NASSourceConfig.Vendor.allCases where vendor != .synology {
+            XCTAssertFalse(vendor.connectionFooter.contains("5001"),
+                           "\(vendor.rawValue) 的页脚不该提群晖的 5001：\(vendor.connectionFooter)")
+        }
+        XCTAssertTrue(NASSourceConfig.Vendor.synology.connectionFooter.contains("5001"),
+                      "群晖这一项应当写出常见端口 5001")
+    }
+
+    func testOpenListFooterTalksAboutTheSiteNotADSMManagementPage() {
+        let footer = NASSourceConfig.Vendor.openlist.connectionFooter
+        XCTAssertTrue(footer.contains("OpenList"), "必须点明是 OpenList 网站：\(footer)")
+        XCTAssertTrue(footer.contains("5244"), "OpenList 默认端口是 5244，应写出来：\(footer)")
+        XCTAssertFalse(footer.contains("群晖"), "不该出现别的品牌名：\(footer)")
+        XCTAssertFalse(footer.contains("DSM"), "不该把 OpenList 用户指去 DSM：\(footer)")
+        XCTAssertFalse(footer.contains("NAS 管理页面"), "OpenList 没有「NAS 管理页面」这个东西：\(footer)")
     }
 }
 

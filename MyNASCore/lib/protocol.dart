@@ -44,7 +44,12 @@ import 'dart:convert';
 ///        单独给 24 轮预算。事件与字段没有增删，但**同一输入下的结果状态
 ///        会变**（失败 → 正常完成），因此仍要升号：旧客户端配新核心会把
 ///        修复后的成功路径当成未知状态。
-const int coreRevision = 6;
+///   7 —— 搜索命令新增**可选**字段 `roots`：把本次搜索限定到已授权根的
+///        子集。核心侧与已授权范围求交集，交集为空即报 ScopeDenied。
+///        字段可选 ⇒ 旧客户端不发它时行为完全不变；但它改变了「同一输入
+///        下的搜索范围」，因此升号：旧客户端配新核心会忽略这个限定，
+///        表现为「界面显示了限定位置，设备却仍在扫全部共享」。
+const int coreRevision = 7;
 
 class CoreError implements Exception {
   final String kind, api, method;
@@ -179,4 +184,35 @@ class Scope {
   }
   void check(String path) { if (!allows(path)) throw const CoreError('ScopeDenied'); }
   bool excludes(String path) => path.split('/').any(excluded.contains);
+
+  /// 把已授权范围**收窄**到指定的根子集（本次搜索的位置限定）。
+  ///
+  /// ★ 这是「在选定位置搜索」真正减少设备侧检索量的落点：收窄后的
+  /// `roots` 会被下发给设备（群晖 `Search.start(folder_path[])`、
+  /// 品牌适配器逐根各发一次），少一个根就少一次设备侧扫描。
+  ///
+  /// ★ 它**只允许收窄，绝不允许扩大**：
+  /// - 请求的根必须落在某个已授权根之下；
+  /// - 交集为空 ⇒ 报 `ScopeDenied`，不放行。
+  ///
+  /// 客户端是**不可信输入**：它说「搜 /别人家」时，核心必须自己再判一次。
+  /// 只靠客户端保证「我传的根一定授权过」是不够的——一次越权就能把
+  /// 整个盘扫一遍。
+  Scope narrowTo(Iterable<String> requested) {
+    final wanted = requested.map((v) => v.trim()).where((v) => v.isNotEmpty).toSet();
+    if (wanted.isEmpty) throw const CoreError('ScopeDenied');
+    // 只接受「已授权根之内」的路径。
+    //
+    // 用 `owningRoot` 判定而不是字符串前缀拼接：`/示例共享X` 不是
+    // `/示例共享` 的子目录，拼前缀会把它放进来（多根改造踩过的那个坑）。
+    final allowed = <String>{};
+    for (final path in wanted) {
+      validate(path);
+      if (path == '/' || path.startsWith('/volume1/')) throw const CoreError('ScopeDenied');
+      if (owningRoot(path) == null) throw const CoreError('ScopeDenied');
+      allowed.add(path);
+    }
+    // 收窄后的授权范围 = 请求的这些根（它们都落在原授权范围之内）。
+    return Scope.multi(allowed);
+  }
 }

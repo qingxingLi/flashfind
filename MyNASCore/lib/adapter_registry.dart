@@ -2,6 +2,7 @@
 //
 // 契约：Swift 侧 `Vendor.rawValue` 必须与这里的字符串一一对应。
 // 新增品牌时**两边一起改**，否则会出现「界面能选、核心不认」的静默失败。
+import 'adapters/openlist.dart';
 import 'adapters/qnap.dart';
 import 'adapters/ugreen.dart';
 import 'adapters/webdav.dart';
@@ -10,7 +11,11 @@ import 'dio_compat.dart';
 import 'protocol.dart';
 
 /// 真机验证过的品牌。只有这一档可以对用户说「能用」。
-const Set<String> stableVendors = {'webdav'};
+///
+/// `openlist` 于 2026-10-24 在真实实例（v4.1.10 / commit e3c664f）上量过登录、
+/// 列存储、限定目录搜索与分页，证据见
+/// `00-项目管理/任务交付/OL-AUTH-02-OpenList真实契约验证-20261024.md`。
+const Set<String> stableVendors = {'webdav', 'openlist'};
 
 /// 已移植但**没有真机证据**的品牌：能跑不代表对，界面必须照
 /// `capabilities.verifiedOnDevice` 说话。
@@ -58,6 +63,8 @@ NasBrandAdapter createBrandAdapter(
       return UGreenAdapter(dio: dio);
     case 'webdav':
       return WebDavAdapter(dio: dio);
+    case 'openlist':
+      return OpenListAdapter(dio: dio);
     case synologyVendor:
       // 群晖不走这里：它有自己的传输栈（证书固定 + CSRF + 任务模型）。
       throw const CoreError('UnsupportedVendor');

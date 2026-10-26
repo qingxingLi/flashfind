@@ -579,10 +579,14 @@ final class AIAccessSettingsSurfaceTests: XCTestCase {
         }
         for id in ["ai-access-enabled", "ai-access-save", "ai-access-revert",
                    "ai-helper-status", "ai-history-title", "ai-history-clear",
-                   "ai-prompt-text", "ai-prompt-copy", "ai-prompt-other-clients",
+                   "ai-prompt-text", "ai-prompt-copy",
                    "ai-prompt-save-first"] {
             XCTAssertTrue(ai.contains(id), "AI 页缺少 \(id)")
         }
+        // 「换个客户端？」那一块已按界面要求删除：路径永远是同一个，
+        // 展开一层说明只会让这一页更长。
+        XCTAssertFalse(ai.contains("ai-prompt-other-clients"),
+                       "「换个客户端？」已下线，不该再出现")
         // ★ 清空必须走二次确认：这是唯一一个删数据的按钮，一次误点就没了。
         XCTAssertTrue(ai.contains("confirmingHistoryClear = true"),
                       "「清空历史」没有先弹确认——它是这个页面里唯一会删东西的按钮")

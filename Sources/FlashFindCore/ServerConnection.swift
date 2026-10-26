@@ -138,7 +138,7 @@ public enum SecureStorage {
                             reason: String = "未标注") throws {
         try CredentialStore.save(value, account: account, identity: identity, reason: reason)
     }
-    /// `allowInteraction` 现在没有作用（存储不需要任何交互），保留只为不牵动调用方。
+    /// 只有用户主动登录才传 true；默认只读取已解锁的进程内钥匙串缓存。
     ///
     /// `identity` 非空时按信封校验归属：**与目标不匹配的凭据视同不存在**。
     public static func read(account: String, identity: CredentialIdentity? = nil,

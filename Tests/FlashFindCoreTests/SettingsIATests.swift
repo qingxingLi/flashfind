@@ -65,7 +65,7 @@ final class SettingsIATests: XCTestCase {
     // MARK: - 来源行：正常不给按钮
 
     private func source(scopes: [String] = ["/示例共享文件夹", "/项目资料"],
-                        host: String = "192.168.1.96", username: String = "nasuser",
+                        host: String = "192.0.2.96", username: String = "nasuser",
                         enabled: Bool = true) -> NASSourceConfig {
         NASSourceConfig(name: "公司 NAS", vendor: .synology,
                         host: host, port: 5001, username: username, scopes: scopes, enabled: enabled)
@@ -207,18 +207,23 @@ final class SettingsIATests: XCTestCase {
 
     // MARK: - 实验性来源开关
 
-    /// ★ 默认**关**：没设过就是关，向导里只有群晖。
+    /// ★ 默认**关**：开关只管「实验性」的那几个品牌。
+    ///
+    /// 群晖与 OpenList 是**正式开放**的两项，不归这个开关管——
+    /// 关着的时候也应该看得见，否则用户永远找不到 OpenList 的入口。
     func testExperimentalSourcesDefaultsOffAndGatesTheVendorList() {
         XCTAssertFalse(ExperimentalSources.resolve(stored: nil), "没设过必须是关")
         XCTAssertFalse(ExperimentalSources.resolve(stored: false))
         XCTAssertTrue(ExperimentalSources.resolve(stored: true))
 
-        XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: false), [.synology],
-                       "关着的时候只给群晖")
+        XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: false), [.synology, .openlist],
+                       "关着的时候给正式开放的两项")
         // 打开只放出「核心里有适配器的」那一批：没接入的（smb/generic）与
         // 已下线的（fnos）都不该出现——摆出来等于请用户去试一个连不上的类型。
+        //
+        // 顺序 = 正式两项在前，其余按 `allCases` 声明顺序追加。
         XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: true),
-                       [.synology, .qnap, .ugreen, .webdav],
+                       [.synology, .openlist, .qnap, .ugreen, .webdav],
                        "打开以后给出的是核心认得的类型，不是全部枚举值")
     }
 

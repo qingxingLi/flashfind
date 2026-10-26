@@ -150,33 +150,52 @@ extension AppModel {
     /// 判定必须看**本机凭据文件里到底有没有**，不能只看 `rememberPassword`：
     /// 勾了却没存上（保存失败、被清除）时，宣称「有已保存的密码」就是在骗人。
     ///
-    /// ★ OTP 特殊处理：动态口令不会也不该保存在本机。当状态标记 `needsOTP`
-    /// 为 true 时，本机即使有保存的密码也要先弹 OTP 输入框，把码带进去再连。
-    /// 否则用户会看到「设备要求两步验证码；重新连接并填写动态码」，
-    /// 点重新登录却什么都不弹，再次失败。
+    /// ★ OTP 特殊处理：动态口令不会也不该保存在本机。
+    ///
+    /// 2026-10-26 用户报障两条，都出在这个函数「把已知的事留到下一轮」：
+    ///
+    ///  1. 「第一次输入提示需要输入动态码，但是不会自动弹出动态码，
+    ///     需要点击两次登陆，很反人类」——第一次走的是静默连接，失败只写一行状态；
+    ///  2. 「输入 OTP 验证码错误，不会提示验证码错误，而是没有什么反应」
+    ///     —— 码错又回到同一条静默路径，只把状态改回「需要动态码」。
+    ///
+    /// 现在：**已知要码就地问**（不再先撞一次注定失败的登录）；不知道要码也走
+    /// `interactiveOTP: true`，由连接层在失败当场把框弹出来，并在码错时于同一个
+    /// 框里再问一次。用户点一次「登录」就够了。
     func reconnectSource(_ id: String) {
         guard let source = nasSources.first(where: { $0.id == id }) else { return }
 
+        let stored = SecureStorage.read(account: source.credentialAccount,
+                                        identity: source.credentialIdentity, allowInteraction: true) ?? ""
+
         if sourceStatus(id).needsOTP {
-            let stored = SecureStorage.read(account: source.credentialAccount,
-                                            identity: source.credentialIdentity) ?? ""
             guard !stored.isEmpty else {
                 let reason = "此账号需要动态口令。请先输入密码，再填写 OTP。"
                 setSourceStatus(id) { $0.health = .needsAttention; $0.message = reason; $0.requiredAction = .login; $0.needsOTP = true }
                 openReconnectWizard(id, reason: reason)
                 return
             }
-            guard let otp = promptForOTP(sourceName: source.displayName) else { return }
-            reconnectUsingStoredCredential(id, otp: otp)
+            // 状态里记着「上一次那个码被拒了」就照实说，否则只说设备要码。
+            let failure: OTPFailure = sourceStatus(id).otpRejected ? .rejected : .required
+            guard let otp = promptForOTP(sourceName: source.displayName, failure: failure) else {
+                // 取消不是失败：说清下次怎么把它叫回来，别把状态留在「需要动态码」上干等。
+                setSourceStatus(id) {
+                    $0.health = .needsAttention
+                    $0.message = ConnectionFailureText.otpRetryHint(buttonTitle: "登录")
+                    $0.requiredAction = .login
+                    $0.needsOTP = true
+                }
+                return
+            }
+            reconnectUsingStoredCredential(id, otp: otp, interactiveOTP: true)
             return
         }
 
-        let stored = SecureStorage.read(account: source.credentialAccount,
-                                        identity: source.credentialIdentity) ?? ""
         switch ReconnectEntryState.route(rememberPassword: source.rememberPassword,
                                          hasStoredCredential: !stored.isEmpty) {
         case .storedCredential:
-            reconnectUsingStoredCredential(id, otp: nil)
+            // ★ 用户主动点的登录（不是开机自动连接）⇒ 允许当场弹 OTP 框。
+            reconnectUsingStoredCredential(id, otp: nil, interactiveOTP: true)
         case .askForPassword(let reason):
             // 状态卡片上先写一句，用户即使不看向导窗口也知道发生了什么。
             setSourceStatus(id) { $0.health = .needsAttention; $0.message = reason; $0.requiredAction = .login }
@@ -191,33 +210,46 @@ extension AppModel {
     /// 如果每个来源都去改 `draftSource / pendingCredential / pendingProvider`，
     /// 多台 NAS 会互相覆盖——后面那台把前面那台的草稿冲掉，
     /// 表现出来就是「点了重连，只有最后一台有反应」。
-    func reconnectUsingStoredCredential(_ id: String, otp: String? = nil) {
-        guard let source = nasSources.first(where: { $0.id == id }) else { return }
+    ///
+    /// - Parameter interactiveOTP: 用户自己点的登录（而不是批量诊断 / 开机自动连）。
+    ///   为 true 时设备要动态码会当场弹框，且码错就在同一个框里重问。
+    /// - Returns: 是否**真的发起了**连接。`false` = 没存密码或钥匙串里读不到，
+    ///   这种情况下只写了来源状态卡片，调用方若在搜索面板上（那里看不到卡片）
+    ///   必须自己补一句，否则用户看到的是「点了没反应」。
+    @discardableResult
+    func reconnectUsingStoredCredential(_ id: String, otp: String? = nil,
+                                        interactiveOTP: Bool = false) -> Bool {
+        guard let source = nasSources.first(where: { $0.id == id }) else { return false }
         guard source.rememberPassword else {
             setSourceStatus(id) { $0.health = .needsAttention; $0.message = ReconnectEntryState.notRememberedReason; $0.requiredAction = .login }
-            return
+            return false
         }
         guard let secret = SecureStorage.read(account: source.credentialAccount,
-                                             identity: source.credentialIdentity), !secret.isEmpty else {
-            setSourceStatus(id) { $0.health = .needsAttention; $0.message = ReconnectEntryState.missingStoredReason; $0.requiredAction = .login }
-            return
+                                             identity: source.credentialIdentity, allowInteraction: true), !secret.isEmpty else {
+            setSourceStatus(id) { $0.health = .needsAttention; $0.message = CredentialStore.currentProblem?.summary ?? ReconnectEntryState.missingStoredReason; $0.requiredAction = .login }
+            return false
         }
         let message = otp == nil ? "正在用已保存的密码连接…" : "正在用已保存的密码和动态码连接…"
         setSourceStatus(id) { $0.health = .connecting; $0.message = message; $0.requiredAction = nil }
         let credential = PendingCredential(password: secret, otp: otp)
-        startQuietConnect(config: source, credential: credential)
+        startQuietConnect(config: source, credential: credential, interactiveOTP: interactiveOTP)
+        return true
     }
 
     /// 弹出一个 OTP 输入框，返回用户填的 6 位动态码；用户点取消返回 `nil`。
     ///
     /// 放在 AppModel 而不是 Core：它需要 AppKit `NSAlert`，Core 不能依赖 AppKit。
-    /// 但「什么情况下该弹」的判定在 Core 的 `ConnectionFailureText.isOTPRequired`，
+    /// 但「什么情况下该弹 / 该说什么」的判定在 Core 的 `ConnectionFailureText`
+    /// （`otpFailure` / `otpPromptText` / `otpDialogTitle(for:)`），
     /// 这样 OTP 逻辑的可测部分与不可测部分边界清晰。
-    func promptForOTP(sourceName: String) -> String? {
+    ///
+    /// - Parameter failure: `nil` / `.required` = 还没填过码；`.rejected` = 刚填的被拒，
+    ///   标题与正文都要直说「输入错误」，这是用户 2026-10-26 明确要求的。
+    func promptForOTP(sourceName: String, failure: OTPFailure? = nil) -> String? {
         let alert = NSAlert()
-        alert.messageText = ConnectionFailureText.otpDialogTitle
-        alert.informativeText = ConnectionFailureText.otpPromptText(sourceName: sourceName)
-        alert.alertStyle = .informational
+        alert.messageText = ConnectionFailureText.otpDialogTitle(for: failure)
+        alert.informativeText = ConnectionFailureText.otpPromptText(sourceName: sourceName, failure: failure)
+        alert.alertStyle = failure == .rejected ? .warning : .informational
         alert.addButton(withTitle: "连接")
         alert.addButton(withTitle: "取消")
 
@@ -271,6 +303,7 @@ extension AppModel {
             $0.requiredAction = .retry
             // 断开后 OTP 标记失效：用户再连时如果仍需要 OTP，失败路径会重新标记。
             $0.needsOTP = false
+            $0.otpRejected = false
         }
         Task { [weak self] in
             await self?.nasConnectionManager.disconnectOne(id)
@@ -288,11 +321,13 @@ extension AppModel {
     /// 旧的 `Task { await performConnectQuietly(...) }` 无处取消，断开之后
     /// 它还会一路走到底把来源 install 回来，所以这里把 Task 存下来供
     /// `disconnectSource` 取消；意图作废才是真正的闸门，取消只是让它可以早退。
-    func startQuietConnect(config: NASSourceConfig, credential: PendingCredential) {
+    func startQuietConnect(config: NASSourceConfig, credential: PendingCredential,
+                           interactiveOTP: Bool = false) {
         connectTasks[config.sourceID]?.cancel()
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.performConnectQuietly(config: config, credential: credential)
+            await self.performConnectQuietly(config: config, credential: credential,
+                                             interactiveOTP: interactiveOTP)
         }
         connectTasks[config.sourceID] = task
     }

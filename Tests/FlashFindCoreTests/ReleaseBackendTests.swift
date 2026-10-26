@@ -56,11 +56,16 @@ final class ReleaseBackendTests: XCTestCase {
                       "迁移需要读旧 credentials.json，后端不是文件时只能靠 plaintextSource 这一个入口")
     }
 
-    /// 启动路径上要有迁移调用，否则旧明文永远躺在那儿。
-    func testMigrationRunsAtLaunch() throws {
-        let text = try contents("Sources/FlashFind2App/FlashFind2App.swift")
-        XCTAssertTrue(text.contains("migrateLegacyPlaintext()"),
-                      "没有一次性迁移的触发点：旧明文不会被搬走，也就永远不会走到「验证后删除」")
+    func testLegacyCredentialMigrationWaitsForInteractiveLogin() throws {
+        let startup = try contents("Sources/FlashFind2App/FlashFind2App.swift")
+        XCTAssertFalse(startup.contains("CredentialStore.migrateLegacyPlaintext()"))
+        let body = try braceBalancedBlock(in: try contents("Sources/FlashFindCore/CredentialStore.swift"),
+                                         anchor: "public static func read(account:")
+        let gate = try XCTUnwrap(body.range(of: "allowInteraction, store is KeychainSecretStore"))
+        let migration = try XCTUnwrap(body.range(of: "migrateLegacyPlaintext()"))
+        XCTAssertLessThan(gate.lowerBound, migration.lowerBound)
+        XCTAssertTrue(body.contains("store.unreadableReason == nil"), "拒绝授权后不能再走迁移重复弹框")
+        XCTAssertTrue(body.contains("consolidateIntoVault(accounts: [account])"), "只迁移本次登录的旧钥匙串条目")
     }
 
     /// 缺 entitlement 的机器上，Data Protection 钥匙串写入会失败（-34018）。

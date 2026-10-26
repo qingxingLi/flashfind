@@ -52,6 +52,16 @@ extension AppModel {
         return try binding.resolve(source: source, relativePath: result.relativePath)
     }
 
+    func preferredOpenTarget(_ result: SearchResult) async throws -> SearchOpenTarget {
+        if let sourceID = result.sourceID,
+           let provider = nativeProviders.values.first(where: { $0.source.id == sourceID }),
+           provider.config.vendor == .synology || provider.config.vendor == .openlist {
+            return try await provider.preferredOpenTarget(result)
+        }
+        if case .webURL = result.openTarget { return result.openTarget }
+        return .mountedFile(try await fileURL(result))
+    }
+
     /// 只查已挂载的解析结果，不触发挂载。用于「能否打开」的判定。
     func fileURLWithoutMounting(_ result: SearchResult) throws -> URL {
         if let local = result.localURL { return local }
@@ -87,6 +97,8 @@ extension AppModel {
     func retryOpenCurrentResult() { resultActions.retryOpen(selectedResult) }
     /// 复制路径（不需要挂载）。
     func copy(_ result: SearchResult) { resultActions.copyPath(result) }
+    /// 复制网页链接。只有网页来源（OpenList 这类）有；与「复制路径」是两个不同结果。
+    func copyWebLink(_ result: SearchResult) { resultActions.copyWebLink(result) }
     func openServerManagement() {
         guard !AppEnvironment.isPreview, let id = selectedConnectionID,
               let profile = nasConnections.first(where: { $0.id == id }), let url = URL(string: profile.address), url.scheme == "https" else { return }

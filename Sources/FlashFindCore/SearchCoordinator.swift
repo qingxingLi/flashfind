@@ -78,6 +78,16 @@ import Foundation
     /// （BUG-006）。不传的重载只给测试与直接调用保留。
     @discardableResult
     public func searchDebounced(_ text: String, sources: Set<String>? = nil, queryID external: UUID, emit: @escaping @MainActor (ProviderEvent)->Void) -> UUID? {
+        searchDebounced(text, sources: sources, rootLimit: nil, queryID: external, emit: emit)
+    }
+
+    /// 带位置限定的防抖入口。
+    ///
+    /// - Parameter rootLimit: 本次搜索限定在哪个来源的哪些根里。
+    ///   `nil` = 不限定。**它随这一次调用走**，不留在协调器上 ——
+    ///   协调器与 provider 实例都被 GUI 与 MCP 共用，留成持久状态会互相污染。
+    @discardableResult
+    public func searchDebounced(_ text: String, sources: Set<String>? = nil, rootLimit: SearchRootLimit?, queryID external: UUID, emit: @escaping @MainActor (ProviderEvent)->Void) -> UUID? {
         let id = external
         debounceTask?.cancel()
         supersede(with: id)
@@ -85,13 +95,13 @@ import Foundation
         let local = selected.filter { $0.source.type == .local }
         let remote = selected.filter { $0.source.type != .local }
         queryID = id
-        if !local.isEmpty { localTask = run(local, text: text, emit: emit, id: id) }
+        if !local.isEmpty { localTask = run(local, text: text, rootLimit: rootLimit, emit: emit, id: id) }
         if !remote.isEmpty {
             debounceTask = Task { [weak self] in
                 try? await Task.sleep(for: Self.debounceInterval)
                 guard let self, !Task.isCancelled, self.queryID == id else { return }
                 self.remoteTask = self.run(self.remoteProviders(sources: sources),
-                                           text: text, emit: emit, id: id)
+                                           text: text, rootLimit: rootLimit, emit: emit, id: id)
             }
         }
         return id
@@ -106,14 +116,20 @@ import Foundation
     /// 由调用方指定 queryID 的立即入口（P1-01）。见 `searchDebounced` 的说明。
     @discardableResult
     public func search(_ text: String, sources: Set<String>? = nil, queryID external: UUID, emit: @escaping @MainActor (ProviderEvent)->Void) -> UUID {
+        search(text, sources: sources, rootLimit: nil, queryID: external, emit: emit)
+    }
+
+    /// 带位置限定的立即入口。
+    @discardableResult
+    public func search(_ text: String, sources: Set<String>? = nil, rootLimit: SearchRootLimit?, queryID external: UUID, emit: @escaping @MainActor (ProviderEvent)->Void) -> UUID {
         debounceTask?.cancel(); debounceTask=nil
         let id = external
         supersede(with: id)
         queryID = id
         localTask = run(providers.filter { $0.source.type == .local && (sources == nil || sources!.contains($0.source.id)) },
-                        text: text, emit: emit, id: id)
+                        text: text, rootLimit: rootLimit, emit: emit, id: id)
         remoteTask = run(providers.filter { $0.source.type != .local && (sources == nil || sources!.contains($0.source.id)) },
-                         text: text, emit: emit, id: id)
+                         text: text, rootLimit: rootLimit, emit: emit, id: id)
         return id
     }
 
@@ -133,7 +149,7 @@ import Foundation
         remoteTask?.cancel(); remoteTask=nil
     }
 
-    private func run(_ selected: [any SearchProvider], text: String, emit: @escaping @MainActor (ProviderEvent)->Void, id: UUID) -> Task<Void,Never> {
+    private func run(_ selected: [any SearchProvider], text: String, rootLimit: SearchRootLimit?, emit: @escaping @MainActor (ProviderEvent)->Void, id: UUID) -> Task<Void,Never> {
         Task { @MainActor [weak self] in
             guard let self, self.queryID == id, !Task.isCancelled else { return }
             self.ensureReapTicker()
@@ -145,7 +161,8 @@ import Foundation
                                   queryID: id,
                                   owner: .ui,
                                   sources: Set(selected.map(\.source.id)),
-                                  supersedePrevious: true) { [weak self] event in
+                                  supersedePrevious: true,
+                                  rootLimit: rootLimit) { [weak self] event in
                 // 门禁留在这一层：迟到的旧查询事件不得污染当前查询的界面。
                 guard let self, self.queryID == id, event.queryID == id else { return }
                 emit(event)

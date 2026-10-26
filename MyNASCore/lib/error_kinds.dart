@@ -74,6 +74,15 @@ class ErrorKind {
 
   // —— 搜索能力 ——
   static const unsupportedApi = 'UnsupportedApi';
+  /// 设备不接受这个搜索词（而不是「没搜到」）。
+  ///
+  /// 典型场景：OpenList 在 `keywords` 为空时**返回全站文件**（实测 80315 条），
+  /// 因此空查询必须在适配器里拒绝。拒绝不能退回空列表——那会把
+  /// 「查询非法」伪装成「没有匹配」，用户会以为真没有这个文件。
+  ///
+  /// Swift 侧 `NASSearchFailureText.sentences` 早已登记 `UnsupportedQuery`
+  /// 的文案，但 Dart 这一侧此前没有对应常量，属于契约缺口；本次补齐。
+  static const unsupportedQuery = 'UnsupportedQuery';
   static const unsupportedSearchNoFallback = 'UnsupportedSearchNoFallback';
   static const unsupportedVendor = 'UnsupportedVendor';
   static const unverifiedAdapter = 'UnverifiedAdapter';
@@ -141,6 +150,7 @@ class ErrorKind {
     resultsNotReady,
     unknownSubmission,
     unsupportedApi,
+    unsupportedQuery,
     unsupportedSearchNoFallback,
     unsupportedVendor,
     unverifiedAdapter,

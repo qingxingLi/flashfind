@@ -80,6 +80,14 @@ final class AppModel: ObservableObject {
     @Published var selectedConnectionID: String?
     @Published var connectionStates: [String: NASConnectionState] = [:]
     @Published var scope: SearchScope = .all
+    /// 搜索框最前面那排已选定的限定（位置 + 文件类型）。
+    ///
+    /// ★ 它不是 `scope` 的替代品，而是**在 scope 之上的进一步收窄**：
+    /// `scope` 决定「本机 / NAS / 全部」，`tokenBar` 决定「哪个来源的哪个根」
+    /// 与「什么格式」。两个限定可叠加（`\照片` + `/pdf`）。
+    @Published var tokenBar: SearchTokenBar = .empty
+    /// 命令面板里当前选中的候选下标。
+    @Published var commandSelection: Int = 0
     /// 本机这一侧的来源（本机搜索方式、已挂载 SMB 共享、文件夹选择）。
     ///
     /// 状态搬走之后，界面观察的仍是 AppModel —— 所以和前几轮一样必须桥接
@@ -147,8 +155,9 @@ final class AppModel: ObservableObject {
     @Published var nativeSearchTimeoutSeconds = 60
     /// 「显示实验性搜索来源」（高级页）。
     ///
-    /// 默认**关**：关着的时候向导只给群晖，把「适配器在、但没在真机上验证过」
-    /// 的那几条路收起来（见 `ExperimentalSources`）。开关本身是可测逻辑，
+    /// 默认**关**：关着的时候向导只给正式开放的两项（群晖与 OpenList），
+    /// 把「适配器在、但没在真机上验证过」的那几条路收起来
+    /// （见 `ExperimentalSources`）。开关本身是可测逻辑，
     /// 放在 Core；这里只负责持久化与广播。
     @Published private(set) var showExperimentalSources = false
     /// 向导里当前可选的来源类型。
@@ -278,13 +287,21 @@ final class AppModel: ObservableObject {
     var displayedRevision: UInt64?
     var displayedQuery = ""
     var displayedScope: SearchScope = .all
+    /// 已发布结果时对应的限定（位置 + 类型）。
+    ///
+    /// ★ 它必须参与 `canUseDisplayedResults` 的比对：限定一变，
+    /// 上一轮的结果就**不是**这一轮的结果了。不比对的话，用户刚把位置
+    /// 从「照片」切到「文档」，界面上还挂着照片那一轮的结果 ——
+    /// 看起来像「位置限定没生效」。
+    var displayedTokenBar: SearchTokenBar = .empty
     let profilesKey = "ff2.multiNAS.v1"
     var configurationBlocked = false
     var loadingPassword = false
     var passwordDraftIdentity: String?
     var draftIdentity: String { AccountProfile.key(address: address.trimmingCharacters(in: .whitespacesAndNewlines), username: username.trimmingCharacters(in: .whitespacesAndNewlines)) }
     var canUseDisplayedResults: Bool {
-        resultsAreCurrent && displayedRevision == contextRevision && displayedQuery == query && displayedScope == scope
+        resultsAreCurrent && displayedRevision == contextRevision && displayedQuery == query
+            && displayedScope == scope && displayedTokenBar == tokenBar
     }
     /// 至少有一个 NAS 来源可以真正参与搜索。旧的索引服务连接仍算可用来源。
     var hasSelectedNASSource: Bool { enabled && (hasUsableNativeSource || connectionStates.values.contains { $0.canSearch }) }
@@ -365,10 +382,16 @@ final class AppModel: ObservableObject {
         // ★ 这条闭包捕获 self，所以必须等上面所有存储属性初始化完之后才能写。
         // 向导里「设备要动态码」时弹的那扇窗，与详情页「重新登录…」用的是同一扇：
         // 两条路各弹各的，迟早会走出两套文案与两种行为（同 kind 不得两种说法）。
-        wizard.otpPrompter = { [weak self] name in self?.promptForOTP(sourceName: name) }
+        wizard.otpPrompter = { [weak self] name, failure in
+            self?.promptForOTP(sourceName: name, failure: failure)
+        }
         // 动作要用的三个入口都由宿主提供：解析当前行（要读权限/来源开关）、
         // 解析文件 URL（要读 provider 与挂载绑定）、状态与浮窗收起。
         resultActions.resolveRow = { [weak self] row in self?.currentResult(row) }
+        resultActions.preferredOpenTarget = { [weak self] row in
+            guard let self else { throw FlashFindError.message("已退出") }
+            return try await self.preferredOpenTarget(row)
+        }
         resultActions.fileURL = { [weak self] row in
             guard let self else { throw FlashFindError.message("已退出") }
             return try await self.fileURL(row)
@@ -508,11 +531,7 @@ final class AppModel: ObservableObject {
             stored: defaults.object(forKey: ExperimentalSources.storageKey) as? Bool)
         loadNativeSources()
         ensureProviderCoordinator()
-        // 升级后第一次启动：先把老布局的凭据合并成一条，再自动连接。
-        // 顺序不能反——见 `consolidateCredentialsIfNeeded` 的说明。
-        consolidateCredentialsIfNeeded()
-        // 启动即连已保存的来源：用户打开就能直接搜，不必每次手动走向导输密码。
-        // 没记住密码的来源会被跳过（状态里说明原因），不会弹窗打扰。
+        // 启动不访问真实钥匙串；已保存的来源等待用户主动登录授权。
         autoConnectSavedSources()
     }
 

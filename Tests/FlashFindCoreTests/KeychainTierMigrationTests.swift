@@ -89,16 +89,17 @@ final class KeychainTierMigrationTests: XCTestCase {
         XCTAssertTrue(report.isEmpty, "非钥匙串后端没有「层级」这回事，应当整体跳过")
     }
 
-    /// 升迁的调用点在启动路径上，且 account 由调用方指名（不枚举）。
-    func testTierMigrationIsRegisteredOnTheLaunchPath() throws {
+    /// 升迁延后到主动登录，并只处理这次登录的账号。
+    func testTierMigrationWaitsForExplicitLogin() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let text = try String(contentsOf: root.appendingPathComponent("Sources/FlashFind2App/FlashFind2App.swift"),
-                              encoding: .utf8)
-        XCTAssertTrue(text.contains("CredentialStore.migrateKeychainTier(accounts:"),
-                      "升迁必须登记在启动路径上，否则 entitlement 到位那天也不会发生")
-        XCTAssertFalse(text.contains("allAccounts()"),
-                       "启动路径上不许枚举钥匙串：枚举会触碰系统授权")
+        let startup = try String(contentsOf: root.appendingPathComponent("Sources/FlashFind2App/FlashFind2App.swift"),
+                                 encoding: .utf8)
+        let store = try String(contentsOf: root.appendingPathComponent("Sources/FlashFindCore/CredentialStore.swift"),
+                               encoding: .utf8)
+        XCTAssertFalse(startup.contains("CredentialStore.migrateKeychainTier(accounts:"))
+        XCTAssertTrue(store.contains("migrateKeychainTier(accounts: [account])"))
+        XCTAssertFalse(startup.contains("allAccounts()"), "启动路径不能枚举钥匙串")
     }
 
     /// 只按给定状态码拒绝写入，用来模拟「DP 侧写不进去」。

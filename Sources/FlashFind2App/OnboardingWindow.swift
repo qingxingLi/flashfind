@@ -19,10 +19,11 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
     /// 引导窗口是否正在屏幕上。
     ///
     /// `AppDelegate` 靠它决定「按下全局快捷键」是什么意思：引导开着时按一下
-    /// 只表示「这个快捷键能用」，不该把搜索浮窗弹到引导页前面去。
-    var isVisible: Bool { window?.isVisible == true }
+    /// 在快捷键步骤打开教学搜索浮窗，其余步骤保持引导。
+    var isVisible: Bool { window?.isVisible == true || OnboardingSearchDemoWindow.shared.isVisible }
 
     func show(model: AppModel, startAt: OnboardingStep = .welcome) {
+        OnboardingSearchDemoWindow.shared.close()
         self.model = model
         // 引导占满屏幕中央，搜索浮窗浮在更高层级会盖住它的上半部分。
         model.hideSearch()
@@ -33,8 +34,10 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
             // 会绕成一个环，而这个窗口是单例、活到进程结束。
             facts: { [weak model] in model?.onboardingState ?? .empty })
         self.controller = controller
-        // 引导里按一次快捷键只做标记，不弹搜索窗。
-        model.pushOnboardingShortcutPressed = { [weak controller] in controller?.noteShortcutWorked() }
+        model.pushOnboardingShortcutPressed = { [weak self, weak controller] in
+            controller?.noteShortcutWorked()
+            self?.showSearchDemo()
+        }
 
         let content = AnyView(OnboardingView(model: model, controller: controller))
         if let hosting, let window {
@@ -60,7 +63,22 @@ final class OnboardingWindow: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func close() { window?.close() }
+    func showSearchDemo() {
+        guard let controller, controller.step == .shortcut,
+              !OnboardingSearchDemoWindow.shared.isVisible else { return }
+        window?.orderOut(nil)
+        OnboardingSearchDemoWindow.shared.show { [weak self, weak controller] advance in
+            guard let self, let controller else { return }
+            if advance { controller.advance() }
+            self.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    func close() {
+        OnboardingSearchDemoWindow.shared.close()
+        window?.close()
+    }
 
     func windowWillClose(_ notification: Notification) {
         // 关窗只记「停在哪一步」，**不动任何配置**：快捷键、权限、

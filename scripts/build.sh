@@ -30,7 +30,8 @@ usage() {
            加 --with-core 则先自动跑 core 再编译。
 
   test     先跑 Swift 全量测试，再逐个跑 Dart 核心行为测试（test_*.dart）。
-           test_webdav_live.dart 需要真机设备，本入口**跳过并显式打印**。
+           *_live.dart 需要真机设备/真实实例与账号，本入口**跳过并显式打印**
+           （test_webdav_live.dart、test_openlist_live.dart）。
            本机没有 Dart SDK 时同样打印「未执行」，不用旧数字冒充本轮结果。
 
   package  完整打包。必填 --output <新目录>，以及下列之一：
@@ -150,6 +151,10 @@ test)
             case "$suite" in
             */test_webdav_live.dart)
                 echo "    跳过 $(basename "$suite")：需要真机设备与真实 NAS"
+                continue
+                ;;
+            */test_openlist_live.dart)
+                echo "    跳过 $(basename "$suite")：需要真实 OpenList 实例与账号"
                 continue
                 ;;
             esac

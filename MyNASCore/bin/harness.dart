@@ -52,6 +52,20 @@ Duration queryBudgetOf(Map<String,dynamic> message) {
  if(ms<500||ms>600000)throw const CoreError('ProtocolViolation');
  return Duration(milliseconds:ms);
 }
+/// 本次搜索的位置限定（可选）。
+///
+/// ★ 缺失 ⇒ null（不限定，按来源的全部已授权根搜）——旧客户端不发它时
+/// 行为完全不变。
+/// 存在但不是字符串数组 ⇒ 协议违规（不能默默当成「不限定」，那会让
+/// 一次拼错的请求悄悄扫了整盘）。
+List<String>? searchRoots(Map<String,dynamic> message) {
+ if(!message.containsKey('roots'))return null;
+ final raw=message['roots'];
+ if(raw==null)return null;
+ if(raw is! List)throw const CoreError('ProtocolViolation');
+ final out=raw.map((v){if(v is! String||v.isEmpty)throw const CoreError('ProtocolViolation');return v;}).toList();
+ return out;
+}
 SourceEndpoint buildEndpoint(String sourceID,String url) {
  try { return SourceEndpoint(sourceID,url); } on StateError catch(e) { throw CoreError(trustStateKind(e.message)); }
 }
@@ -121,7 +135,7 @@ Future<void> brandCommand(String cmd,Map<String,dynamic> message,String request,
   case 'list':send(request,sourceID,query,'batch',{'files':await session.list(requireString(message,'path'),Cancellation())});
   case 'search':
    requests['$sourceID:$query']=request;
-   final out=await session.search(requireString(message,'query'),query,budget:message.containsKey('queryBudgetMs')?queryBudgetOf(message):null);
+   final out=await session.search(requireString(message,'query'),query,budget:message.containsKey('queryBudgetMs')?queryBudgetOf(message):null,roots:searchRoots(message));
    send(request,sourceID,query,'searchReturned',out.toJson());
    requests.remove('$sourceID:$query');
   case 'cancel':session.cancel(query);send(request,sourceID,query,'controlAck',{'command':'cancel'});
@@ -298,7 +312,7 @@ Future<void> command(Map<String,dynamic> message) async {
     // Events bind THIS request; controls do not queue behind this Future.
     // Use one owner/core per source, event request mapping below supplies correct IDs.
     requests['$sourceID:$query']=request;
-    final out=await source.core.search(requireString(message,'query'),query,budget:message.containsKey('queryBudgetMs')?queryBudgetOf(message):null);
+    final out=await source.core.search(requireString(message,'query'),query,budget:message.containsKey('queryBudgetMs')?queryBudgetOf(message):null,roots:searchRoots(message));
     send(request,sourceID,query,'searchReturned',out.toJson());
     requests.remove('$sourceID:$query');
    case 'cancel':source.core.cancel(query);send(request,sourceID,query,'controlAck',{'command':'cancel'});

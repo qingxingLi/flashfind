@@ -10,7 +10,7 @@ struct SearchView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var hasQuery: Bool { !model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var pending: Bool { hasQuery && !model.canUseDisplayedResults && model.searchFailure == nil }
+    private var pending: Bool { !model.isCommandModeActive && hasQuery && !model.canUseDisplayedResults && model.searchFailure == nil }
     private var visibleResults: [SearchResult] {
         hasQuery && model.searchFailure == nil ? model.results : (model.canUseDisplayedResults ? model.results : [])
     }
@@ -21,7 +21,7 @@ struct SearchView: View {
     private var showsStatus: Bool { !visibleResults.isEmpty || !model.searchWarnings.isEmpty }
 
     private var expandedHeight: CGFloat {
-        guard hasQuery else { return 0 }
+        guard hasQuery, !model.isCommandModeActive else { return 0 }
         if visibleResults.isEmpty {
             let height: CGFloat = (model.searchFailure != nil || (model.scope == .nas && !model.hasSelectedNASSource) ? 148 : 112) + (showsStatus ? 32 : 0)
             return model.searchFailure == nil && (pending || model.searching) ? max(height, lastResultsHeight) : height
@@ -29,7 +29,23 @@ struct SearchView: View {
         return CGFloat(min(visibleResults.count, SearchLayout.maximumVisibleRows)) * SearchLayout.rowHeight + 12 + 32
     }
     private var panelHeight: CGFloat {
-        SearchLayout.searchHeight + expandedHeight + hintHeight + openFailureBannerHeight
+        SearchLayout.searchHeight + expandedHeight + hintHeight + openFailureBannerHeight + commandPaletteHeight
+    }
+
+    /// 命令面板占的高度。
+    ///
+    /// 它不在 `expandedHeight` 里（那是指结果区），必须自己加进来 ——
+    /// 少算了这一截，面板会被浮窗底边切掉一多半，用户只看到两行候选。
+    private var commandPaletteHeight: CGFloat {
+        guard model.isCommandModeActive else { return 0 }
+        // ★ 行数上限必须与面板实际显示的行数一致，否则面板会被浮窗底边切掉
+        // （数字能按到哪、就得显示到哪，两者是同一个数）。
+        let rows = max(1, min(model.filteredCommandItems.count, model.commandMaximumVisible))
+        let rowHeight: CGFloat = 34
+        // 有已限定位置时上方还有一条状态行（28pt）+ 一条分隔线。
+        let header: CGFloat = model.locationLabel == nil ? 0 : 29
+        // 上下内边距各 4pt。
+        return header + CGFloat(rows) * rowHeight + 8
     }
     /// 打开失败提示条占的高度。它不是结果区的一部分，也不在 `expandedHeight` 里，
     /// 所以必须自己加进浮窗高度——否则提示条会被挤成一条窄边，正文整段被切掉。
@@ -40,18 +56,69 @@ struct SearchView: View {
     /// 首次使用的键位提示占的高度。输入框一有内容它就收起，所以要跟着算高度，
     /// 否则面板会多出一块空白。
     private var hintHeight: CGFloat { showsHint ? 38 : 0 }
+    /// 键盘作用域单独成块：十几个闭包全写进 `body` 会让类型检查爆掉，
+    /// 表现为「compiler is unable to type-check this expression」。
+    private var keyboardScope: some View {
+        SearchKeyboardScope(enabled: true, searchFocused: focused,
+                            query: model.query,
+                            // ★ 这里问的是「**有没有可选的条目**」，不是「已经选中了没有」。
+                            //
+                            // 真实搜索路径不会自动选中第一条（只有 fixture 会），
+                            // `selected` 一直是 nil，直到用户按下 ↓ 才被 `moveResultSelection` 写上。
+                            // 而 `Coordinator` 记录导航状态用的是**按键那一刻**的快照：
+                            // 若这里依赖 `selectedResult != nil`，第一次按 ↓ 时快照必为 false
+                            // ⇒ 导航不激活 ⇒ 紧接着按空格仍然只打出一个空格，
+                            // 用户必须按两次方向键才看得到预览（「空格没反应」的另一种复现）。
+                            hasSelectableResult: model.canUseDisplayedResults && !model.results.isEmpty,
+                            move: model.moveResultSelection,
+                            submit: { model.dismissSearchHints(); model.openSelectedResult() },
+                            reveal: { model.dismissSearchHints(); model.revealSelectedResult() },
+                            quickLook: { model.dismissSearchHints(); model.quickLookSelectedResult() },
+                            copyPath: { if let row = model.selectedResult { model.copy(row) } },
+                            hide: model.hideSearch,
+                            commandMode: model.isCommandModeActive,
+                            commandMove: { model.moveCommandSelection($0) },
+                            commandSubmit: { model.executeSelectedCommand() },
+                            commandCancel: { model.cancelCommandMode() },
+                            commandPick: { model.pickCommand($0) },
+                            hasSearchToken: model.hasSearchToken,
+                            keywordEmpty: model.keywordIsEmpty,
+                            deleteSearchToken: { model.deleteSearchToken() })
+            .frame(width: 0, height: 0)
+    }
+
     private var showsHint: Bool { !hasQuery && model.searchHintsVisible }
+
+    private var searchField: some View {
+        SearchFieldView(query: $model.query, focused: $focused,
+                        searching: model.searching || pending, syncing: model.syncing,
+                        submit: model.openSelectedResult,
+                        research: model.changedQuery,
+                        tokens: model.searchTokens,
+                        deleteToken: { model.deleteSearchToken($0) })
+    }
+
+    private var commandPalette: some View {
+        SearchCommandPaletteView(items: model.filteredCommandItems,
+                                 selection: model.commandSelection,
+                                 activeTargetLabel: model.locationLabel,
+                                 numbers: model.commandNumbers,
+                                 maximumVisible: model.commandMaximumVisible)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            SearchFieldView(query: $model.query, scope: $model.scope, focused: $focused,
-                            searching: model.searching || pending, syncing: model.syncing,
-                            canSync: model.canRefresh && !model.syncing && !model.connecting,
-                            submit: model.openSelectedResult, sync: model.refresh,
-                            showSettings: openSettings, close: model.hideSearch,
-                            research: model.changedQuery)
+            searchField
             if showsHint { hintStrip }
-            if hasQuery {
+            // ★ 命令模式：显示候选面板，不显示结果列表。
+            //
+            // 命令模式下没有真实搜索（`changedQuery` 短路了），所以这里
+            // 也没有结果可显示 —— 两件事必须同时成立，否则会看到
+            // 「上面是命令面板、下面是上一轮的结果」。
+            if model.isCommandModeActive {
+                Divider().padding(.horizontal, 16).opacity(0.45)
+                commandPalette
+            } else if hasQuery {
                 Divider().padding(.horizontal, 16).opacity(0.45)
                 if visibleResults.isEmpty { emptyState.frame(maxHeight: .infinity, alignment: .top) }
                 else {
@@ -74,12 +141,7 @@ struct SearchView: View {
         }
         .frame(maxWidth: .infinity).frame(height: panelHeight)
         .background(SearchPanelSizing(height: panelHeight, animate: !reduceMotion).frame(width: 0, height: 0))
-        .background(SearchKeyboardScope(enabled: true, searchFocused: focused, move: model.moveResultSelection,
-                                        submit: { model.dismissSearchHints(); model.openSelectedResult() },
-                                        reveal: { model.dismissSearchHints(); model.revealSelectedResult() },
-                                        quickLook: { model.dismissSearchHints(); model.quickLookSelectedResult() },
-                                        copyPath: { if let row = model.selectedResult { model.copy(row) } },
-                                        hide: model.hideSearch).frame(width: 0, height: 0))
+        .background(keyboardScope)
         .onChange(of: model.query) { _ in
             if !hasQuery { lastResultsHeight = 0 }
             model.changedQuery()
@@ -168,11 +230,20 @@ struct SearchView: View {
                     .disabled(!model.canUseDisplayedResults)
                     .onTapGesture(count: 2) { model.openCurrentResult(result) }
                     .contextMenu {
-                        Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
-                        Button("在 Finder 中显示", systemImage: "folder") { model.openCurrentResult(result, reveal: true) }
-                        Button("快速查看", systemImage: "eye") { model.quickLook(result) }
-                        Divider()
-                        Button("复制路径", systemImage: "doc.on.doc") { model.copy(result) }
+                        // 菜单本身就是「这条结果能做什么」的说明书。
+                        // 打开时检测本机挂载，未挂载则使用网页；复制链接仍保留网页地址。
+                        if result.hasWebOpenTarget {
+                            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
+                            Divider()
+                            Button("复制网页链接", systemImage: "link") { model.copyWebLink(result) }
+                            Button("复制站点内路径", systemImage: "doc.on.doc") { model.copy(result) }
+                        } else {
+                            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
+                            Button("在 Finder 中显示", systemImage: "folder") { model.openCurrentResult(result, reveal: true) }
+                            Button("快速查看", systemImage: "eye") { model.quickLook(result) }
+                            Divider()
+                            Button("复制路径", systemImage: "doc.on.doc") { model.copy(result) }
+                        }
                         Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
                     }
             }
@@ -217,7 +288,7 @@ struct SearchView: View {
             SearchStateView(symbol: "magnifyingglass", title: "正在搜索", detail: "正在查找匹配的文件与文件夹", loading: true)
         } else {
             SearchStateView(symbol: "doc.text.magnifyingglass", title: "没有找到“\(model.query)”",
-                            detail: "试试更短的关键词，或到设置里确认 NAS 的搜索位置")
+                            detail: "试试更短的关键词，或到设置里确认搜索位置")
         }
     }
 

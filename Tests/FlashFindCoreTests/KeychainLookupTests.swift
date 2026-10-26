@@ -95,6 +95,26 @@ final class KeychainLookupTests: XCTestCase {
         XCTAssertNil(result.data)
     }
 
+    func testNoninteractiveReadNeverQueriesTheSystemKeychain() throws {
+        let body = try braceBalancedBlock(in: try keychainStoreSource(),
+                                          anchor: "public func read(account: String, allowInteraction: Bool)")
+        XCTAssertTrue(body.contains("if allowInteraction { return read(account: account) }"))
+        XCTAssertTrue(body.contains("vaultCache.value"))
+        XCTAssertFalse(body.contains("decodedVault("))
+        for call in ["SecItemCopyMatching(", "SecItemAdd(", "SecItemUpdate("] {
+            XCTAssertFalse(body.contains(call), "启动和视图渲染只能使用内存缓存")
+        }
+        XCTAssertTrue(body.contains("errSecInteractionNotAllowed"), "未解锁不能被误报为密码不存在")
+    }
+
+    func testDeniedVaultReadCannotBecomeAnEmptyCachedVault() throws {
+        let body = try braceBalancedBlock(in: try keychainStoreSource(), anchor: "private func decodedVault(")
+        let statusGuard = try XCTUnwrap(body.range(of: "guard status == errSecSuccess || status == errSecItemNotFound else { return nil }"))
+        let decode = try XCTUnwrap(body.range(of: "CredentialVault.decode(raw)"))
+        XCTAssertLessThan(statusGuard.lowerBound, decode.lowerBound,
+                          "取消/拒绝授权必须保留错误并允许重试，不能缓存成空表覆盖真实密码")
+    }
+
     // MARK: - 真调用点（源码扫描）
 
     private var clientRoot: URL {

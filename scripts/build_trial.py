@@ -98,7 +98,7 @@ def inputs():
              # HelperInfo.plist 是**链接期输入**（嵌进 flashfind-mcp 的 __TEXT,__info_plist），
              # 不进这份清单的话，「只改 Helper 版本号」会被判成「源码没变」而漏掉重新构建。
              client / 'Resources/Packaging/HelperInfo.plist',
-             client / 'Resources/Brand/ShanXunMenuIcon.png', client / 'Resources/Brand/ShanXunMenuIcon@2x.png', client / 'Resources/dmg-ds-store', Path(__file__).resolve()] + glyph_paths
+             client / 'Resources/Brand/ShanXunMenuIcon.png', client / 'Resources/Brand/ShanXunMenuIcon@2x.png', client / 'Resources/dmg-ds-store', Path(__file__).resolve()] + glyph_paths + list((client / 'Resources/Onboarding').rglob('*'))
     if icon:
         paths.append(icon)
     return {str(p.relative_to(project)): sha(p) for p in sorted(paths) if p.is_file()}
@@ -248,13 +248,24 @@ def app_identity(info):
     return app_name, app_name, version, build_number
 
 
+def verify_mynas_runtime(app):
+    modes = {}
+    for component in ('bin/mynas-core', 'native/TrustHTTP'):
+        path = app / 'Contents/Resources/MyNAS' / component
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise SystemExit('MyNAS runtime missing or not executable: ' + component)
+        modes[component] = oct(path.stat().st_mode & 0o777)
+    return modes
+
+
 def finalize():
     """收口：源文件在交付时没被动过、签名验过、DMG 内容真挂载核对过，才算 complete。"""
     record['final_sources'] = inputs()
     record['sources_unchanged_at_delivery'] = record['sources_before'] == record['final_sources']
     record['complete'] = bool(record['sources_unchanged_at_delivery']
                               and record.get('signature_verified')
-                              and record.get('dmg_contents_verified'))
+                              and record.get('dmg_contents_verified')
+                              and record.get('mynas_runtime'))
     save()
     print(out)
 
@@ -373,6 +384,7 @@ def package_dmg(app, readme, app_name, file_stem):
             problems.append('layout .DS_Store missing from the volume')
         if problems:
             raise SystemExit('DMG contents check failed: ' + '; '.join(problems))
+        record['mounted_mynas_runtime'] = verify_mynas_runtime(root / app.name)
         record['dmg_contents_verified'] = True
     finally:
         run(['hdiutil', 'detach', str(root), '-force'], 'dmg-inspect-detach', required=False)
@@ -411,6 +423,7 @@ def repack_from_zip():
         raise SystemExit('reused app is named %s, identity says %s.app' % (source_app.name, app_name))
     app = out / source_app.name
     shutil.copytree(source_app, app)
+    record['mynas_runtime'] = verify_mynas_runtime(app)
     # 「原样搬过来」也要核一遍：1.1.2 起 `Contents/Helpers/flashfind-mcp` 是对外承诺，
     # 拿一份缺 Helper 的旧 zip 重做 DMG，会做出一个「AI 设置页告诉你路径、路径却是空」的包。
     record['helper'] = {'path_in_app': 'Contents/Helpers/' + HELPER_NAME,
@@ -488,6 +501,11 @@ macos.mkdir(parents=True)
 (app / 'Contents/Resources').mkdir()
 shutil.copyfile(binary, macos / 'FlashFind2App')
 (macos / 'FlashFind2App').chmod(0o755)
+
+# 首次运行教学：离线 HTML 随包分发，不依赖开发机路径。
+onboarding_source = client / 'Resources/Onboarding'
+shutil.copytree(onboarding_source, app / 'Contents/Resources/Onboarding')
+record['onboarding_html_sha256'] = sha(app / 'Contents/Resources/Onboarding/search-demo.html')
 
 # MCP Helper：`Contents/Helpers/flashfind-mcp`。
 #
@@ -572,7 +590,10 @@ if leaked:
 record['app_file_count'] = sum(1 for p in app.rglob('*') if p.is_file())
 record['app_bytes'] = sum(p.stat().st_size for p in app.rglob('*') if p.is_file())
 for component in ('bin/mynas-core', 'native/TrustHTTP'):
+    # 复用资源可能带着 0644 权限；必须先恢复运行权限，再签名封存。
+    (app / 'Contents/Resources/MyNAS' / component).chmod(0o755)
     run(sign_arguments(app / 'Contents/Resources/MyNAS' / component), 'sign-' + Path(component).name)
+record['mynas_runtime'] = verify_mynas_runtime(app)
 (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 record.update(version=info['CFBundleShortVersionString'], build=info['CFBundleVersion'], app=str(app),
               channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0',

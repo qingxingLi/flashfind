@@ -65,12 +65,18 @@ final class NASVendorSupportTests: XCTestCase {
                       "必须说明搜索受限：\(vendor.supportMessage)")
     }
 
-    /// 已验证的品牌里，只有群晖是真的「原生搜索可用」。
-    func testOnlySynologyIsNativeSearchVerified() {
-        for vendor in NASSourceConfig.Vendor.allCases where vendor.adapterStatus == .deviceVerified {
-            XCTAssertEqual(vendor.hasNativeSearch, vendor == .synology,
-                           "\(vendor.title) 的原生搜索能力判断有误")
-        }
+    /// 已验证的品牌里，**原生搜索可用**的恰好是群晖与 OpenList。
+    ///
+    /// 2026-10-24 起 OpenList 也进了这一档：它在真实实例（v4.1.10）上
+    /// 验过 `/api/fs/search` 的限定目录检索与分页，属「已验证 + 有原生搜索」。
+    /// 断言从「只有群晖」改成「恰好这两个」——成员仍然逐个锁死，
+    /// 不是放宽成「至少一个」，否则将来误加第三个品牌也测不出来。
+    func testNativeSearchVerifiedVendorsAreExactlySynologyAndOpenList() {
+        let actual = Set(NASSourceConfig.Vendor.allCases
+            .filter { $0.adapterStatus == .deviceVerified && $0.hasNativeSearch }
+            .map(\.rawValue))
+        XCTAssertEqual(actual, ["synology", "openlist"],
+                       "已验证且有原生搜索的品牌集合变了，需同步核对证据：\(actual.sorted())")
     }
 
     /// 是否能连接由 `hasAdapter` 决定，而不是 `nativelySupported`。
@@ -89,9 +95,13 @@ final class NASVendorSupportTests: XCTestCase {
                        "核心已不认飞牛，打开实验性开关也不该把它摆出来")
     }
 
-    /// 只有群晖是「已接入」，其余一律走「待接入」措辞。
-    func testOnlySynologyReportsNativeSupport() {
-        XCTAssertEqual(NASSourceConfig.Vendor.allCases.filter(\.nativelySupported), [.synology])
+    /// 「已接入 + 已验证 + 有原生搜索」的集合恰好是群晖与 OpenList。
+    ///
+    /// 其余一律不得出现在这里：WebDAV 已验证但无服务端搜索，
+    /// qnap / ugreen 未真机验证，fnos 已下线，smb / generic 未接入。
+    func testNativelySupportedVendorsAreExactlySynologyAndOpenList() {
+        XCTAssertEqual(NASSourceConfig.Vendor.allCases.filter(\.nativelySupported),
+                       [.synology, .openlist])
     }
 
     func testOnlySynologyIsNativelySupported() {
@@ -101,11 +111,11 @@ final class NASVendorSupportTests: XCTestCase {
         XCTAssertFalse(NASSourceConfig.Vendor.generic.nativelySupported)
     }
 
-    /// 选型只开放群晖。其余品牌**撤下选型不等于删除** ——
+    /// 选型开放「群晖 + OpenList」。其余品牌**撤下选型不等于删除** ——
     /// 枚举仍完整，旧配置仍能解码，以后要再开放也不用重建模型。
-    func testWizardOnlyOffersSynology() {
-        XCTAssertEqual(NASSourceConfig.Vendor.selectableVendors, [.synology])
-        XCTAssertEqual(NASSourceConfig.Vendor.allCases.count, 7,
+    func testWizardOffersSynologyAndOpenList() {
+        XCTAssertEqual(NASSourceConfig.Vendor.selectableVendors, [.synology, .openlist])
+        XCTAssertEqual(NASSourceConfig.Vendor.allCases.count, 8,
                        "撤下选型不该删枚举项，否则已保存的旧配置会解不出来")
     }
 

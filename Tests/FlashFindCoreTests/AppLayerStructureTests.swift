@@ -365,7 +365,10 @@ final class AppLayerStructureTests: XCTestCase {
     func testLoggedInProviderIsInstalledNotAssigned() throws {
         let appModel = try appModelCode()
         let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
-        let assignment = try NSRegularExpression(pattern: #"nativeProviders\[[^\]]*\]\s*="#)
+        // ★ 必须排除 `===`（同一性比较）：「等待收尾期间这台实例有没有被换掉」
+        //   正是靠 `nativeProviders[sourceID] === live` 判的，它是读不是写。
+        //   只写 `=` 的话 `===` 会被当成赋值，把一次合法读取误报成违规。
+        let assignment = try NSRegularExpression(pattern: #"nativeProviders\[[^\]]*\]\s*=(?!=)"#)
         for (name, code) in [("AppModel", appModel), ("NASSourceWizardController", controller)] {
             let hits = assignment.numberOfMatches(in: code, range: NSRange(code.startIndex..., in: code))
             XCTAssertEqual(hits, 0,
@@ -508,8 +511,15 @@ final class AppLayerStructureTests: XCTestCase {
                       "reconnectSource 必须先查 needsOTP 标记")
         XCTAssertTrue(body.contains("promptForOTP(sourceName:"),
                       "需要 OTP 时必须弹输入框")
-        XCTAssertTrue(body.contains("reconnectUsingStoredCredential(id, otp: otp)"),
+        XCTAssertTrue(body.contains("reconnectUsingStoredCredential(id, otp: otp, interactiveOTP: true)"),
                       "弹框拿到的 OTP 必须传给 reconnectUsingStoredCredential")
+        // ★ 2026-10-26：**不知道**要不要码时也必须允许当场弹。
+        //
+        // 报障原文：「第一次输入提示需要输入动态码，但是不会自动弹出动态码，
+        // 需要点击两次登陆」。根因就是这条分支走的是纯静默连接，失败只写一行状态，
+        // 用户非得再点一次「登录」才进到上面那段弹框逻辑。
+        XCTAssertTrue(body.contains("reconnectUsingStoredCredential(id, otp: nil, interactiveOTP: true)"),
+                      "用户自己点的登录必须允许当场弹 OTP 框，否则第一次点等于白点")
     }
 
     /// ★ OTP 弹框前必须先把应用激活到前台（点了「重新登录…」没弹窗）。
@@ -521,7 +531,7 @@ final class AppLayerStructureTests: XCTestCase {
     /// 弹 OTP 框走的是同一条规则，不能例外。
     func testOTPPromptActivatesAppBeforeRunModal() throws {
         let appModel = try appModelCode()
-        let region = appModel.range(of: "func promptForOTP(sourceName: String)")
+        let region = appModel.range(of: "func promptForOTP(sourceName: String,")
         XCTAssertNotNil(region, "promptForOTP 必须存在")
         let tail = String(appModel[region!.lowerBound...])
         let end = tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
@@ -549,7 +559,7 @@ final class AppLayerStructureTests: XCTestCase {
     /// 模态弹窗就地弹会把本次尝试的收尾（按钮解锁、`draftBusy` 复位）卡在半路。
     func testWizardPromptsForOTPAndContinuesOnItsOwn() throws {
         let controller = try appSource("NASSourceWizardController.swift")
-        let region = controller.range(of: "private func promptForOTPThenReconnect(sourceName: String)")
+        let region = controller.range(of: "private func promptForOTPThenReconnect(sourceName: String,")
         XCTAssertNotNil(region, "向导必须有「弹窗问码 → 自动续连」这条路径")
         let tail = String(controller[region!.lowerBound...])
         let end = tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
@@ -581,10 +591,10 @@ final class AppLayerStructureTests: XCTestCase {
         let end = tail.range(of: "\n    private func promptForOTPThenReconnect")?.lowerBound
             ?? tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
         let body = String(tail[tail.startIndex..<end])
-        XCTAssertTrue(body.contains("ConnectionFailureText.isOTPRequired(error)"),
-                      "「是不是要动态码」只能由 Core 判定")
-        XCTAssertTrue(body.contains("promptForOTPThenReconnect(sourceName: config.displayName)"),
-                      "判定成立就必须弹窗，不能只写一句状态就完事")
+        XCTAssertTrue(body.contains("ConnectionFailureText.otpFailure(error)"),
+                      "「要不要动态码、是码错还是要码」只能由 Core 判定")
+        XCTAssertTrue(body.contains("promptForOTPThenReconnect(sourceName: config.displayName, failure: otp)"),
+                      "判定成立就必须弹窗，并把失败类型带下去；只写一句状态就完事等于没修")
     }
 
     /// ★ 表单里不能再有常驻的动态码输入框。
@@ -626,17 +636,18 @@ final class AppLayerStructureTests: XCTestCase {
     /// 的契约慢慢烂掉。
     func testQuietConnectMarksNeedsOTPThroughCore() throws {
         let appModel = try appModelCode()
-        let region = appModel.range(of: "func performConnectQuietly(config: NASSourceConfig, credential: PendingCredential)")
+        let region = appModel.range(of: "func performConnectQuietly(config: NASSourceConfig, credential: PendingCredential,")
         XCTAssertNotNil(region, "performConnectQuietly 必须存在")
         let tail = String(appModel[region!.lowerBound...])
-        let end = tail.range(of: "\n    /// 打开独立设置窗口")?.lowerBound ?? tail.endIndex
+        let end = tail.range(of: "\n    private func retryWithOTPUntilAnswered")?.lowerBound
+            ?? tail.endIndex
         let body = String(tail[tail.startIndex..<end])
 
-        XCTAssertTrue(body.contains("ConnectionFailureText.isOTPRequired(error)"),
-                      "OTP 判定必须走 Core 的 ConnectionFailureText.isOTPRequired")
-        XCTAssertTrue(body.contains("$0.needsOTP = needsOTP"),
+        XCTAssertTrue(body.contains("ConnectionFailureText.otpFailure(error)"),
+                      "OTP 判定必须走 Core 的 ConnectionFailureText.otpFailure")
+        XCTAssertTrue(body.contains("$0.needsOTP = otp != nil"),
                       "catch 块里必须回写 needsOTP 标记")
-        XCTAssertTrue(body.contains("$0.requiredAction = needsOTP ? .login : .retry"),
+        XCTAssertTrue(body.contains("$0.requiredAction = otp == nil ? .retry : .login"),
                       "OTP 失败时列表行必须给「登录」按钮而不是「重试」——重试还是不带 OTP")
     }
 
@@ -660,10 +671,96 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(successBlock.contains("$0.needsOTP = false"),
                       "连接成功的 setSourceStatus 里必须清掉 needsOTP 标记")
         // 反向验证：失败分支**不能**写死 false，它必须按 kind 判定。
-        let driver = try XCTUnwrap(braceBlock(after: "case let .failed(_, error)", in: appModel),
-                                   "失败分支必须存在")
-        XCTAssertTrue(driver.contains("$0.needsOTP = needsOTP"),
-                      "失败分支的 needsOTP 必须来自 isOTPRequired 的判定结果")
+        //
+        // ★ 这里不能再用 `braceBlock(after: "case let .failed(_, error)")`：
+        // 2026-10-26 之后该分支里第一个 `{` 是 `if interactiveOTP, let otp {`，
+        // 取到的是那个子块，`$0.needsOTP = otp != nil` 在它外面 ⇒ 断言恒红/恒绿都不可信。
+        // 改为切到「失败分支起点 → 下一个函数定义」这段。
+        let driverStart = try XCTUnwrap(appModel.range(of: "case let .failed(_, error)"))
+        let driverTail = String(appModel[driverStart.lowerBound...])
+        let driverEnd = driverTail.range(of: "\n    private func retryWithOTPUntilAnswered")?.lowerBound
+            ?? driverTail.endIndex
+        let driver = String(driverTail[driverTail.startIndex..<driverEnd])
+        XCTAssertTrue(driver.contains("$0.needsOTP = otp != nil"),
+                      "失败分支的 needsOTP 必须来自 Core 的 otpFailure 判定结果")
+    }
+
+    /// ★ 用户自己点「登录」时，设备要码必须**当场**弹框，不能等他再点一次。
+    ///
+    /// 2026-10-26 报障原文：「第一次输入提示需要输入动态码，但是不会自动弹出动态码，
+    /// 需要点击两次登陆，很反人类」。
+    /// 根因：第一次走纯静默路径，失败只写一行「自动连接失败：设备要求两步验证码」，
+    /// 弹框分支只在**下一次**点击时才被走到。
+    ///
+    /// 修法是加一个 `interactiveOTP` 入口标志，**只**给用户手动点的那条路；
+    /// 开机自动连接与批量诊断仍保持静默——那时没有人在键盘前看弹窗。
+    func testUserInitiatedReconnectAsksForOTPWithinTheSameAttempt() throws {
+        let appModel = try appModelCode()
+        let region = try XCTUnwrap(appModel.range(
+            of: "func performConnectQuietly(config: NASSourceConfig, credential: PendingCredential,"),
+            "performConnectQuietly 必须存在")
+        let tail = String(appModel[region.lowerBound...])
+        let end = tail.range(of: "\n    private func retryWithOTPUntilAnswered")?.lowerBound ?? tail.endIndex
+        let body = String(tail[tail.startIndex..<end])
+
+        XCTAssertTrue(body.contains("interactiveOTP: Bool = false"),
+                      "必须能区分「用户点的登录」与「开机自动连」")
+        XCTAssertTrue(body.contains("if interactiveOTP, let otp {"),
+                      "用户点的登录遇到 OTP 必须当场提问，而不是留到下一次点击")
+        XCTAssertTrue(body.contains("retryWithOTPUntilAnswered("),
+                      "给码这条路必须进「问码 → 再连」的循环")
+
+        // 反证：开机自动连接那条路不许弹窗（用户在睡觉，模态框会把应用冻在那）。
+        let auto = try XCTUnwrap(appModel.range(of: "func autoConnectSavedSources()"))
+        let autoBody = String(appModel[auto.lowerBound...])
+        let autoEnd = autoBody.range(of: "\n    func performConnectQuietly")?.lowerBound ?? autoBody.endIndex
+        XCTAssertFalse(String(autoBody[autoBody.startIndex..<autoEnd]).contains("interactiveOTP: true"),
+                       "开机自动连接不能弹 OTP 框")
+    }
+
+    /// ★ 码填错之后必须在**同一个框里**再问，而不是退回「需要动态码」等用户再点登录。
+    ///
+    /// 报障原文：「输入 OTP 验证码错误，不会提示验证码错误，而是没有什么反应，
+    /// 还是在外边提示需要动态码，需再次点击登陆。」
+    ///
+    /// 这条锁三件事：循环真的存在、码错类型真的被带回下一轮、用户取消时真的有话说。
+    /// 少任一环，「码错」就会退回「再点一次登录」。
+    func testOTPAttemptKeepsAskingUntilItSucceedsOrTheUserCancels() throws {
+        let appModel = try appModelCode()
+        let region = try XCTUnwrap(appModel.range(of: "private func retryWithOTPUntilAnswered("),
+                                   "必须有「问码 → 再连」的循环")
+        let tail = String(appModel[region.lowerBound...])
+        let end = tail.range(of: "\n    private func askForOTP")?.lowerBound ?? tail.endIndex
+        let body = String(tail[tail.startIndex..<end])
+
+        XCTAssertTrue(body.contains("while true"), "必须循环，问一次就收手等于没修")
+        XCTAssertTrue(body.contains("askForOTP("), "循环里必须真的弹框")
+        XCTAssertTrue(body.contains("failure = next"),
+                      "码错必须把新的失败类型带回循环，否则第二轮又问成「需要动态码」")
+        XCTAssertTrue(body.contains("ConnectionFailureText.otpFailure(error)"),
+                      "往不往下问由 Core 判，App 层不许自己 contains 字符串")
+        XCTAssertTrue(body.contains("otpRetryHint(buttonTitle: \"登录\")"),
+                      "用户取消时要说清下次怎么叫回来，且按钮名必须是来源卡片上那个「登录」")
+        XCTAssertTrue(body.contains("$0.needsOTP = false"),
+                      "非 OTP 失败必须收手并摘掉 OTP 标记——那时再问码只是折磨用户")
+    }
+
+    /// ★ 弹框文案按「要码 / 码错」分流，且文案本身住 Core（两条登录路径共用一套）。
+    ///
+    /// 在调用点写三元，第二次改文案必然只改一处。
+    func testOTPDialogPicksCoreWordingForRejectedCodes() throws {
+        let appModel = try appModelCode()
+        let region = try XCTUnwrap(appModel.range(of: "func promptForOTP(sourceName: String,"))
+        let tail = String(appModel[region.lowerBound...])
+        let end = tail.range(of: "\n    func ")?.lowerBound ?? tail.endIndex
+        let body = String(tail[tail.startIndex..<end])
+
+        XCTAssertTrue(body.contains("ConnectionFailureText.otpDialogTitle(for: failure)"),
+                      "标题必须按失败类型从 Core 取")
+        XCTAssertTrue(body.contains("ConnectionFailureText.otpPromptText(sourceName: sourceName, failure: failure)"),
+                      "正文必须带上失败类型，否则码错与要码说成同一句")
+        XCTAssertTrue(body.contains(".warning"),
+                      "码错用警告样式，视觉上与「只是要你填个码」区分开")
     }
 
     /// ★ 状态栏图标必须是品牌模板图，且应用不进程序坞（决策）。
@@ -802,22 +899,175 @@ final class AppLayerStructureTests: XCTestCase {
                       "SearchView 必须把 research 接到 model.changedQuery，否则按钮不会重跑当前关键词")
     }
 
-    /// ★ 选类型不再先让用户挑协议；只有一种可选时这一步整个不出现。
+    /// ★ 第 1 步是三个入口：群晖 / OpenList / 附近的设备。
     ///
-    /// 把研发精力收回群晖，其余品牌撤下选型。若仍保留一个
-    /// 只装一项的网格，等于让用户白点一次，还暗示「这里本来有得选」。
-    /// 现在可选集合由 Core 的 `ExperimentalSources` 决定（默认只给群晖），
-    /// 并且**只有多项时才画这一步**。
-    func testVendorStepAppearsOnlyWhenThereIsMoreThanOneChoice() throws {
+    /// 前两块决定**走哪套接口**（品牌一换，表单、默认协议、端口全跟着换），
+    /// 后一块是一次动作：打开小窗挑一台设备。可选集合仍由 Core 的
+    /// `ExperimentalSources` 决定，视图里不许写死品牌。
+    ///
+    /// 连接成功之后就撤掉这三块：那时再让用户点品牌，只会误触
+    /// （换品牌会清空已填的地址与账号）。
+    func testTypeStepShowsBrandAndNearbyEntriesFromTheModel() throws {
         let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
         XCTAssertTrue(wizard.contains("model.selectableVendors"),
                       "可选类型必须来自模型（Core 的 ExperimentalSources），不能写死在视图里")
-        XCTAssertTrue(wizard.contains("if model.selectableVendors.count > 1"),
-                      "只有一种可选时不该画「选类型」这一步")
+        XCTAssertTrue(wizard.contains("private var typeEntrySection"),
+                      "第 1 步要有一块专门放这三个入口")
+        // 当前品牌不在可选列表里时要补一块：从「附近的设备」选中一台实验性品牌
+        // （局域网里有台威联通、而实验开关关着）之后，界面必须能显示现在选的是谁。
+        XCTAssertTrue(wizard.contains("private var entryVendors"),
+                      "入口列表要能补上当前品牌")
+        XCTAssertTrue(wizard.contains("list + [model.draftSource.vendor]"),
+                      "补的必须是**当前**这一个品牌，不是别的")
+        XCTAssertTrue(wizard.contains("private var nearbyEntry"),
+                      "「附近的设备」要和品牌块并排成一个入口")
+        XCTAssertTrue(wizard.contains("\"nearby-open\""),
+                      "附近的设备入口要有标识，界面自动化要点它")
+        XCTAssertTrue(wizard.contains("if !model.draftConnected, !isEditing"),
+                      "入口只在还没连上、也不是编辑已有来源时出现")
         XCTAssertFalse(wizard.contains("Vendor.allCases"),
                        "选类型不该再直接铺全部品牌")
         XCTAssertFalse(wizard.contains("supportBadge"),
                        "选项上不该再挂「已验证 / 已接入 · 未验证」这类状态标签")
+    }
+
+    /// ★ 连接信息下面不再挂「去浏览器看地址栏」这类说明。
+    ///
+    /// 原来这里按品牌取一句页脚，群晖那份写的是「常见端口 5001」——
+    /// OpenList 的用户填完站点地址，下方还在提示他去看群晖的 5001。
+    /// 现在整句删掉：端口就填在上面那个框里，不需要一段文字指路。
+    /// Core 里的品牌文案仍保留（`VendorConnectionFooterTests` 守着它别写错），
+    /// 但界面不再渲染。
+    func testConnectionSectionShowsNoExplanatoryFooter() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+        XCTAssertFalse(wizard.contains("connectionFooter"),
+                       "连接信息不再有页脚说明")
+        XCTAssertFalse(wizard.contains("群晖常见端口是 5001"),
+                       "视图里不该写死群晖端口")
+        // 同理：品牌说明也不再作为单独一段摆在页面上。
+        XCTAssertFalse(wizard.contains("serviceHint"),
+                       "品牌说明不再占页面位置")
+    }
+
+    /// ★ 界面里不再写「解释性备注」。
+    ///
+    /// 用户 2026-10-24 的要求：只留控件与结果，不要每个开关下面再挂一段话
+    /// 解释它是干什么的。这些句子一条条删掉之后，靠这条守住——
+    /// 否则下一次「顺手补个说明」就全回来了。
+    ///
+    /// ★ 注意这里守的是**说明**，不是**反馈**：连接失败的原因、字段格式错误、
+    /// 管理员账号的越权警告这一类别删（它们回答的是「刚才发生了什么」，
+    /// 不解释就有用户点不到东西）。
+    func testSettingsPanesCarryNoExplanatoryFooters() throws {
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+        for phrase in [
+            "再次按下快捷键可隐藏搜索窗口",
+            "搜索桌面、文档这类受保护的位置需要「完全磁盘访问」",
+            "关掉后 AI 立刻失去连接",
+            "AI 只能看到你在这里勾选的来源",
+            "这一行说的是闪寻这一侧在不在等待连接",
+            "历史只记在本机",
+            "诊断会刷新所有来源的状态",
+            "打开后，「添加搜索来源」里会一并出现",
+            "从 GitHub 的发布页读取最新版本号后比对",
+        ] {
+            XCTAssertFalse(settings.contains(phrase),
+                           "设置页又出现了说明性备注：\(phrase)")
+        }
+
+        for pane in ["private var generalForm: some View",
+                     "private var advancedForm: some View"] {
+            let body = braceBlock(after: pane, in: settings) ?? ""
+            XCTAssertFalse(body.contains("sectionFooter"),
+                           "\(pane) 里不该再有页脚说明")
+        }
+    }
+
+    /// ★ 向导里也不再有说明性备注，但**连接失败的原因必须保留**。
+    func testWizardCarriesNoExplanatoryHintsButKeepsFailureText() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+        for phrase in [
+            "填 DSM 的地址与端口",
+            "群晖常见端口是 5001",
+            "在浏览器打开 NAS 管理页面",
+            "密码存到本机凭据文件",
+            "还没连上或还没选搜索位置",
+            "搜索结果里会标成",
+        ] {
+            XCTAssertFalse(wizard.contains(phrase),
+                           "向导里又出现了说明性备注：\(phrase)")
+        }
+
+        // 失败/状态那一块不能删：它是连不上时界面上唯一的反馈。
+        XCTAssertTrue(wizard.contains("statusSection"),
+                      "连接结果那一块被删了就没任何反馈")
+        XCTAssertTrue(wizard.contains("model.draftStatus"),
+                      "状态文案仍要显示出来")
+
+        // 两个字段标签按界面要求改了名。
+        XCTAssertTrue(wizard.contains("\"IP/域名\""), "地址栏的标签应为「IP/域名」")
+        XCTAssertTrue(wizard.contains("\"记住密码\""), "勾选框应为「记住密码」")
+    }
+
+    /// 方向键选择后能预览，状态栏应重新展示 Space 提示。
+    func testStatusBarIncludesSpacePreview() throws {
+        let stateView = codeOnly(try appSource("SearchStateView.swift"))
+        for kept in ["↑↓ 选择", "Space 预览", "↵ 打开", "⌘↵ Finder", "esc 隐藏"] {
+            XCTAssertTrue(stateView.contains(kept), "状态栏缺少键位提示：\(kept)")
+        }
+    }
+
+    func testEmptyStateDoesNotSayNASOnly() throws {
+        let view = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertFalse(view.contains("确认 NAS 的搜索位置"),
+                       "空状态提示不该把搜索位置说成只有 NAS 才需要确认")
+        XCTAssertTrue(view.contains("试试更短的关键词"),
+                      "空状态提示要保留「换短关键词」这条可操作建议")
+    }
+
+    /// ★ 协议选择**不许再做成开关**。
+    ///
+    /// 原来那是个反向开关：绑「是否用明文 HTTP」，而标签在关着时写
+    /// 「使用加密连接 HTTPS」。用户把「勾上」读成「启用加密」，
+    /// 实际勾上却切到了明文——而界面看上去一切正常。
+    ///
+    /// 开关天生是「功能开着/关着」，协议是二选一、两边都是有效状态。
+    /// 现在必须是两段并列的选择器：两个选项都写在脸上，当前生效的被选中。
+    func testProtocolChoiceIsASegmentedPickerNotAReversedToggle() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+
+        XCTAssertTrue(wizard.contains("protocolChoiceBinding"),
+                      "协议选择要用绑定，不能直接把布尔值塞进开关")
+        XCTAssertTrue(wizard.contains("Picker(\"协议\""),
+                      "协议要用两段并列的选择器")
+        XCTAssertTrue(wizard.contains(".pickerStyle(.segmented)"),
+                      "两个协议要并排显示，不是竖排单选")
+        XCTAssertTrue(wizard.contains("NASProtocolChoice.allCases"),
+                      "选项必须来自 Core 的枚举，不能在视图里写死两个标题")
+
+        // ★ 反向开关的三个特征，一个都不许再出现。
+        XCTAssertFalse(wizard.contains("Toggle(isOn: Binding(get: { model.draftUsesPlainHTTP"),
+                       "协议选择不许再做成 Toggle：那个开关的方向与文案相反")
+        XCTAssertFalse(wizard.contains("使用加密连接 HTTPS"),
+                       "旧的反向标签不许回来")
+        XCTAssertFalse(wizard.contains("使用明文 HTTP（不加密）"),
+                       "旧的反向标签不许回来")
+        XCTAssertFalse(wizard.contains("nas-plain-http"),
+                       "旧控件的 accessibilityIdentifier 要一起换掉，别留下指向旧语义的入口")
+    }
+
+    /// ★ 绑定的**方向**必须对：界面选的是协议，模型存的是「是否明文」。
+    ///
+    /// 这两者的方向是相反的，写反了就是「选加密反而变明文」。
+    /// 那种错在界面上完全看不出来（两段都点得动），只能靠这条断言守。
+    func testProtocolBindingMapsProtocolToPlainHTTPWithoutFlipping() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+        XCTAssertTrue(wizard.contains("NASProtocolChoice(usesPlainHTTP: model.draftUsesPlainHTTP)"),
+                      "读取方向：是否明文 → 协议")
+        XCTAssertTrue(wizard.contains("model.setDraftPlainHTTP($0.usesPlainHTTP)"),
+                      "写入方向：协议 → 是否明文")
+        XCTAssertFalse(wizard.contains("model.setDraftPlainHTTP(!$0.usesPlainHTTP)"),
+                       "写入方向不许再取反：取反就是「选加密变明文」")
     }
 
     /// ★ 「重新连接」到底要不要输密码，只由 Core 的判定说了算。
@@ -828,8 +1078,11 @@ final class AppLayerStructureTests: XCTestCase {
         let appModel = try appModelCode()
         XCTAssertTrue(appModel.contains("ReconnectEntryState.route(rememberPassword:"),
                       "路由必须看「配置里勾了记住」与「本机真有密码」两件事")
-        XCTAssertTrue(appModel.contains("reconnectUsingStoredCredential(id, otp: nil)"),
-                      "有已保存密码时应当静默重连，不问用户")
+        // ★ 这条锁的是「**不问密码**」，不是「不弹任何东西」。
+        // 2026-10-26 起这条调用多了 `interactiveOTP: true`：设备要动态码时
+        // 得当场弹框（动态码是另一件事，且本机永远不可能存它）。
+        XCTAssertTrue(appModel.contains("reconnectUsingStoredCredential(id, otp: nil, interactiveOTP: true)"),
+                      "有已保存密码时不该再问密码，直接用它连")
 
         let wizard = codeOnly(try appSource("NASSourceWizardController.swift"))
         XCTAssertFalse(wizard.contains("请输入密码以重新连接"),
@@ -1108,14 +1361,20 @@ final class AppLayerStructureTests: XCTestCase {
     ///
     /// 自动连接等于替用户决定「就是这台、就用这个账号」，而账号密码还没填。
     /// 预填之后由用户核对地址再点「连接」。
+    ///
+    /// 列表放在独立的小窗里（`NearbyDevicesSheet`）：局域网设备可能几十台，
+    /// 铺在向导第一屏会把「填地址 + 填账号」挤出去。
     func testWizardWiresUpNearbyDevicesWithoutAutoConnecting() throws {
         let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
         XCTAssertTrue(wizard.contains("LocalNetworkDiscovery()"),
                       "向导要起一个设备发现器")
-        XCTAssertTrue(wizard.contains("nearbySection"),
-                      "要有「附近的设备」这一块")
+        XCTAssertTrue(wizard.contains("NearbyDevicesSheet"),
+                      "要有「附近的设备」这个挑选小窗")
         XCTAssertTrue(wizard.contains("model.applyDiscoveredDevice(device)"),
                       "选中设备要交给模型预填")
+        // 小窗一关就回填完并自动关闭，主界面不被打断。
+        XCTAssertTrue(wizard.contains("showingNearbyDevices = false"),
+                      "选中之后要自动关窗")
         XCTAssertTrue(wizard.contains("discovery.start(existing: model.nasSources)"),
                       "开窗时要开始发现，并把已有来源传进去标记「已添加」")
         XCTAssertTrue(wizard.contains("discovery.stop()"),
@@ -1238,6 +1497,350 @@ final class AppLayerStructureTests: XCTestCase {
 
     // MARK: - 设置页去噪（本机搜索提示 / 网络存储页脚）
 
+    // MARK: - `/` 命令面板与位置限定
+
+    /// ★ 命令模式下**不得**发起真实搜索。
+    ///
+    /// 那时的文本是「指令」不是关键词。把它当关键词发给设备，
+    /// 设备会去搜一个叫「照片」的东西 —— 白白占一次设备侧检索，
+    /// 而且用户看到的结果完全莫名其妙。
+    ///
+    /// 这条判在 App 层（`changedQuery` 里短路），所以只能靠源码结构断言。
+    func testCommandModeShortCircuitsRealSearch() throws {
+        let code = try appModelCode()
+        guard let body = braceBlock(after: "func changedQuery()", in: code) else {
+            return XCTFail("找不到 changedQuery")
+        }
+        XCTAssertTrue(body.contains("isCommandModeActive"),
+                      "命令模式必须在 changedQuery 里被识别并短路")
+        // ★ 短路必须**真的会发生**：`if isCommandModeActive && false` 这种
+        // 「写了但永远不成立」的写法，contains 查不出来 —— 上一轮的反向变异
+        // 正是这么溜过去的。所以这里要求 if 的条件里没有 `&& false` 之类的
+        // 短路掉整个判定的写法。
+        guard let shortCircuit = body.range(of: "isCommandModeActive") else {
+            return XCTFail("changedQuery 里没有命令模式判定")
+        }
+        let condition = String(body[shortCircuit.lowerBound...])
+        XCTAssertFalse(condition.contains("&& false"),
+                       "命令模式的判定被短路掉了（写法如 `&& false`）")
+        XCTAssertFalse(condition.contains("|| true"),
+                       "命令模式的判定被短路掉了（写法如 `|| true`）")
+        // 短路必须发生在**调用搜索之前**：短路点之后不该再出现
+        // searchDebounced 之前的搜索调用。
+        let after = String(body[shortCircuit.upperBound...])
+        guard let search = after.range(of: "searchDebounced") else {
+            return XCTFail("changedQuery 里没有搜索调用")
+        }
+        let between = String(after[..<search.lowerBound])
+        XCTAssertTrue(between.contains("return"),
+                      "命令模式的 return 必须发生在 searchDebounced 之前")
+    }
+
+    /// ★ 位置限定必须真的进到请求计划里，并一路带到协调器。
+    ///
+    /// 只在界面上显示一个位置标签，设备侧却仍在扫全部共享 ——
+    /// 那就完全没实现「减少检索时间」这个承诺。
+    func testSearchTargetFlowsIntoRequestPlanAndCoordinator() throws {
+        let code = try appModelCode()
+        guard let body = braceBlock(after: "func changedQuery()", in: code) else {
+            return XCTFail("找不到 changedQuery")
+        }
+        XCTAssertTrue(body.contains("target: tokenBar.location"),
+                      "位置限定必须作为 target 传进 SearchRequestPlan")
+        XCTAssertTrue(body.contains("authorizedRoots:"),
+                      "必须把已授权根传进请求计划，否则越权的根也会被请求")
+        XCTAssertTrue(body.contains("rootLimit:rootLimit"),
+                      "rootLimit 必须一路带到协调器，否则设备侧不会收窄")
+        // ★ 类型限定走的是「拼进搜索文本」这条路，必须真的下发，
+        // 否则界面上选了类型、设备却照旧全搜。
+        XCTAssertTrue(body.contains("tokenBar.searchText(keyword: query)"),
+                      "类型限定必须拼进下发的搜索文本")
+        XCTAssertTrue(body.contains("searchDebounced(searchText"),
+                      "下发的一定是拼好的文本，不能是输入框原文")
+    }
+
+    /// 命令面板的候选必须来自 Core 的目录，不许在 App 层自己拼。
+    func testCommandCandidatesComeFromCoreCatalog() throws {
+        let code = try appSource("AppModel+SearchCommand.swift")
+        XCTAssertTrue(code.contains("SearchCommandCatalog.items"),
+                      "候选列表必须由 Core 的命令目录构建")
+        XCTAssertTrue(code.contains("SearchCommandCatalog.filter"),
+                      "筛选必须由 Core 的命令目录做")
+        XCTAssertTrue(code.contains("SearchCommandParser.parse"),
+                      "命令模式判定必须用 Core 的解析器")
+        // App 层不许自己写「哪些位置可选」的判定。
+        XCTAssertFalse(code.contains("provider?.ready == true") && code.contains("roots: config.scopes.filter"),
+                       "App 层不许自己筛位置")
+    }
+
+    /// ★ 新 UI 不写提示备注：命令面板里不许出现解释性文字。
+    func testCommandPaletteCarriesNoExplanatoryText() throws {
+        // ★ 判的是**界面上的文字**，所以注释必须先剥掉 ——
+        // 否则「多写一句……就是噪音」这种注释里的字会被当成界面文案，
+        // 断言就成了一直红的假红。
+        let code = codeOnly(try appSource("SearchCommandPaletteView.swift"))
+        // 「没有匹配的位置」是**状态**（筛不出候选），不是说明文字，允许。
+        for forbidden in ["更快", "减少", "检索时间", "点击", "选择位置后", "快捷键", "↑", "↓"] {
+            XCTAssertFalse(code.contains(forbidden),
+                           "命令面板不许出现解释性文字：\(forbidden)")
+        }
+    }
+
+    /// ★ 已选定的限定必须显示在搜索框里，而且是**关键词前面**的蓝色小字。
+    ///
+    /// 用户的要求原话：「用蓝色字体更小一号把选择的内容放置在最前边」。
+    /// 摆在关键词后面会被看成关键词的一部分。
+    func testSearchFieldShowsTokensBeforeKeyword() throws {
+        let field = codeOnly(try appSource("SearchFieldView.swift"))
+        XCTAssertTrue(field.contains("tokens"), "搜索框必须显示已选定的限定")
+        XCTAssertTrue(field.contains("deleteToken"), "限定必须能删掉")
+        XCTAssertTrue(field.contains("Color.accentColor"), "限定要用强调色（蓝）与关键词区分")
+        // ★ 顺序：token 必须在 TextField 之前，**且要在 body 内部比**。
+        //
+        // ⚠️ 别在整份源码里找第一个 `tokenStrip`：属性定义也在源码里，
+        // 它写在 body 之前，于是「token 在前」永远成立 —— 断言成了恒真的聋子
+        // （变异试过：真把 token 挪到输入框后面，这条照样全绿）。
+        guard let body = braceBlock(after: "var body", in: field),
+              let tokenRange = body.range(of: "tokenStrip"),
+              let fieldRange = body.range(of: "TextField(") else {
+            return XCTFail("搜索框 body 里找不到限定条或输入框")
+        }
+        XCTAssertTrue(tokenRange.lowerBound < fieldRange.lowerBound,
+                      "限定必须放在输入框（关键词）前面")
+        // 字号要比正文（22）小一号。
+        XCTAssertTrue(field.contains("size: 15"), "限定的字号要比关键词小")
+    }
+
+    /// ★ 类型面板十条（九种类型 + 打开设置）必须**全部显示得出来**。
+    ///
+    /// 数字能按到哪，就得显示到哪：只画前六条的话，按 7 / 8 / 9 / 0
+    /// 选中的是列表外面的项 —— 用户按了数字，结果却不是屏幕上那一条。
+    func testFileTypePaletteDisplaysAllNumberedRows() throws {
+        let code = codeOnly(try appSource("AppModel+SearchCommand.swift"))
+        XCTAssertTrue(code.contains("commandKind == .fileType ? 10 : 6"),
+                      "类型面板必须显示满十条，否则编号 7–9 与 0 指向看不见的项")
+    }
+
+    /// ★ 浮窗高度必须按面板**实际显示的行数**算，不能写死 6。
+    ///
+    /// 两者一旦不同步，面板就会被浮窗底边切掉一截。
+    func testPaletteHeightUsesSameRowLimit() throws {
+        let code = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(code.contains("model.commandMaximumVisible"),
+                      "浮窗高度与面板显示行数必须共用同一个上限")
+        XCTAssertFalse(code.contains("filteredCommandItems.count, 6"),
+                       "行数上限不许写死，否则与面板实际行数脱节")
+    }
+
+    func testCommandPaletteDoesNotReserveHiddenResultSpaceOrShowSearchProgress() throws {
+        let source = codeOnly(try appSource("SearchView.swift"))
+        let results = try XCTUnwrap(braceBlock(after: "private var expandedHeight:", in: source))
+        XCTAssertTrue(results.contains("guard hasQuery, !model.isCommandModeActive else { return 0 }"),
+                      "命令菜单显示时没有结果区，不能再加空结果或上一轮结果的高度")
+        let pending = try XCTUnwrap(braceBlock(after: "private var pending:", in: source))
+        XCTAssertTrue(pending.contains("!model.isCommandModeActive"), "命令模式并没有发起真实搜索")
+        let palette = try XCTUnwrap(braceBlock(after: "private var commandPaletteHeight:", in: source))
+        XCTAssertTrue(palette.contains("max(1,"), "无匹配选项也会渲染一行，必须为该行留出高度")
+    }
+
+    func testPermissionReturnRestoresPresentedPreferencesWithoutRebuildingDraft() throws {
+        let app = codeOnly(try appSource("FlashFind2App.swift"))
+        let reopen = try XCTUnwrap(braceBlock(after: "func applicationShouldHandleReopen(", in: app))
+        let restore = try XCTUnwrap(reopen.range(of: "restorePresentedPreferencesWindow("))
+        let search = try XCTUnwrap(reopen.range(of: "searchPanel?.show()"))
+        XCTAssertLessThan(restore.lowerBound, search.lowerBound,
+                          "重开应用必须先恢复设置/登录窗口，不能直接让浮窗抢走焦点")
+        let active = try XCTUnwrap(braceBlock(after: "func applicationDidBecomeActive(", in: app))
+        XCTAssertTrue(active.contains("restorePresentedPreferencesWindow("))
+        XCTAssertTrue(active.contains("searchPanel?.isKeyWindow"), "主动唤起搜索的快捷键不能被设置窗口抢走")
+        let windows = codeOnly(try appSource("SettingsWindow.swift"))
+        XCTAssertEqual(windows.components(separatedBy: "isPresented = true").count - 1, 2)
+        XCTAssertEqual(windows.components(separatedBy: "isPresented = false").count - 1, 4,
+                       "设置/向导关闭后必须清除呈现标记，不能在下一次激活时复活")
+        let helper = try XCTUnwrap(braceBlock(after: "func restorePresentedPreferencesWindow(",
+                                             in: codeOnly(try appSource("WindowRestore.swift"))))
+        XCTAssertTrue(helper.contains("isMiniaturized"), "不能擅自还原用户主动最小化的窗口")
+        XCTAssertTrue(helper.contains("makeKeyAndOrderFront"))
+        XCTAssertFalse(helper.contains("rootView"), "授权返回不能重建表单并清空草稿")
+        XCTAssertFalse(helper.contains("cancelDraft"))
+    }
+
+    /// 删除键删限定的判定必须在 Core，不许 App 层自己写顺序。
+    func testTokenRemovalOrderIsDecidedInCore() throws {
+        let code = try appSource("AppModel+SearchCommand.swift")
+        XCTAssertTrue(code.contains("slotToRemoveOnBackspace"),
+                      "删哪个限定必须由 Core 的 SearchTokenBar 判定")
+        XCTAssertTrue(code.contains("tokenBar.clear("), "删除必须走 Core 的 clear")
+    }
+
+    /// ★ **点标签**与**删除键**必须是两条规则，不能共用一条。
+    ///
+    /// 共用（1.1.16 的实际写法：每枚标签都接同一个 `deleteToken`）有两个后果：
+    /// ① 输入框里还有关键词时，点击被「关键词非空」这条删除键的前提挡住 ⇒ 点了没反应；
+    /// ② 位置与类型都在时，点位置删掉的却是最近设的那个（类型）。
+    func testTappingATokenClearsThatTokenNotTheBackspaceRule() throws {
+        let field = codeOnly(try appSource("SearchFieldView.swift"))
+        XCTAssertTrue(field.contains("deleteToken(token.slot)"),
+                      "点一枚限定必须删**被点的那一枚**（把槽位传下去），"
+                      + "不能调用无参的删除键动作")
+        // 无参的 `deleteToken()` 一旦还在，说明点击仍是「删最近设的那个」。
+        XCTAssertFalse(field.contains("Button(action: deleteToken)"),
+                       "点击不许直接接删除键动作")
+
+        let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
+        XCTAssertTrue(model.contains("func deleteSearchToken(_ slot: SearchTokenBar.Slot)"),
+                      "App 层要有「按槽位删」的入口")
+        XCTAssertTrue(model.contains("slotToRemoveOnBackspace"),
+                      "删除键仍要走 Core 的 LIFO 判定（关键词非空时不抢键）")
+
+        let view = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(view.contains("tokens: model.searchTokens"),
+                      "搜索框必须拿到带槽位的限定，而不是一串字符串")
+        XCTAssertTrue(view.contains("deleteToken: { model.deleteSearchToken($0) }"),
+                      "点击必须把槽位交给 App 层")
+        XCTAssertTrue(view.contains("deleteSearchToken: { model.deleteSearchToken() }"),
+                      "键盘删除键仍走无参那条（保留「有关键词时只删文字」的行为）")
+    }
+
+    // MARK: - 收尾边界（取消 / 重新编辑 / 提交 的真实调用顺序）
+
+    /// ★ 「取消」必须**同步**认领归属，不能把票号留到收尾 Task 里再取。
+    ///
+    /// 行为由 `DraftSessionTests` 用真实 provider 覆盖（见
+    /// `testTeardownClaimedBeforeItsTaskStartsIsNotOverriddenByLaterEdit`）；
+    /// 这里锁的是 controller 那条**真实调用链**上的顺序——
+    /// 只查「源码里有没有 beginTeardown」是不够的，写在 `Task {` 之后等于没写。
+    func testCancelDraftClaimsTeardownOwnershipBeforeItsTaskStarts() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let body = try XCTUnwrap(braceBlock(after: "func cancelDraft()", in: source),
+                                 "找不到 cancelDraft 的实现")
+        let claim = try XCTUnwrap(body.range(of: "beginTeardown()"), "取消必须认领本轮归属")
+        let task = try XCTUnwrap(body.range(of: "Task {"), "取消之后仍要把收尾丢到后台跑")
+        XCTAssertTrue(claim.lowerBound < task.lowerBound,
+                      "认领必须发生在 Task 之前：晚一步取票号，旧收尾就会把新的编辑认领成自己的")
+        XCTAssertTrue(body.contains("ticket: ticket"), "收尾必须带上同步拿到的票号")
+        XCTAssertTrue(body.contains("endTeardown()"), "收尾落定后必须摘掉「收尾中」这面旗")
+    }
+
+    /// ★ 重新编辑同一台来源时，不许在收尾还没落定时就把范围快照复制进草稿。
+    func testEditSourceWaitsForPendingTeardownBeforeAdoptingLiveSession() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let body = try XCTUnwrap(braceBlock(after: "func editSource(", in: source),
+                                 "找不到 editSource 的实现")
+        let gate = try XCTUnwrap(body.range(of: "hasPendingTeardown"),
+                                 "借活会话之前必须看这台来源上有没有未落定的收尾")
+        let drain = try XCTUnwrap(body.range(of: "drainTeardown()"), "有收尾在飞时必须等它落定")
+        XCTAssertTrue(gate.lowerBound < drain.lowerBound, "先看再等，顺序不能反")
+        XCTAssertTrue(body.contains("adoptLiveSession("),
+                      "「借会话 + 复制范围」必须是同一个动作，两条路共用，不许各写一遍")
+        XCTAssertTrue(source.contains("private func adoptLiveSession("),
+                      "收养逻辑必须有唯一实现")
+    }
+
+    /// ★ 提交必须是「先有绑定结果，再落盘」，不是「先落盘再补一次绑定」。
+    ///
+    /// 第三轮那个 `Task { _ = try? await provider.selectScopes(target) }` 属于后者：
+    /// 它在 `saveDraft` 已持久化、`setSourceStatus` 已显示旧范围、`changedQuery`
+    /// 已按旧范围发起搜索之后才出发，且 `false` 与 `throw` 全丢 ⇒ 绑定失败时
+    /// 界面照样说「已保存」，只有搜索在悄悄用旧范围。
+    /// **那不是修好，是把「配置与实际不一致」推迟成静默不一致。**
+    func testCommitDraftBindsScopesBeforePersisting() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let body = try XCTUnwrap(braceBlock(after: "func commitDraft()", in: source),
+                                 "找不到 commitDraft 的实现")
+        let bind = try XCTUnwrap(body.range(of: "bindScopesForCommit("),
+                                 "提交前必须先把范围绑定等出结果")
+        let save = try XCTUnwrap(body.range(of: "guard saveDraft(rebuildProviders: false)"), "提交要落盘")
+        let search = try XCTUnwrap(body.range(of: "changedQuery()"), "提交后要重新搜索")
+        XCTAssertTrue(bind.lowerBound < save.lowerBound,
+                      "绑定必须排在落盘之前：反过来就是「配置已存、实际没生效」")
+        XCTAssertTrue(save.lowerBound < search.lowerBound,
+                      "只有配置真的落盘之后才发起搜索")
+        XCTAssertFalse(body.contains("try? await provider.selectScopes"),
+                       "不许再有「落盘之后才绑定、且丢掉结果」的兜底")
+        XCTAssertTrue(body.contains("draftGeneration"),
+                      "提交必须认领代次：await 之后要核对这一轮草稿还作数")
+        XCTAssertTrue(body.contains("return false"),
+                      "绑定失败必须回 false —— 调用方据此不关窗口、不说已保存")
+    }
+
+    /// ★ 绑定要等一次网络往返，往返期间草稿仍然可编辑（勾选不推进代次）。
+    ///
+    /// 只记目标范围是**不够**的：落盘走 `saveDraft()`，读的是此刻的 `draftSource`。
+    /// 于是「绑 B、存 C、搜 B」——存下来的是一份用户从没确认过的值，
+    /// 且代次守卫、会话身份守卫都抓不到（两者都没变）。
+    func testCommitDraftRejectsADraftEditedWhileBinding() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let body = try XCTUnwrap(braceBlock(after: "func commitDraft()", in: source),
+                                 "找不到 commitDraft 的实现")
+        let bind = try XCTUnwrap(body.range(of: "bindScopesForCommit("), "提交要先绑定范围")
+        let save = try XCTUnwrap(body.range(of: "guard saveDraft(rebuildProviders: false)"), "提交要落盘")
+        let snapshot = try XCTUnwrap(body.range(of: "let committedDraft = draftSource"),
+                                     "出发前必须把整份草稿拍下来，不能只记目标范围")
+        XCTAssertTrue(snapshot.lowerBound < bind.lowerBound,
+                      "快照必须在 await（绑定）之前拍：绑完再拍，拍到的就是被改过的那份")
+        // ★ 只查 `contains` 会恒真（定义了但没核对照样命中），必须查它落在
+        //   「绑定之后、落盘之前」这一段里。
+        guard bind.upperBound <= save.lowerBound else {
+            XCTFail("范围绑定必须在落盘之前")
+            return
+        }
+        let between = String(body[bind.upperBound..<save.lowerBound])
+        XCTAssertTrue(between.contains("draftSource == committedDraft"),
+                      "落盘前必须核对草稿仍是出发时那一份：变了就拒绝保存，不能存用户没确认过的值")
+        XCTAssertTrue(between.contains("return false"),
+                      "草稿被改过必须回 false —— 调用方据此不关窗口、不说已保存")
+        let entryGuard = try XCTUnwrap(body.range(of: "guard !draftBusy"),
+                                       "提交入口要挡住上一次提交还在飞的情况：直接调用/双击绕得过按钮")
+        XCTAssertTrue(entryGuard.lowerBound < bind.lowerBound,
+                      "入口的忙碌判断必须在绑定之前")
+    }
+
+    /// ★ 收养活会话必须认代次，并在 await 之后复核实例仍然可用。
+    func testAdoptLiveSessionIsGuardedByDraftGeneration() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let adopt = try XCTUnwrap(braceBlock(after: "private func adoptLiveSession(", in: source),
+                                 "找不到 adoptLiveSession 的实现")
+        // ★ 必须在 `guard` 那一段里查，不能全文 `contains`：
+        //   函数开头的 `defer` 里也判了一次代次（解除忙碌只归自己这一轮），
+        //   全文匹配的话「guard 里漏判」照样是绿的——那就是假证据。
+        let guardStart = try XCTUnwrap(adopt.range(of: "guard "), "收养必须有过期的判断")
+        let guardEnd = try XCTUnwrap(adopt.range(of: "else { return }"), "判断不通过必须放弃收养")
+        XCTAssertTrue(guardStart.lowerBound < guardEnd.lowerBound)
+        let guardClause = String(adopt[guardStart.lowerBound..<guardEnd.lowerBound])
+        XCTAssertTrue(guardClause.contains("draftGeneration == generation"),
+                      "等收尾回来之后必须核对草稿代次：取消/重开/切来源都让旧回调作废")
+        XCTAssertTrue(guardClause.contains("live.ready"),
+                      "ready 必须在 await **之后**复核：等待期间实例可能已经掉线")
+        XCTAssertTrue(adopt.contains("draftSettling = false"),
+                      "收养结束（或作废）要解除本轮忙碌")
+        let edit = try XCTUnwrap(braceBlock(after: "func editSource(", in: source),
+                                 "找不到 editSource 的实现")
+        XCTAssertTrue(edit.contains("generation: generation"),
+                      "发起等待之前就要把本轮代次交给收养，不能等回来再认领")
+        XCTAssertTrue(edit.contains("draftSettling = true"),
+                      "等待期间必须显示忙碌：此刻「已连接 / 可保存」都还不成立")
+    }
+
+    /// ★ 取消必须让本轮代次作废，否则旧提交/旧收养还能落到新草稿上。
+    func testCancelDraftInvalidatesTheDraftGeneration() throws {
+        let source = try appSource("NASSourceWizardController.swift")
+        let body = try XCTUnwrap(braceBlock(after: "func cancelDraft()", in: source),
+                                 "找不到 cancelDraft 的实现")
+        XCTAssertTrue(body.contains("draftGeneration += 1"),
+                      "取消要让本轮作废：在飞的绑定与收养都不许再写这台来源")
+        XCTAssertTrue(body.contains("draftSettling = false"), "取消要解除本轮忙碌")
+    }
+
+    /// ★ 保存按钮不许再无条件关窗口。
+    func testSaveButtonClosesOnlyAfterASavedCommit() throws {
+        let view = try appSource("NASSourceWizardView.swift")
+        XCTAssertTrue(view.contains("if await model.commitDraft()"),
+                      "窗口只能在 commitDraft 回 true（真的保存了）之后关闭")
+        XCTAssertFalse(view.contains("model.commitDraft(); NASWizardWindow.shared.close()"),
+                       "不许再「点了就关」——绑定失败时那会留下一台配置与实际不一致的来源")
+    }
+
     /// 取出 `marker` 之后第一个花括号块的**完整内容**（含花括号）。
     ///
     /// 「这句调用在不在 `onAppear` 里」没法用 `contains` 回答——整份源码里
@@ -1338,7 +1941,7 @@ final class AppLayerStructureTests: XCTestCase {
                       "中途退出过的要问一句，而不是既不问也不管")
     }
 
-    /// ★ 引导页里按下全局快捷键只表示「这个快捷键能用」，不弹搜索浮窗。
+    /// ★ 引导期间快捷键交给教学窗口，不触发真实搜索。
     ///
     /// 不拦的话：用户照着引导按一下，搜索浮窗盖到引导上面、还把焦点抢走，
     /// 而他只是想确认快捷键有没有生效。
@@ -1350,7 +1953,7 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(press.contains("OnboardingWindow.shared.isVisible"),
                       "要先判断引导是不是开着")
         XCTAssertTrue(press.contains("noteOnboardingShortcutPressed"),
-                      "开着时只做标记")
+                      "开着时走引导的快捷键回调")
         // 反过来验证：不许把「打开搜索窗」整条删掉 —— 那是快捷键的正事。
         XCTAssertTrue(press.contains("toggleFlashFind2"))
     }
@@ -1867,7 +2470,7 @@ final class AppLayerStructureTests: XCTestCase {
     /// ★ 发布前必须把所有来源的证据**归并**成设备，否则同一台设备会占多行。
     ///
     /// 实测群晖同时出现在 5001（DSM）与 548（AFP），用户看到的是「两台 demo-synology」；
-    /// 而 DS1621+ 有三块网卡（.88 / .152 / 192.168.3.4），不按序列号归并就是「三台 NAS」。
+    /// 而 DS1621+ 有三块网卡（.88 / .152 / 192.0.2.4），不按序列号归并就是「三台 NAS」。
     ///
     /// 归并键是 IP + 序列号 + MAC，不在 App 层做——`DeviceMerger` 是能被测试锁住的纯函数。
     func testDiscoveryDeduplicatesByHostBeforePublishing() throws {
@@ -1889,7 +2492,7 @@ final class AppLayerStructureTests: XCTestCase {
     ///
     /// 实测：一个不存在的地址会把三个端口各耗到 1.2s 超时
     /// （同网段 ARP 无响应）→ 3.6s/台；253 台 ÷ 20 并发 ≈ **45 秒**才扫完一轮。
-    /// 用户那台 `192.168.1.88`（不广播 mDNS 的群晖）大约第 16 秒就被探到了，
+    /// 用户那台 `192.0.2.88`（不广播 mDNS 的群晖）大约第 16 秒就被探到了，
     /// 但因为 `publish()` 只在 `finishScan()` 里调一次，它要等满 45 秒才出现——
     /// 而 Bonjour 那两台的回调是增量发的，于是界面看起来「扫完了」，
     /// 用户自然认为「.0.88 没被识别出来」。
@@ -1988,23 +2591,212 @@ final class AppLayerStructureTests: XCTestCase {
                       "socket 覆盖必须夹在 `#if DEBUG` 里")
     }
 
-    /// ★ 凭据合并必须排在「启动自动连接」**之前**。
-    ///
-    /// 顺序反了的代价不是错乱而是**多弹一轮窗**：`autoConnectSavedSources` 会按老布局
-    /// 读每台 NAS 的密码，每读一条就是一次系统授权；读完转头再把它们搬进合并条目，
-    /// 用户等于为「马上要被搬走的老条目」白授权一轮。
-    ///
-    /// 这种缺陷编译能过、测试全绿、界面上也看不出——只有用户在那儿点弹窗时才暴露，
-    /// 所以只能拿源码顺序守。
-    func testCredentialsAreConsolidatedBeforeAutoConnectReadsThem() throws {
+    func testStartupDoesNotReadOrMigrateStoredSecrets() throws {
         let model = codeOnly(try appSource("AppModel.swift"))
-        let consolidate = try XCTUnwrap(model.range(of: "consolidateCredentialsIfNeeded()"),
-                                        "启动时不再合并凭据 —— 老用户会一直按「一台一条」要授权")
-        let autoConnect = try XCTUnwrap(model.range(of: "autoConnectSavedSources()"),
-                                        "自动连接不见了？先确认它是不是被改名了")
-        XCTAssertLessThan(consolidate.lowerBound, autoConnect.lowerBound,
-                          "合并必须排在自动连接之前，否则要先为老条目白授权一轮")
-        XCTAssertEqual(model.components(separatedBy: "consolidateCredentialsIfNeeded()").count - 1, 1,
-                       "合并只该在启动路径上调一次；多调一次就是多一轮读老条目")
+        let app = codeOnly(try appSource("FlashFind2App.swift"))
+        XCTAssertFalse(model.contains("consolidateCredentialsIfNeeded()"))
+        XCTAssertFalse(app.contains("CredentialStore.migrate"), "迁移也可能弹授权框，不能放在启动路径")
+        XCTAssertTrue(model.contains("autoConnectSavedSources()"), "保留已解锁缓存的后台连接能力")
+    }
+
+    func testExplicitLoginMayRequestKeychainAuthorization() throws {
+        let wizard = try appSource("NASSourceWizardController.swift")
+        let connect = try XCTUnwrap(braceBlock(after: "func connectDraft()", in: wizard))
+        XCTAssertTrue(connect.contains("nativeNASPassword.isEmpty &&"), "已输入密码时不能额外索取钥匙串授权")
+        XCTAssertTrue(connect.contains("allowInteraction: true"))
+        let button = try XCTUnwrap(braceBlock(after: "var canConnectDraft:", in: wizard))
+        XCTAssertTrue(button.contains("hasStoredPassword: canRequestStoredPasswordForDraft"),
+                      "尚未解锁钥匙串也必须能点击连接，否则用户只能重新输入密码")
+        let actions = try appSource("AppModel+SourceActions.swift")
+        for name in ["func reconnectSource(", "func reconnectUsingStoredCredential("] {
+            let body = try XCTUnwrap(braceBlock(after: name, in: actions))
+            XCTAssertTrue(body.contains("allowInteraction: true"), "主动登录必须允许系统请求授权")
+        }
+    }
+
+    // MARK: - 密码框下方的提示（2026-10-24 用户要求删除）
+
+    /// ★ 密码框下方那行「将使用本机保存的密码」必须删掉。
+    ///
+    /// 用户在截图上把这句话圈出来写了「删除」。它是**提示备注**：
+    /// 标题已经说清的事（密码框就是密码框），再补一句解释反而添乱。
+    /// 项目规矩：做新 UI 一律不许写这类备注。
+    ///
+    /// 顺带把「依赖 `nativeNASPassword` 的条件视图」整类风险消掉了：
+    /// 条件视图随每次按键增删子视图 → SwiftUI 重建密码框区块 →
+    /// 重建瞬间按钮可用性判断读到空值 → 「填了密码却点不了连接」。
+    /// 现在这个位置没有任何条件子视图。
+    func testPasswordFieldHasNoStoredPasswordHintUnderneath() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+        XCTAssertFalse(wizard.contains("将使用本机保存的密码"),
+                       "用户点名删掉这句提示，不许再回来")
+        XCTAssertFalse(wizard.contains("keychainHint"),
+                       "提示没了，keychainHint 也不该再被视图引用")
+        XCTAssertTrue(wizard.contains("PlainSecureField(text: $model.nativeNASPassword"),
+                      "密码框本身必须还在")
+    }
+
+    /// 全 App 层扫一遍：那句提示不许换个文件再出现一次。
+    func testNoAppSourceMentionsTheStoredPasswordHint() throws {
+        let dir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/FlashFind2App")
+        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertFalse(files.isEmpty, "App 源码目录读不到，本条断言失去意义")
+        for url in files {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let code = codeOnly(text)
+            XCTAssertFalse(code.contains("将使用本机保存的密码"),
+                           "\(url.lastPathComponent) 里又出现了这句提示备注")
+        }
+    }
+
+    // MARK: - 动态码死循环（2026-10-24 用户报障）
+
+    /// ★ App 层必须走 Core 的 `NASCredentialPick` 取凭据。
+    ///
+    /// 死循环的根因是「密码从钥匙串取」的那一路把动态码丢了：
+    /// 重连仍不带码 ⇒ 服务端仍回 402 ⇒ 又弹一次 OTP 框 ⇒ 停不下来。
+    /// 「手输密码」那条路带码，于是现象像「只有空密码才死循环」。
+    ///
+    /// 规则搬进 Core 后有单元测试（`NASCredentialPickTests`）守着；
+    /// 这里守的是**App 层不许再自己写一套取值**——自己写就等于把那条丢码的路又写回来。
+    func testWizardTakesCredentialsFromTheCorePicker() throws {
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        XCTAssertTrue(controller.contains("NASCredentialPick.pick("),
+                      "取值必须走 Core 的 NASCredentialPick，两条路共用一个出口")
+        XCTAssertFalse(controller.contains("PendingCredential(password: saved, otp: nil)"),
+                       "钥匙串那条路不许把动态码写死成 nil —— 那就是死循环的根因")
+        XCTAssertFalse(controller.contains("otp: nil)"),
+                       "凭据构造里不许出现写死 nil 的动态码")
+    }
+
+    // MARK: - 空格预览（2026-10-26 用户要求恢复）
+
+    /// ★ 上一条报障的成因是「导航状态用错了快照」，这条锁住它。
+    ///
+    /// `Coordinator` 在按键**那一刻**读 `hasSelectableResult` 决定这次按键是不是
+    /// 「已经在用方向键选结果」。真实搜索路径**不会**自动选中第一条
+    /// （只有 fixture 会写 `selected = results.first?.id`），所以按下第一次 ↓ 时
+    /// `selectedResult` 必定还是 nil。若这里传的是 `selectedResult != nil`，
+    /// 第一次 ↓ 记下的就是「没在导航」⇒ 紧接着按空格仍然只打出一个空格，
+    /// 用户得按两次方向键才看得到预览 —— 与「空格预览加回来了」的承诺相反。
+    ///
+    /// 判据：这一路要问的是「**有没有可选的条目**」，而不是「已经选中了没有」。
+    func testSpacePreviewDoesNotWaitForAPreselectedRow() throws {
+        let view = codeOnly(try appSource("SearchView.swift"))
+        let start = try XCTUnwrap(view.range(of: "SearchKeyboardScope(enabled: true"),
+                                  "搜索浮窗必须挂键盘作用域")
+        let tail = String(view[start.lowerBound...])
+        let end = try XCTUnwrap(tail.range(of: ".frame(width: 0, height: 0)"),
+                                "作用域后面应紧跟零尺寸修饰符，取不到就说明切片点失配")
+        let scope = String(tail[tail.startIndex..<end.lowerBound])
+
+        let argument = try XCTUnwrap(
+            scope.split(separator: "\n").first(where: { $0.contains("hasSelectableResult:") }),
+            "必须显式传 hasSelectableResult")
+        XCTAssertFalse(argument.contains("selectedResult"),
+                       "不能用「已经选中」当判据：第一次按 ↓ 时它必为 nil，导航不会激活。实际：\(argument)")
+        XCTAssertTrue(argument.contains("results.isEmpty"),
+                      "要按「有没有可选条目」判定。实际：\(argument)")
+    }
+
+    /// 点击、键入、命令模式都必须能把「导航」状态推回文本输入。
+    ///
+    /// 承诺是「输入文字时空格照常输入」：只要还有一条路径不给 `navigation` 复位，
+    /// 用户就会撞上「选中结果后想打个空格，结果跳出预览窗口」。
+    func testTypingAndClickingReleaseTheSpaceKeyBackToTextInput() throws {
+        let scope = codeOnly(try appSource("SearchKeyboardScope.swift"))
+        XCTAssertTrue(scope.contains("if event.type == .leftMouseDown"),
+                      "左键点击必须单独处理")
+        XCTAssertTrue(scope.contains("self.navigation.reset()"),
+                      "点击结果行后要交还空格：否则焦点回到输入框时空格仍被吞")
+        XCTAssertTrue(scope.contains("navigation.record(route, hasResult: self.hasSelectableResult)"),
+                      "导航记录必须用同一份 hasSelectableResult")
+        XCTAssertTrue(scope.contains("c.navigation.reset()"),
+                      "query 变化（用户继续打字）时必须复位导航")
+    }
+
+    /// 预览面板自己也要能收空格 —— 那时按键的 window 已经不是搜索浮窗了。
+    ///
+    /// `SearchKeyboardScope` 的监视器只处理搜索浮窗自己的事件；预览面板一开就变成
+    /// key window，空格没人接 ⇒ 只能按 esc（还得先点回面板）。承诺的是「再按一次关闭」。
+    func testPreviewPanelClosesOnSpaceItself() throws {
+        let code = codeOnly(try appSource("QuickLookPreview.swift"))
+        XCTAssertTrue(code.contains("func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool"),
+                      "预览面板必须实现 handle 事件代理方法")
+        XCTAssertTrue(code.contains("event.keyCode == 49"),
+                      "要认的是空格（keyCode 49）")
+        XCTAssertTrue(code.contains("panel.orderOut(nil)"),
+                      "空格要关闭面板")
+        XCTAssertTrue(code.contains("if panel.isVisible, sameItem"),
+                      "同一个文件再按一次应当关闭（要先判 isVisible + sameItem），而不是重新弹一次")
+    }
+
+    /// 按名字取一个函数的函数体（含外层花括号）。括号配平。
+    ///
+    /// ★ 用配平切块而不是全局 `contains`：`isSourceReady` 这种词在别处也有，
+    /// 全局搜到就等于没证明「是这一条路径做的判断」。
+    private func body(of name: String, in source: String) throws -> String {
+        // 方法与被计算的属性都要取得到：`commandSources` 是 `var x: T { … }`，
+        // 只认 `func` 的话它会直接判「找不到」—— 而那条断言守的正是它。
+        var signature: Range<String.Index>?
+        for anchor in ["func \(name)(", "var \(name):", "var \(name) "] {
+            if let found = source.range(of: anchor) { signature = found; break }
+        }
+        guard let signature else {
+            XCTFail("App 层找不到 func/var \(name)，名字改了要同步改这条断言")
+            return ""
+        }
+        guard let braceStart = source[signature.upperBound...].firstIndex(of: "{") else {
+            XCTFail("func \(name) 没有函数体")
+            return ""
+        }
+        var depth = 0
+        var index = braceStart
+        while index < source.endIndex {
+            switch source[index] {
+            case "{": depth += 1
+            case "}":
+                depth -= 1
+                if depth == 0 { return String(source[braceStart...index]) }
+            default: break
+            }
+            index = source.index(after: index)
+        }
+        XCTFail("func \(name) 的花括号没有配平")
+        return ""
+    }
+
+    /// ★ 选了「未连接的来源」的位置必须当场发起连接。
+    ///
+    /// 2026-10-26 报障「位置没有生效，只能检测到本机的」共两处：
+    /// ① Core 侧按 `ready` 过滤候选取（已改，`SearchLocationTests` 守着）；
+    /// ② App 侧选了候选却不连 —— 候选能看见、点了没反应，比藏起来更糟。
+    /// 这一条守的是 ②：它写在 executableTarget 里，只能扫源码。
+    func testApplyingAnOfflineLocationStartsAConnection() throws {
+        let code = try appModelCode()
+        let apply = try body(of: "applySearchTarget", in: code)
+        XCTAssertTrue(apply.contains("isSourceReady"),
+                      "要不要连接必须由来源就绪状态判定，不能无条件连")
+        XCTAssertTrue(apply.contains("connectSourceForSearch"),
+                      "未就绪就必须当场连，不能只设限定就走人")
+
+        let connect = try body(of: "connectSourceForSearch", in: code)
+        XCTAssertTrue(connect.contains("interactiveOTP: true"),
+                      "这是用户主动点的路径：设备要动态码必须当场弹框，"
+                      + "不能等用户再点一次登录（与 OTP 报障同源）")
+        XCTAssertTrue(connect.contains("searchWarnings"),
+                      "连不上（没存密码）时要在搜索面板上说一句，否则界面像没反应")
+
+        // 位置候选里的来源必须带**真实**就绪状态：写死 true 会让副标题永远不标
+        // 「未连接」，用户就不知道点了还得等一次连接。
+        let sources = try body(of: "commandSources", in: code)
+        XCTAssertTrue(sources.contains("ready: nativeProviders[config.id]?.ready == true"),
+                      "ready 要照实取；键是 config.id（nativeProviders 就是这么建的），"
+                      + "用 sourceID 查在 id 含非法字符时会永远查不到")
+        XCTAssertTrue(sources.contains("filter(\\.enabled)"),
+                      "只列已启用的来源：停用的来源不该出现在位置面板里")
     }
 }

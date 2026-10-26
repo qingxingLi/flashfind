@@ -4,7 +4,7 @@ import FlashFindCore
 
 /// 首次启动引导。
 ///
-/// ## 这一版的目标：**完成初始化，不是读教程**
+/// 先完成初始化，在快捷键步骤用搜索浮窗演示操作。
 ///
 /// 六步，每步只解决一件事：认识用途 → 设快捷键 → 开权限 → 选本地范围 →
 /// （可选）加网络存储 → 汇总 → 直接开始搜。
@@ -104,6 +104,10 @@ struct OnboardingView: View {
     }
 
     private func primaryAction() {
+        if controller.step == .shortcut {
+            OnboardingWindow.shared.showSearchDemo()
+            return
+        }
         guard controller.step == .finish else { controller.advance(); return }
         controller.finish()
         OnboardingWindow.shared.close()
@@ -145,7 +149,9 @@ private struct OnboardingPage<Content: View>: View {
                         .accessibilityIdentifier("onboarding-step-done")
                 }
             }
-            content()
+            ScrollView {
+                content().frame(maxWidth: .infinity, alignment: .leading)
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 30).padding(.top, 34).padding(.bottom, 20)
@@ -230,8 +236,9 @@ private struct ShortcutStep: View {
 
     /// 失败时的说法。
     ///
-    /// 只报**真失败**：正常的 `shortcutStatus` 里有一句「按 ⌥Space 唤出或收起搜索」，
-    /// 那是说明不是错误，摆在这里会变成一行红字吓人。
+    /// 只报**真失败**：`shortcutStatus` 现在只在出问题时才有内容
+    ///（正常注册与保存成功都留空），但仍然要求 `available == false` 才显示，
+    /// 免得将来有人往里塞一句说明就变成一行红字吓人。
     private var failureMessage: String? {
         if model.shortcutRegistrationRefused { return OnboardingShortcutText.conflict }
         if !model.shortcutAvailable, !model.shortcutStatus.isEmpty { return model.shortcutStatus }
@@ -246,7 +253,7 @@ private struct ShortcutStep: View {
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text("试一下：按 \(model.globalShortcut.displayName)").font(.callout)
-                Text("按一次就应该出现闪寻的搜索框。没反应也没关系，可以先继续，之后再改。")
+                Text("按一次打开搜索演示。也可以点击「继续」，快速看看搜索、空格预览与范围选择。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -380,8 +387,6 @@ private struct LocalScopeStep: View {
 private struct NetworkStep: View {
     @ObservedObject var model: AppModel
     let satisfied: Bool
-    /// 跟着这一页起停：离开这一步就把浏览停掉，免得窗口没了还在收广播。
-    @StateObject private var discovery = LocalNetworkDiscovery()
 
     private var added: [NASSourceConfig] { model.nasSources.filter { !$0.hostName.isEmpty } }
     /// 加过地址、但还没选搜索位置的那些——它们在结果里不会出现，要说出来。
@@ -423,49 +428,9 @@ private struct NetworkStep: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // 已经加过就不再铺设备列表：这一步的目的（让闪寻能搜到网络文件）
-                // 已经达到了，再列一屏设备只会让「继续」看起来像还有事没做。
-                if added.isEmpty { nearby }
-            }
-        }
-        .onAppear { discovery.start(existing: model.nasSources) }
-        .onDisappear { discovery.stop() }
-    }
-
-    /// 同局域网里找到的设备。选中一台只**预填**地址，随后打开向导填账号密码。
-    @ViewBuilder private var nearby: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("附近的设备").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-            if discovery.devices.isEmpty {
-                HStack(spacing: 8) {
-                    if discovery.isScanning { ProgressView().controlSize(.small) }
-                    Text(discovery.statusMessage).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            ForEach(discovery.devices) { device in
-                Button {
-                    model.applyDiscoveredDevice(device)
-                    NSApp.activate(ignoringOtherApps: true)
-                    NASWizardWindow.shared.show(model: model)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: device.vendorHint?.symbol ?? "server.rack")
-                            .frame(width: 18).foregroundStyle(.secondary)
-                        Text(device.name.isEmpty ? device.host : device.name).font(.callout)
-                        Text(device.addressText).font(.caption).foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.25)))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("onboarding-nearby-" + device.id)
-            }
-            if !discovery.isScanning {
-                Button("重新查找") { discovery.rescan(existing: model.nasSources) }
-                    .controlSize(.small)
+                Text("不知道地址？添加时点「附近的设备」查找；也可以直接输入地址。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -43,7 +43,7 @@ extension AppModel {
                                                    identity: source.credentialIdentity),
                   !secret.isEmpty else {
                 // ★ 读不出来有两种完全相反的原因，说法不能混：
-                //   - 没获得授权：密码还在钥匙串里，该做的是在系统弹窗上点「始终允许」；
+                //   - 尚未授权：等用户主动点击登录，再读取钥匙串；
                 //   - 确实没存过：只能重连一次。
                 // 一律说「本机没有保存密码」会让前一种用户白重输一遍密码，
                 // 而重输完下次启动照样弹——他永远找不到真正的问题。
@@ -51,7 +51,7 @@ extension AppModel {
                 setSourceStatus(source.id) {
                     $0.health = .needsAttention
                     $0.message = problem == .notAuthorized
-                        ? "未获得钥匙串授权：请在系统弹窗上点「始终允许」，密码本身还在"
+                        ? "点击「登录」以使用已保存的密码，需要时系统会请求钥匙串授权"
                         : "本机没有保存密码，请连接一次"
                     $0.requiredAction = .login
                 }
@@ -68,11 +68,16 @@ extension AppModel {
         }
     }
 
-    /// 静默连接：与 `performConnect` 同样的流程，但不写草稿、不弹任何东西。
+    /// 静默连接：与 `performConnect` 同样的流程，但不写草稿、
+    /// 且只有 `interactiveOTP == false` 时才真正「不弹任何东西」。
     ///
     /// 单独一份而不是给 `performConnect` 加开关——自动连接没有用户在场，
     /// 把草稿状态改来改去只会造成「设置页莫名其妙变了」。
-    func performConnectQuietly(config: NASSourceConfig, credential: PendingCredential) async {
+    ///
+    /// - Parameter interactiveOTP: 用户**自己点的登录**（而不是开机自动连接）。
+    ///   为 true 时，设备要动态码就当场弹框问，码错了在同一个弹框里再问一次。
+    func performConnectQuietly(config: NASSourceConfig, credential: PendingCredential,
+                               interactiveOTP: Bool = false) async {
         guard sharedBridge != nil else { return }
         // ★ 登记本轮连接意图。之后**每一个 `await` 之后**都要用它复核：
         // 用户可能刚刚点了这台 NAS 的「断开」。过期连接不许 install、不许回写状态、
@@ -100,7 +105,18 @@ extension AppModel {
         switch await runner.run() {
         case .connected, .settled: return
         case let .failed(_, error):
-            let needsOTP = ConnectionFailureText.isOTPRequired(error)
+            let otp = ConnectionFailureText.otpFailure(error)
+            // ★ 用户主动点的登录：设备要码就**现在**问，别把答案留到下一次点击。
+            //
+            // 用户报障（2026-10-26）：「第一次输入提示需要输入动态码，但是不会自动
+            // 弹出动态码，需要点击两次登陆，很反人类」。根因就是这里——第一次只是
+            // 写一行「自动连接失败：设备要求两步验证码」，非要用户再点一次
+            // 「登录」才走到 `reconnectSource` 里那条弹框分支。
+            if interactiveOTP, let otp {
+                await retryWithOTPUntilAnswered(config: config, password: credential.password,
+                                                token: token, failure: otp)
+                return
+            }
             setSourceStatus(config.id) {
                 $0.health = .needsAttention
                 // 同上：走统一的连接失败文案，不裸拼 localizedDescription。
@@ -108,8 +124,99 @@ extension AppModel {
                     + ConnectionFailureText.describe(error, host: config.hostName, port: config.effectivePort)
                 // OTP 失败时不给「重试」按钮：重试还是 otp: nil，只会再失败一次。
                 // 必须走「登录」按钮，让重新登录时弹 OTP 输入框。
-                $0.requiredAction = needsOTP ? .login : .retry
-                $0.needsOTP = needsOTP
+                $0.requiredAction = otp == nil ? .retry : .login
+                $0.needsOTP = otp != nil
+                $0.otpRejected = otp == .rejected
+            }
+        }
+    }
+
+    /// 设备要动态码 → 当场问；码不对就**在同一个框里**再问，直到连上或用户取消。
+    ///
+    /// ## 为什么是循环而不是「失败后提示用户再点一次登录」
+    ///
+    /// 用户报障原文：
+    ///
+    ///   「输入 OTP 验证码错误，不会提示验证码错误，而是没有什么反应，
+    ///     还是在外边提示需要动态码，需再次点击登陆。」
+    ///
+    /// 码错是**这一轮对话里就能解决的问题**：用户就在弹框前、验证器就在手上。
+    /// 把它推回「再点一次登录」等于让用户重新走一遍他刚刚走完的路，
+    /// 而且中间那句「需要动态码」会让他以为码根本没发出去。
+    ///
+    /// 循环只在拿到**非 OTP 失败**或用户取消时结束：前者是真问题，后者是用户的选择。
+    private func retryWithOTPUntilAnswered(config: NASSourceConfig, password: String,
+                                           token: SourceConnectIntent.Token,
+                                           failure: OTPFailure) async {
+        var failure = failure
+        while true {
+            // 用户可能在弹框前后点了「断开」：那条意图已经作废，不许再问、不许再连。
+            guard quietConnectStillValid(token) else { return }
+            let rejected = failure == .rejected
+            setSourceStatus(config.id) {
+                $0.health = .needsAttention
+                $0.message = rejected
+                    ? "动态码输入错误，请重新输入"
+                    : "这台设备需要两步验证码，正在等待你输入"
+                $0.requiredAction = .login
+                $0.needsOTP = true
+                $0.otpRejected = rejected
+            }
+            guard let code = await askForOTP(sourceName: config.displayName, failure: failure) else {
+                // 取消：不写「失败」——失败的是「这次没填」，不是连接。
+                // 但必须说清下次怎么把它叫回来（同一条事实不写在两处）。
+                setSourceStatus(config.id) {
+                    $0.health = .needsAttention
+                    $0.message = ConnectionFailureText.otpRetryHint(buttonTitle: "登录")
+                    $0.requiredAction = .login
+                    $0.needsOTP = true
+                    $0.otpRejected = rejected
+                }
+                return
+            }
+            guard quietConnectStillValid(token) else { return }
+            setSourceStatus(config.id) {
+                $0.health = .connecting
+                $0.message = "正在用已保存的密码和动态码连接…"
+                $0.requiredAction = nil
+            }
+            do {
+                // 复用同一条连接流程：discover / 证书 / 读共享 / 绑范围 一处都不许少。
+                // 返回 false 时它已经自己写明了状态（证书待确认 / 没有共享 / 意图作废），
+                // 那种情况下再问码只是折磨用户，所以一律收手。
+                _ = try await quietConnectSteps(
+                    config: config,
+                    credential: PendingCredential(password: password, otp: code),
+                    token: token)
+                return
+            } catch {
+                guard quietConnectStillValid(token) else { return }
+                guard let next = ConnectionFailureText.otpFailure(error) else {
+                    setSourceStatus(config.id) {
+                        $0.health = .needsAttention
+                        $0.message = "连接失败："
+                            + ConnectionFailureText.describe(error, host: config.hostName,
+                                                             port: config.effectivePort)
+                        $0.requiredAction = .login
+                        $0.needsOTP = false
+                        $0.otpRejected = false
+                    }
+                    return
+                }
+                failure = next
+            }
+        }
+    }
+
+    /// 把模态弹窗挪出本次连接的 async 流程。
+    ///
+    /// `NSAlert.runModal` 会占住主线程跑自己的模态循环。直接在 `quietConnectSteps`
+    /// 之后的流程里就地弹，会把「这次尝试彻底收尾」卡在半路——向导那条路踩过
+    /// 同一个坑（见 `promptForOTPThenReconnect` 的注释），这里不重复。
+    private func askForOTP(sourceName: String, failure: OTPFailure?) async -> String? {
+        await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                continuation.resume(returning: promptForOTP(sourceName: sourceName, failure: failure))
             }
         }
     }
@@ -202,6 +309,7 @@ extension AppModel {
                 // 连上了就把 OTP 标记清掉：不清的话用户下次点「重新登录…」
                 // 还会被问一次动态码，而这次会话根本不需要。
                 $0.needsOTP = false
+                $0.otpRejected = false
                 $0.selectedScope = scopes.joined(separator: "、")
                 $0.availableShares = shares
                 $0.discoveredPort = effective.port
@@ -210,6 +318,15 @@ extension AppModel {
             // 这里不要再 rebuild —— 那正是把已登录实例顶掉的动作。
             // 但 `invalidate()` 是全局的：只在确认这次连接仍然有效时才做。
             invalidate()
+            // ★ 连上之后按当前查询重搜一次。
+            //
+            // 由来（2026-10-26）：位置面板不再按「已连接」过滤候选，于是
+            // 「选一台还没连上的 NAS 的位置」会先连再搜。那条路径里位置限定
+            // 早就设好了，用户不会为了触发搜索再去敲一个字 —— 不补这一下，
+            // 表现就是「连上了，但列表还空着」。
+            // 开机自动连接时 `query` 通常为空，`changedQuery` 会在第一行早退，
+            // 不存在多搜一次的问题。
+            changedQuery()
             return true
         } catch {
             // 断开之后迟到的失败：来源已经离线，把意图作废的事实交回宿主，

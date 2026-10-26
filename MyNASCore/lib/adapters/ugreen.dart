@@ -162,6 +162,11 @@ class UGreenAdapter implements NasBrandAdapter {
   ///
   /// 把两者一起置 false 会让会话层直接判定「不支持搜索」而**不调适配器**，
   /// 真机校准的入口就被堵死了。未验证由 verifiedOnDevice 与 notes 承担。
+  /// 结果可以用同一主机的 SMB 共享打开：这台设备本身就是 SMB 服务器，
+  /// 搜索结果的逻辑路径与共享路径同构。见 `NasBrandAdapter.exposesSMBShares`。
+  @override
+  bool get exposesSMBShares => true;
+
   @override
   BrandCapabilities get capabilities => const BrandCapabilities(
     nativeSearch: true,
@@ -773,6 +778,7 @@ class UGreenAdapter implements NasBrandAdapter {
   Future<List<FileItem>> search(
     String query, {
     required List<String> roots,
+    void Function(RootSearchFailure failure)? onRootFailure,
   }) async {
     if (query.trim().isEmpty) return const [];
     if (roots.isEmpty) return const [];

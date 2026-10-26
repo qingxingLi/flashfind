@@ -14,6 +14,7 @@ private final class TransparentHostingView<Content: View>: NSHostingView<Content
 @MainActor
 final class SearchPanelController {
     private let panel: NSPanel
+    var isKeyWindow: Bool { panel.isKeyWindow }
     private let model: AppModel
 #if DEBUG
     private var hasValidatedPreview = false

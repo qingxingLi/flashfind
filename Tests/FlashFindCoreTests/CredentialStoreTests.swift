@@ -104,12 +104,54 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertNil(CredentialStore.read(account: account))
     }
 
-    func testReadDoesNotNeedAnyUserInteraction() throws {
-        // `allowInteraction` 现在是个空参数，两种取值都必须能读出来。
-        // 这条保证「不再有任何一个系统授权弹窗」这个承诺在代码层面成立。
+    func testFileReadsDoNotRequireInteraction() throws {
         try CredentialStore.save("s3cret", account: account)
         XCTAssertEqual(CredentialStore.read(account: account, allowInteraction: false), "s3cret")
         XCTAssertEqual(CredentialStore.read(account: account, allowInteraction: true), "s3cret")
+    }
+
+    func testSilentReadDefersAuthorizationUntilExplicitLoginAndCanRetry() {
+        let store = InteractionStore()
+        CredentialStore.install(store)
+        XCTAssertNil(CredentialStore.read(account: account))
+        XCTAssertEqual(CredentialStore.currentProblem, .notAuthorized)
+        XCTAssertEqual(store.policies, [false], "启动不能变成交互式读取")
+        XCTAssertEqual(CredentialStore.read(account: account, allowInteraction: true), "fixture-secret")
+        XCTAssertEqual(SecureStorage.read(account: account), "fixture-secret")
+        XCTAssertEqual(store.policies, [false, true, false], "授权后静默读取可复用进程内凭据")
+    }
+
+    func testCancelledAuthorizationCanBeRetriedWithoutLosingTheSavedCredential() {
+        let store = InteractionStore()
+        store.denyNextInteraction = true
+        CredentialStore.install(store)
+        XCTAssertNil(CredentialStore.read(account: account, allowInteraction: true))
+        XCTAssertEqual(CredentialStore.currentProblem, .notAuthorized)
+        XCTAssertNil(CredentialStore.read(account: account))
+        XCTAssertEqual(CredentialStore.read(account: account, allowInteraction: true), "fixture-secret")
+        XCTAssertEqual(store.policies, [true, false, true])
+    }
+
+    private final class InteractionStore: SecretStore, @unchecked Sendable {
+        var policies: [Bool] = []
+        var unlocked = false
+        var denyNextInteraction = false
+        func read(account: String) -> String? { read(account: account, allowInteraction: true) }
+        func read(account: String, allowInteraction: Bool) -> String? {
+            policies.append(allowInteraction)
+            if allowInteraction, denyNextInteraction {
+                denyNextInteraction = false
+                return nil
+            }
+            if allowInteraction { unlocked = true }
+            return unlocked ? "fixture-secret" : nil
+        }
+        func save(_ value: String, account: String) throws {}
+        func delete(account: String) -> Bool { true }
+        func allAccounts() -> [String] { [] }
+        var unreadableReason: CredentialStoreProblem? { unlocked ? nil : .notAuthorized }
+        func auditableAccounts() -> [String]? { nil }
+        func existsForAudit(_ account: String) -> Bool? { nil }
     }
 
     func testInjectedDirectoryDoesNotTouchTheRealLocation() throws {

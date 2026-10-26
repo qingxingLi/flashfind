@@ -279,7 +279,24 @@ extension AppModel {
         // 那条结果就不在列表里了，留着它会对着空列表继续喊「无法打开文件」。
         openFailure = nil
         let text = query, revision = contextRevision, searchScope = scope
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { results = []; selected = nil; searching = false; return }
+        // ★ 真正发给设备的是「关键词 + 类型词」，不一定是输入框里的原文。
+        //
+        // 类型限定（`SearchTokenBar`）不走新的过滤机制，而是拼成一个格式词
+        // 交给既有的 `SearchQueryParser` —— 用户在框里打「pdf」走的是同一条路，
+        // 所以行为一致。只选了类型没打关键词时，就只发类型词（看某类型的全部文件）。
+        let searchText = tokenBar.searchText(keyword: query)
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { results = []; selected = nil; searching = false; return }
+        // ★ 命令模式（`/` 唤起）**不发起真实搜索**。
+        //
+        // 那时的文本是「指令」，不是关键词：把它当关键词发给设备，
+        // 设备会去搜一个叫「/」或者叫「照片」的东西，白白占一次设备侧检索。
+        // 面板里选完位置之后，`applySearchTarget` 会带着关键词再调一次
+        // `changedQuery`，那时才是真搜。
+        if isCommandModeActive {
+            results = []; selected = nil; searching = false
+            resultsAreCurrent = false; displayedRevision = nil
+            return
+        }
         if AppEnvironment.isPreview {
             results = AppEnvironment.fixtures(for: query); selected = results.first?.id
             let active = fixtureMode ? nasConnections.filter { connectionStates[$0.id]?.canSearch == true } : nasConnections
@@ -312,7 +329,12 @@ extension AppModel {
         // 数据文件夹里，本就不该被那条限制挡住——否则用户设了文件夹就搜不到 app，
         // 而这个功能在他看来是坏的。
         let includeLocalSide = localEnabled && scope != .nas
-        let requested = SearchRequestPlan(
+        // ★ 位置限定（`/` 命令面板选的那个位置）参与请求计划。
+        //
+        // 三层防护的第一层在这里：根必须在本来源**已授权**的搜索根之内，
+        // 不在就不请求那个来源。第二层在 `NASSearchProvider`（与授权根求交集），
+        // 第三层在 Dart 核心（与已授权 scope 求交集）。
+        let plan = SearchRequestPlan(
             localSourceID: SearchSource.local.id,
             appSourceID: SearchSource.apps.id,
             includeLocal: includeLocalSide,
@@ -322,11 +344,20 @@ extension AppModel {
                 (sourceID: id,
                  ready: provider.ready,
                  enabled: nasSources.first(where: { $0.id == id })?.enabled == true)
-            }).sourceIDs
+            },
+            target: tokenBar.location,
+            authorizedRoots: nasSources.reduce(into: [String: [String]]()) { map, config in
+                map[config.sourceID] = config.scopes
+            })
+        let rootLimit = plan.rootLimit
         // ★ 「还在搜吗」的判据搬到 Core 的 `SearchCompletionTracker`。
         // 原来是一行内联的 `!requested.isSubset(of: terminal)`：断开一台正在搜的 NAS
         // 之后，如果那个来源永远不发终态，这条判据就永远为真 —— 结果行都出来了，
         // 状态栏却一直显示「正在搜索」。搬到 Core 之后这条判据才可能被断言。
+        //
+        // ★ 名字仍是 `requested`：它就是「本次请求了哪些来源」这个集合。
+        // （位置限定让它可能只有一两个来源，但判据的形式不变。）
+        let requested = plan.sourceIDs
         var completion = SearchCompletionTracker(requested: requested)
         searchTask=Task {
             // 本地立即出结果；NAS 走 Coordinator 的 600ms 防抖，
@@ -338,7 +369,10 @@ extension AppModel {
             // ★ queryID 由这里生成并一路传到底（P1-01）：
             // 不传的话 Coordinator 会另造一个，于是界面与协调层各持一个 ID，
             // 取消、旧结果迟到、并发返回时根本对不上谁是谁。
-            providerCoordinator?.searchDebounced(text,sources:requested,queryID:id) { [weak self] event in
+            //
+            // ★ `rootLimit` 一路带到底：它会让**设备侧**只扫那一个根，
+            // 所以「减少检索时间」是真的，不是界面层过滤。
+            providerCoordinator?.searchDebounced(searchText,sources:requested,rootLimit:rootLimit,queryID:id) { [weak self] event in
                 guard let self,self.queryID==id,self.contextRevision==revision else { return }
                 self.recordProviderEvent(event)
                 // 批量合并。逐条 firstIndex + 逐条 append/排序是 O(n²)：
@@ -369,7 +403,8 @@ extension AppModel {
         }
     }
     func publishCurrent(_ text: String, _ searchScope: SearchScope, _ revision: UInt64) {
-        displayedQuery = text; displayedScope = searchScope; displayedRevision = revision; resultsAreCurrent = true
+        displayedQuery = text; displayedScope = searchScope; displayedRevision = revision
+        displayedTokenBar = tokenBar; resultsAreCurrent = true
     }
     func moveResultSelection(_ delta: Int) {
         guard canUseDisplayedResults, !results.isEmpty else { return }

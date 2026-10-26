@@ -15,12 +15,14 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     private static let lock = NSLock()
     private static var shared: QuickLookPreview?
     private var urls: [URL] = []
+    @MainActor private static let controller = QuickLookPanelController()
 
     @MainActor
     static func present(_ url: URL) {
         lock.lock()
         let host = shared ?? QuickLookPreview()
         shared = host
+        let sameItem = host.urls.first == url
         host.urls = [url]
         lock.unlock()
 
@@ -29,9 +31,25 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
             if !NSWorkspace.shared.open(url) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             return
         }
-        panel.dataSource = host
-        panel.delegate = host
+        if panel.isVisible, sameItem {
+            panel.orderOut(nil)
+            return
+        }
+        controller.dataSource = host
+        if NSApp.nextResponder !== controller {
+            controller.nextResponder = NSApp.nextResponder
+            NSApp.nextResponder = controller
+        }
+        panel.updateController()
         panel.makeKeyAndOrderFront(nil)
+        panel.reloadData()
+    }
+
+    func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 49,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return false }
+        panel.orderOut(nil)
+        return true
     }
 
     private func snapshot() -> [URL] {
@@ -51,4 +69,25 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     func previewPanelDidClose(_ panel: QLPreviewPanel!) {
         Self.lock.lock(); urls = []; Self.lock.unlock()
     }
+}
+
+/// 控制权属于主线程响应链；数据源保留独立的加锁实现，供 Quick Look 后台回调。
+@MainActor
+private final class QuickLookPanelController: NSResponder {
+    var dataSource: QuickLookPreview?
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { dataSource != nil }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = dataSource
+        panel.delegate = dataSource
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
+        panel.delegate = nil
+    }
+
+
+
 }

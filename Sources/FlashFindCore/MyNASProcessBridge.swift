@@ -226,7 +226,11 @@ public extension MyNASBridgeTransport {
     ///      界面报「设备返回的分页数据不完整（IncompleteResponse）」。
     ///      事件与字段没有增删，但同一输入的结果状态会变（失败 → 正常完成），
     ///      所以仍要升号。
-    public static let expectedCoreRevision = 6
+    /// 7 —— `search` 命令新增**可选**字段 `roots`：把本次搜索限定到已授权
+    ///      根的子集。缺它 ⇒ 行为与从前完全一致；带了它而旧核心不认识 ⇒
+    ///      旧核心会忽略这个限定，表现为「界面显示了限定位置，设备却仍在
+    ///      扫全部共享」——所以必须升号，否则这个失配会静默发生。
+    public static let expectedCoreRevision = 7
 
     /// 是否已经核对过修订号（每个核心进程只核对第一条消息）。
     private var didCheckRevision = false

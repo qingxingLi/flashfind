@@ -35,11 +35,11 @@ public enum CredentialStoreProblem: Sendable, Equatable {
 
 /// 凭据后端抽象。调用方只认这个协议，换后端不动调用点。
 ///
-/// 已实现的后端：`InMemorySecretStore`（默认、测试）、`FileSecretStore`（当前生产）、
-/// `KeychainSecretStore`（已实现，**暂未装配**）。
+/// GUI 使用钥匙串，文件后端用于旧凭据迁移与 CLI，内存后端用于测试。
 public protocol SecretStore: Sendable {
     func save(_ value: String, account: String) throws
     func read(account: String) -> String?
+    func read(account: String, allowInteraction: Bool) -> String?
     /// 删除。删不存在的条目**也算成功**——移除来源时会无条件调用。
     @discardableResult func delete(account: String) -> Bool
     func allAccounts() -> [String]
@@ -51,6 +51,12 @@ public protocol SecretStore: Sendable {
     /// 条目是否存在（判断「删了一条不存在的」要不要算变更）。
     /// 钥匙串后端返回 `nil` 表示不查：宁可不报变更，也不额外弹一次窗。
     func existsForAudit(_ account: String) -> Bool?
+}
+
+public extension SecretStore {
+    func read(account: String, allowInteraction: Bool) -> String? {
+        read(account: account)
+    }
 }
 
 /// 进程内后端。测试用，也是未装配任何后端时的默认落点。

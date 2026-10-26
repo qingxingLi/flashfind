@@ -40,6 +40,7 @@
     "UnsafeEndpoint",
     "UnsafeLogicalPath",
     "UnsupportedApi",
+    "UnsupportedQuery",
     "UnsupportedSearchNoFallback",
     "UnsupportedVendor",
     "UnverifiedAdapter"

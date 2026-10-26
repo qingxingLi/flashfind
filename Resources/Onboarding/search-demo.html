@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'">
+<title>闪寻 · 搜索演示</title>
+<style>
+:root{color-scheme:light dark;--bg:#f5f5f7;--panel:#fff;--text:#202124;--sub:#70747c;--line:#e4e5e9;--accent:#007aff;--select:#eaf3ff;--key:#eceef2}
+*{box-sizing:border-box}body{margin:0;font:14px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:var(--bg);color:var(--text)}
+main{max-width:860px;margin:auto;padding:28px 32px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}header h1{font-size:18px;margin:0;font-weight:600}header span{font-size:12px;color:var(--sub)}
+.chapters{display:flex;gap:24px;margin:20px 0;color:var(--sub);font-size:12px}.chapter{display:flex;align-items:center;gap:7px}.dot{width:6px;height:6px;border-radius:50%;background:var(--line)}.chapter.active{color:var(--accent)}.active .dot{background:var(--accent)}
+.coach{height:68px}h2{font-size:21px;margin:0 0 8px;font-weight:600;letter-spacing:-.4px}#detail{color:var(--sub);line-height:1.5;margin:0;font-size:13px}
+.search-panel{position:relative;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 12px 35px #0000000d;overflow:hidden;margin:8px 0 17px}
+.search-bar{height:68px;display:flex;gap:10px;align-items:center;padding:0 22px}.magnifier{height:18px;width:18px;border:2px solid var(--sub);border-radius:50%;position:relative;margin-right:7px}.magnifier:after{content:"";position:absolute;bottom:-5px;right:-5px;width:8px;height:2px;background:var(--sub);transform:rotate(45deg)}
+#tokens{display:flex;gap:6px;flex-shrink:0}.token{color:var(--accent);font-size:14px;padding:5px 8px;border-radius:6px;background:var(--select)}.query{font-size:22px;min-width:0;display:flex;align-items:center;flex:1}.placeholder{color:var(--sub);font-size:20px;opacity:.6}.caret{height:24px;width:2px;background:var(--accent);margin-left:2px;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}.search-bar small{font-size:11px;color:var(--sub)}.results{height:206px;border-top:1px solid var(--line);padding:8px}.empty{height:100%;display:grid;place-content:center;color:var(--sub);text-align:center;gap:8px}.empty strong{font-weight:400;font-size:14px}.empty span{font-size:12px}
+.row{display:flex;align-items:center;gap:12px;border-radius:8px;padding:10px 12px;min-height:58px}.row.selected{background:var(--select)}.file-icon{display:grid;place-content:center;width:35px;height:35px;background:var(--key);border-radius:8px;font-size:21px}.row.selected .file-icon{background:var(--panel)}.row-title{font-size:14px}.row-subtitle{color:var(--sub);font-size:11px;margin-top:4px}.row .number{margin-left:auto}.menu .row{min-height:34px;padding:6px 12px}.menu{display:grid;grid-template-columns:1fr 1fr;gap:1px 8px}.menu.location{display:block}
+kbd{font-family:inherit;font-size:11px;min-width:23px;padding:3px 6px;border:1px solid var(--line);border-radius:5px;background:var(--key);box-shadow:0 1px 0 var(--line);display:inline-block;text-align:center}.keys{display:flex;gap:20px;color:var(--sub);font-size:12px;align-items:center;min-height:25px}.keys .hot{color:var(--accent)}.hot kbd{background:var(--select);border-color:var(--accent);color:var(--accent)}
+#preview{position:absolute;inset:12px 130px 12px;background:var(--panel);box-shadow:0 5px 28px #0003;border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:2}#preview[hidden]{display:none}.art{background:linear-gradient(140deg,#a5c3ee,#4a6ba5);width:90px;height:90px;border-radius:12px;display:grid;place-content:center;color:white;font-size:48px}#preview strong{font-weight:500}#preview small{color:var(--sub);font-size:11px}#preview .close-preview{position:absolute;right:8px;top:8px;border:0;background:none;color:var(--sub);font-size:18px;padding:2px 6px;cursor:pointer}
+footer{display:flex;align-items:center;gap:8px;margin-top:22px;padding-top:16px;border-top:1px solid var(--line)}button{font:inherit;border:1px solid var(--line);border-radius:7px;padding:7px 13px;background:var(--panel);color:var(--text);cursor:pointer}button:hover{filter:brightness(.97)}button:focus-visible{outline:3px solid #007aff55;outline-offset:2px}button.primary{background:var(--accent);color:white;border-color:transparent;padding:8px 21px}#status{flex:1;font-size:11px;color:var(--sub);text-align:right;margin-right:10px}.caption{font-size:11px;color:var(--sub);margin:12px 0 0}
+@media(prefers-color-scheme:dark){:root{--bg:#202124;--panel:#2b2d31;--text:#efeff1;--sub:#a6a9b0;--line:#41434a;--accent:#5aa6ff;--select:#293e59;--key:#36383f}.search-panel{box-shadow:0 12px 35px #0003}button.primary{background:#087bf3;color:#fff}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}.caret{opacity:1}}
+@media(max-width:620px){main{padding:20px 18px}.chapters{gap:12px}.keys{gap:10px;flex-wrap:wrap}.search-bar{padding:0 15px}#preview{inset:12px 24px}h2{font-size:18px}.row-title{font-size:12px}header span{display:none}.search-bar small{display:none}.token{font-size:12px}.query{font-size:19px}.coach{height:80px}footer{flex-wrap:wrap}#status{min-width:100px}}
+</style>
+</head>
+<body data-document-key="9">
+<main>
+<header><h1>这就是闪寻的搜索框</h1><span>约 15 秒，快速看一遍</span></header>
+<nav class="chapters" aria-label="演示进度"><span class="chapter" data-chapter="0"><i class="dot"></i>输入搜索</span><span class="chapter" data-chapter="1"><i class="dot"></i>空格预览</span><span class="chapter" data-chapter="2"><i class="dot"></i>选择类型</span><span class="chapter" data-chapter="3"><i class="dot"></i>限定位置</span></nav>
+<section class="coach" aria-live="polite"><h2 id="hint"></h2><p id="detail"></p></section>
+<section class="search-panel" tabindex="0" aria-label="示例搜索浮窗">
+<div class="search-bar"><span class="magnifier" aria-hidden="true"></span><div id="tokens"></div><div class="query" role="searchbox" aria-label="演示搜索框" aria-readonly="true"><span id="query"></span><span id="placeholder" class="placeholder">搜索文件与文件夹</span><span class="caret" aria-hidden="true"></span></div><small id="count"></small></div>
+<div id="results" class="results" aria-label="示例结果"></div>
+<div id="preview" role="dialog" aria-label="空格快速预览" hidden><button class="close-preview" aria-label="关闭预览">×</button><div id="preview-art" class="art" aria-hidden="true">♫</div><strong id="preview-title">周杰伦 - 晴天.mp3</strong><small id="preview-kind">音频文件预览示意 · 不播放真实音频</small><kbd>Space 再按一次关闭</kbd></div>
+</section>
+<div class="keys"><span id="arrow-key"><kbd>↑</kbd> <kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span id="space-key"><kbd>Space</kbd> 预览</span><span><kbd>⌘ ↵</kbd> 访达定位</span></div>
+<footer><button id="replay" type="button">重播</button><button id="pause" type="button">暂停</button><span id="status" role="status">正在演示</span><button id="continue" type="button" class="primary">继续</button></footer>
+<p class="caption">演示使用示例文件。英文状态下输入 / 选择类型，输入 \ 选择位置；实际结果取决于你的搜索来源。</p>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const music = [ ['♫','周杰伦 - 晴天.mp3','音乐 / 周杰伦'], ['♫','周杰伦 - 七里香.flac','音乐 / 周杰伦'], ['▧','周杰伦演唱会海报.jpg','图片 / 演唱会'] ];
+const docs = [ ['▤','周杰伦演唱会策划.docx','项目资料 / 策划'], ['▤','周杰伦演唱会预算.xlsx','项目资料 / 预算'] ];
+const fileTypes = ['pdf','word','excel','ppt','照片','视频','音乐','压缩包','文档'];
+const positions = ['全部位置','此 Mac','项目资料'];
+// 每帧是完整状态：暂停、重播或手动预览都不会留下上一环节的限定。
+const frames = [
+ {duration:1000,chapter:0,hint:'请输入「周杰伦」搜索',detail:'直接输入名字、关键词，就能找到相关文件。'},
+ {duration:180,chapter:0,query:'周',hint:'请输入「周杰伦」搜索'},
+ {duration:180,chapter:0,query:'周杰',hint:'请输入「周杰伦」搜索'},
+ {duration:1000,chapter:0,query:'周杰伦',rows:music,hint:'输入即搜，结果就在下方',detail:'用 ↑↓ 选择，按回车打开文件。'},
+ {duration:1100,chapter:1,query:'周杰伦',rows:music,hint:'选中结果，按空格预览',detail:'试试按一下 Space，无需打开文件就能先看一眼。',hot:'space'},
+ {duration:1800,chapter:1,query:'周杰伦',rows:music,preview:true,hint:'这就是空格快速预览',detail:'再按一次 Space 关闭预览，继续选择文件。',hot:'space'},
+ {duration:1000,chapter:2,hint:'闪寻还支持类型和位置搜索',detail:'清空关键词后，英文输入 / 选择文件类型。'},
+ {duration:1300,chapter:2,query:'/',mode:'fileType',hint:'输入 /，选择「文档」',detail:'按列表旁的数字 9 直接选中，也可以用方向键和回车。'},
+ {duration:1000,chapter:2,tokens:['文档'],hint:'已选「文档」，再输入关键词',detail:'类型会保留在搜索框前面，接下来只查找文档。'},
+ {duration:1300,chapter:2,tokens:['文档'],query:'周杰伦',rows:docs,hint:'同样的关键词，现在只找文档',detail:'音乐、图片已排除；类型和位置还可以叠加。'},
+ {duration:1500,chapter:3,query:'\\',tokens:['文档'],mode:'location',hint:'输入 \\，选择在哪个位置搜索',detail:'示例：按数字 3 选择 NAS 上的「项目资料」。'},
+ {duration:1000,chapter:3,tokens:['项目资料','文档'],hint:'位置已锁定为「项目资料」',detail:'关键词已清空，位置和类型会一起保留。'},
+ {duration:1400,chapter:3,tokens:['项目资料','文档'],query:'周杰伦',rows:docs,hint:'在指定位置，只搜索你想要的类型',detail:'实际列表显示你已连接、已选择的搜索位置。'},
+ {duration:0,chapter:3,tokens:['项目资料','文档'],query:'周杰伦',rows:docs,hint:'已经会用了，继续设置吧',detail:'输入即搜 · 空格预览 · / 选类型 · \\ 选位置。随时可以重播。'}
+];
+let index = 0, timer = null, paused = false, selected = 0;
+function row(icon,title,subtitle,number,isSelected) {
+ const node = document.createElement('div'); node.className = 'row' + (isSelected ? ' selected':'');
+ if (icon) { const symbol = document.createElement('span'); symbol.className='file-icon'; symbol.textContent=icon; node.append(symbol); }
+ const labels=document.createElement('div'); const name=document.createElement('div'); name.className='row-title';name.textContent=title;labels.append(name);
+ if (subtitle) {const sub=document.createElement('div');sub.className='row-subtitle';sub.textContent=subtitle;labels.append(sub);} node.append(labels);
+ if(number){const key=document.createElement('kbd');key.className='number';key.textContent=number;node.append(key);} return node;
+}
+function render() {
+ const frame=frames[index]; selected=0;
+ $('hint').textContent=frame.hint; $('detail').textContent=frame.detail || '看搜索框中的输入和结果变化。';
+ $('query').textContent=frame.query || ''; $('placeholder').hidden=Boolean(frame.query || frame.tokens);
+ $('tokens').replaceChildren(...(frame.tokens || []).map(label=>{const node=document.createElement('span');node.className='token';node.textContent=label+' ×';return node;}));
+ const results=$('results');results.replaceChildren();results.className='results';
+ if(frame.mode){results.classList.add('menu');if(frame.mode==='location')results.classList.add('location');
+ const items=frame.mode==='fileType'?fileTypes:positions;
+ items.forEach((title,i)=>results.append(row(null,title,frame.mode==='location' && i===2?'示例 NAS':null,i+1,frame.mode==='fileType'?i===8:i===2)));
+ } else if(frame.rows){frame.rows.forEach((item,i)=>results.append(row(...item,null,i===0)));}
+ else {const empty=document.createElement('div');empty.className='empty';const label=document.createElement('strong');label.textContent='一个搜索框，找到文件与应用';const note=document.createElement('span');note.textContent='本机 · NAS · 网络文件';empty.append(label,note);results.append(empty);}
+ $('count').textContent=frame.rows?frame.rows.length+' 个示例结果':'';
+ updatePreview(frame.rows?.[0]?.[1] || music[0][1]);
+ $('preview').hidden=!frame.preview;
+ document.querySelectorAll('.chapter').forEach((chapter,i)=>{chapter.classList.toggle('active',i===frame.chapter);if(i===frame.chapter)chapter.setAttribute('aria-current','step');else chapter.removeAttribute('aria-current');});
+ $('space-key').classList.toggle('hot',frame.hot==='space');updateControls();
+}
+function updateControls(){const ended=index===frames.length-1;$('status').textContent=ended?'演示完成，点击继续进入下一环节':paused?'已暂停，可按 Space 预览':'正在演示';$('pause').textContent=paused?'播放':'暂停';$('pause').disabled=ended;}
+function schedule(){clearTimeout(timer);if(paused || !frames[index].duration)return;timer=setTimeout(()=>{index++;render();schedule();},frames[index].duration);}
+function setPaused(value){paused=value;updateControls();schedule();}
+function updatePreview(name){
+ $('preview-title').textContent=name;
+ const audio=/\.(mp3|flac)$/.test(name);
+ $('preview-art').textContent=audio?'♫':'▤';
+ $('preview-kind').textContent=audio?'音频文件预览示意 · 不播放真实音频':'文稿快速预览示意 · 示例文件';
+}
+function togglePreview(){if(!frames[index].rows)return;setPaused(true);$('preview').hidden=!$('preview').hidden;updatePreview(frames[index].rows[selected][1]);}
+$('pause').addEventListener('click',()=>setPaused(!paused));
+$('replay').addEventListener('click',()=>{clearTimeout(timer);index=0;paused=false;render();schedule();});
+$('preview').querySelector('button').addEventListener('click',()=>{$('preview').hidden=true;});
+$('continue').addEventListener('click',()=>{clearTimeout(timer);paused=true;
+ if(window.webkit?.messageHandlers?.onboarding)window.webkit.messageHandlers.onboarding.postMessage('continue');
+ else {$('hint').textContent='下一环节：设置搜索权限';$('detail').textContent='在闪寻中，这里会返回原来的设置引导。';$('status').textContent='演示结束';$('preview').hidden=true;}
+});
+document.addEventListener('keydown',event=>{
+ if(event.target.closest('button'))return;
+ if(event.code==='Space'){event.preventDefault();togglePreview();}
+ if(event.key==='Escape' && !$('preview').hidden){event.preventDefault();$('preview').hidden=true;}
+ if((event.key==='ArrowDown'||event.key==='ArrowUp')&&frames[index].rows){event.preventDefault();setPaused(true);const rows=frames[index].rows;selected=(selected+(event.key==='ArrowDown'?1:-1)+rows.length)%rows.length;Array.from($('results').children).forEach((node,i)=>node.classList.toggle('selected',i===selected));if(!$('preview').hidden)updatePreview(rows[selected][1]);}
+});
+window.addEventListener('pagehide',()=>clearTimeout(timer));
+render();schedule();
+</script>
+</body>
+</html>

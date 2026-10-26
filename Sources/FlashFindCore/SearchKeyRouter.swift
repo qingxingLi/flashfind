@@ -17,15 +17,34 @@ public struct SearchKeyContext: Equatable, Sendable {
     public var inResults: Bool
     /// 输入法正在组字（有 marked text）
     public var isComposing: Bool
+    /// 搜索框处于**命令模式**（文本以 `/` 开头，命令面板已展开）。
+    ///
+    /// ★ 这个上下文存在的意义：命令模式下回车是「执行这条命令」，
+    /// 不是「打开下面那条选中的结果」。不区分的话，用户在面板里选中一个位置
+    /// 按回车，去打开的却是下面那条文件结果 —— 面板看着在，回车却不听它的。
+    public var inCommandMode: Bool
+    /// 搜索框最前面有没有已选定的限定（位置 / 类型）。
+    public var hasSearchToken: Bool
+    /// 输入框里除限定之外还有没有关键词。
+    ///
+    /// ★ 只有**关键词为空**时删除键才轮得到限定：那时它删的是用户刚打的字，
+    /// 抢过来会变成「输入框删不动字」。
+    public var keywordEmpty: Bool
 
     public init(keyCode: UInt16, hasCommand: Bool, hasOtherModifier: Bool,
-                inSearchField: Bool, inResults: Bool, isComposing: Bool) {
+                inSearchField: Bool, inResults: Bool, isComposing: Bool,
+                inCommandMode: Bool = false,
+                hasSearchToken: Bool = false,
+                keywordEmpty: Bool = true) {
         self.keyCode = keyCode
         self.hasCommand = hasCommand
         self.hasOtherModifier = hasOtherModifier
         self.inSearchField = inSearchField
         self.inResults = inResults
         self.isComposing = isComposing
+        self.inCommandMode = inCommandMode
+        self.hasSearchToken = hasSearchToken
+        self.keywordEmpty = keywordEmpty
     }
 }
 
@@ -38,6 +57,18 @@ public enum SearchKeyRoute: Equatable, Sendable {
     case copyPath       // ⌘C 复制路径
     case hide           // esc 隐藏浮窗
     case passThrough    // 交还给系统与文本控件
+    // ── 命令模式（`/` 唤起命令面板）──
+    /// ↑ / ↓ 在命令候选之间移动。
+    case commandMove(Int)
+    /// ↩ 执行当前选中的命令。
+    case commandSubmit
+    /// esc 退出命令模式（回到普通搜索，而不是关掉整个浮窗）。
+    case commandCancel
+    /// 数字键 0–9 直接选中对应候选。
+    case commandPick(Int)
+    // ── 前置限定 ──
+    /// 删除键删掉搜索框最前面那排限定里的一个。
+    case deleteSearchToken
 }
 
 /// 搜索浮窗的按键决策。
@@ -66,6 +97,28 @@ public enum SearchKeyRouter {
             return .passThrough
         }
 
+        // ★ 命令模式先于所有普通路由判定。
+        //
+        // 顺序不能反：命令模式下 ↩ 是「执行命令」，↑↓ 是「在候选之间移动」，
+        // esc 是「退出命令模式」。若先走普通分支，回车会去打开文件结果，
+        // esc 会把整个浮窗关掉——命令面板将完全无法用键盘操作。
+        if context.inCommandMode {
+            switch context.keyCode {
+            case 125, 116: return .commandMove(1)
+            case 126, 114: return .commandMove(-1)
+            case 36, 76: return .commandSubmit
+            case 53: return .commandCancel
+            default:
+                // ★ 命令模式下数字键**一律被接管**，不进输入框。
+                //
+                // 手指就在数字键上：面板已经把编号写在脸上了，还要求用户
+                // 用方向键挪到那一条再回车，等于白给的信息不用。
+                // 代价是筛不出名字里带数字的位置（极少见），可以接受。
+                if let digit = Self.digitKeyCodes[context.keyCode] { return .commandPick(digit) }
+                return .passThrough
+            }
+        }
+
         switch context.keyCode {
         // ↑↓ 在搜索区内**一律由我们接管**（包括焦点已在结果表时）。
         //
@@ -87,8 +140,35 @@ public enum SearchKeyRouter {
         // 之类的空格会被事件监视器吞掉转成预览 —— 表现为「搜索框打不出空格」。
         // 空格是文件名的常见字符，必须放行给文本系统。
         case 49: return context.inSearchField ? .passThrough : .quickLook
+        // ★ 删除键删掉前置的限定，但只在「没得删的字」时才轮到它。
+        //
+        // 关键词还在 ⇒ 删除键属于文本编辑，抢过来就是「输入框删不动字」。
+        case 51: return context.hasSearchToken && context.keywordEmpty ? .deleteSearchToken : .passThrough
         case 53: return .hide
         default: return .passThrough
         }
     }
+
+    /// 主键盘区数字键的虚拟键码 → 数字。
+    ///
+    /// 键码不是连续的（5 和 6 之间隔着 22/23 的错位），查表比算偏移可靠。
+    private static let digitKeyCodes: [UInt16: Int] = [
+        29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9,
+    ]
+}
+
+/// 方向键选中结果后，Space 作用于结果；重新输入时回到文本编辑。
+public struct SearchResultNavigation: Equatable, Sendable {
+    public private(set) var isActive = false
+    public init() {}
+
+    public mutating func record(_ route: SearchKeyRoute, hasResult: Bool) {
+        switch route {
+        case .move: isActive = hasResult
+        case .quickLook: break
+        default: isActive = false
+        }
+    }
+
+    public mutating func reset() { isActive = false }
 }

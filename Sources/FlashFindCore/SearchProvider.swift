@@ -3,6 +3,9 @@ import Foundation
 public enum SearchSourceType: String, Sendable { case local, nas }
 public enum SearchOpenTarget: Hashable, Sendable {
     case mountedFile(URL), smbLocation(URL), unavailable
+    /// 已验证的站点网页地址。打开时可优先匹配同站点 WebDAV 挂载，
+    /// 但不能凭同名主机/共享推断成 SMB 路径。
+    case webURL(URL)
 }
 public struct SearchSource: Identifiable, Hashable, Sendable {
     public let id: String
@@ -258,6 +261,24 @@ public struct ProviderEvent: Sendable {
     /// 编译期毫无提示，运行时表现为跨 owner 照样互相取消。
     func search(_ text: String, queryID: UUID, owner: SearchOwner,
                 emit: @escaping @MainActor (ProviderEvent) -> Void) async
+    /// 带**位置限定**的搜索入口。
+    ///
+    /// ★ `rootLimit` 是**本次调用**的参数，不是 provider 上的持久状态。
+    /// 这条不能含糊：GUI 与 MCP 共用同一批 provider 实例与同一个调度器
+    /// （见 `SearchScheduler` 与 `LocateExecution`），做成持久可变状态就会
+    /// 互相污染 —— 用户在界面上选了「照片」，Agent 那边的搜索也会跟着
+    /// 只扫照片，而 Agent 侧从头到尾没要求过这件事。
+    ///
+    /// ★ 它**必须是协议要求**，不能只是 protocol extension 里的方法：
+    /// 通过 `any SearchProvider` 调用时，非要求的扩展方法走静态派发，
+    /// `NASSearchProvider` 里写的实现根本不会被调用——编译期毫无提示，
+    /// 运行时表现为「界面显示限定在照片，设备却仍在扫全部共享」。
+    ///
+    /// - Parameter rootLimit: 限定在哪个来源的哪些根里搜；`nil` = 不限定。
+    ///   provider 只在 `rootLimit.sourceID` 与自己匹配时才应用它。
+    func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                rootLimit: SearchRootLimit?,
+                emit: @escaping @MainActor (ProviderEvent) -> Void) async
     func cancel(queryID: UUID)
 }
 
@@ -266,6 +287,17 @@ extension SearchProvider {
     public func search(_ text: String, queryID: UUID, owner: SearchOwner,
                        emit: @escaping @MainActor (ProviderEvent) -> Void) async {
         await search(text, queryID: queryID, emit: emit)
+    }
+
+    /// 位置限定的默认实现：**忽略限定**，等价于不带限定的搜索。
+    ///
+    /// 本机与应用程序两条路没有「按根下推」这回事（它们扫的是本地目录，
+    /// 不是设备的共享），所以忽略限定就是正确行为。真正要下推的只有
+    /// NAS 一侧，`NASSearchProvider` 覆写了这一条。
+    public func search(_ text: String, queryID: UUID, owner: SearchOwner,
+                       rootLimit: SearchRootLimit?,
+                       emit: @escaping @MainActor (ProviderEvent) -> Void) async {
+        await search(text, queryID: queryID, owner: owner, emit: emit)
     }
 }
 public enum NASQueryPolicy {

@@ -14,7 +14,7 @@ private let nasFixtureSource = SearchSource(id: "nas-fixture", name: "NAS 来源
 
 private func nasFixtureConfig() -> NASSourceConfig {
     NASSourceConfig(id: nasFixtureSource.id, name: nasFixtureSource.name, vendor: .synology,
-                    host: "192.168.1.96", port: 5001, username: "flashfind", scope: "/示例共享")
+                    host: "192.168.1.96", port: 5001, username: "nasuser", scope: "/示例共享")
 }
 
 /// 测试闸门：让「取消发生在批次到达之前」变成**确定的顺序**，而不是靠 sleep 赌调度。

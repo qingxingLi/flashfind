@@ -101,9 +101,19 @@ public enum CredentialStore {
     /// 读出密文。**身份不匹配时返回 `nil`**——旧要与新目标不符就是不存在的凭据。
     public static func read(account: String, identity: CredentialIdentity? = nil,
                             allowInteraction: Bool = false) -> String? {
-        _ = allowInteraction
+        guard !account.isEmpty else { return nil }
         lock.lock(); let store = backend; lock.unlock()
-        guard let raw = store.read(account: account), !raw.isEmpty else { return nil }
+        var value = store.read(account: account, allowInteraction: allowInteraction)
+        if value == nil, allowInteraction, store is KeychainSecretStore,
+           store.unreadableReason == nil {
+            // 旧凭据按当前登录的账号迁移；启动、设置渲染和自动重连均不会进入这里。
+            migrateLegacyPlaintext()
+            guard store.unreadableReason == nil else { return nil }
+            consolidateIntoVault(accounts: [account])
+            migrateKeychainTier(accounts: [account])
+            value = store.read(account: account, allowInteraction: true)
+        }
+        guard let raw = value, !raw.isEmpty else { return nil }
         guard let identity else { return raw }
         return CredentialEnvelope.unwrap(raw, identity: identity)
     }

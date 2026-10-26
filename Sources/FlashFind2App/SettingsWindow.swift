@@ -13,6 +13,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var hosting: NSHostingController<AnyView>?
+    private var isPresented = false
+    var presentedWindow: NSWindow? { isPresented ? window : nil }
     /// 当前停留的页面。切页不重建窗口，避免丢失滚动位置。
     private var page: SettingsPane = .search
     /// 关闭时要用它把搜索浮窗放回来（见 `restoreSearchPanelIfNeeded`）。
@@ -21,6 +23,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     func show(model: AppModel, page requested: SettingsPane) {
         page = requested
         self.model = model
+        isPresented = true
         // 打开设置时收起搜索浮窗：它浮在屏幕上方且层级更高，
         // 不收起来会盖住设置窗口的上半部分——包括「添加搜索来源」按钮，
         // 用户看到的就是「点不到」。
@@ -54,6 +57,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        isPresented = false
         // 关闭窗口只隐藏，不销毁：再次打开时保持位置与大小。
         window?.orderOut(nil)
         restoreSearchPanelIfNeeded(closing: notification.object as? NSWindow, model: model)
@@ -72,6 +76,8 @@ final class NASWizardWindow: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private var hosting: NSHostingController<AnyView>?
+    private var isPresented = false
+    var presentedWindow: NSWindow? { isPresented ? window : nil }
     /// 关闭窗口时需要收回这次连接留下的一切，所以要拿到模型。
     private weak var model: AppModel?
     /// 每次打开向导递增一次，用作视图标识。
@@ -97,6 +103,7 @@ final class NASWizardWindow: NSObject, NSWindowDelegate {
         // 同上：向导窗口在屏幕中央，浮窗会盖住它的顶部（含地址输入区）。
         model.hideSearch()
         self.model = model
+        isPresented = true
         presentationSeq += 1
         let content = AnyView(NASSourceWizardView(model: model).id(presentationSeq))
         if let hosting, let window {
@@ -120,6 +127,7 @@ final class NASWizardWindow: NSObject, NSWindowDelegate {
     func close() { window?.close() }
 
     func windowWillClose(_ notification: Notification) {
+        isPresented = false
         // 走红绿灯关闭时也要把连接流程收干净。
         // 否则后台的 discover/login Task 照跑，几秒后还会回来改状态；
         // 已建立的 DSM 会话与暂存的内存密码也一直留着。
