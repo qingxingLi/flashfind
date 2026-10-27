@@ -43,7 +43,10 @@ public enum SearchTarget: Hashable, Sendable {
 /// 用户手指已经在键盘上，顺着肌肉记忆敲 `\` 要的是「去哪儿」；
 /// 而 `/` 在命令行里是「参数开关」（`dir /s`），要的是「按什么条件筛」。
 /// 两种斜杠各管一件事，位置与类型因此可以叠加。
-public enum SearchCommandKind: Hashable, Sendable {
+/// ★ 带 `String` 原始值不是为了显示，是为了**落盘**：用户的排序与快捷键
+/// 要按面板种类分开存（`SearchQuickPickSettings`），存储键用 `rawValue`。
+/// 顺带 `CaseIterable` 让「两类都要处理」的代码不必手写两遍枚举。
+public enum SearchCommandKind: String, Hashable, Sendable, CaseIterable {
     /// `\` —— 选搜索位置（此 Mac / 各 NAS 的各搜索根）。
     case location
     /// `/` —— 选文件类型（pdf / word / 照片 …）。
@@ -241,6 +244,18 @@ public enum SearchCommandCatalog {
     /// 候选列表里「打开设置」这一条的命令 ID。
     public static let settingsItemID = "command:openSettings"
 
+    /// 面板一次画得下多少行候选。
+    ///
+    /// ★ 这个数由编号规则反推出来，不能随便定：数字键 1–9 给前九条候选，
+    /// 0 固定给「打开设置」⇒ **最多有十条候选带着看得见的编号**。
+    /// 画得比这少，按下去的数字就指向屏幕外的条目：用户按 7 选中了 A0002，
+    /// 面板上却根本看不到哪一条被选中（2026-10-26 真实报障：OpenList 选了
+    /// 四个文件夹，面板只画出第一个，剩下的三个既看不见也点不到）。
+    ///
+    /// 候选超过这个数时不截断，改为滚动（见 `SearchCommandPaletteView`）：
+    /// 截断等于把超出的位置彻底藏起来，而用户明明配过它们。
+    public static let maximumVisibleRows = SearchCommandNumbering.numberedLimit + 1
+
     /// 构建候选列表。
     ///
     /// 位置面板：全部位置 → 本机 → 按来源顺序列出各来源下的每个搜索根 → 打开设置。
@@ -322,31 +337,64 @@ public enum SearchCommandCatalog {
 /// 于是「打开设置」永远是按 0，与它在列表里的位置无关。
 ///
 /// ★ 第十条及以后没有数字：那时就该继续打字筛选，而不是塞一个要数着按的键。
+///
+/// ## 编号 = 位置，没有第二种来源（1.1.18）
+///
+/// 面板排第几行，这一行就写几。用户拖动排序之后数字**立刻跟着变**
+/// （「此 Mac」从第 1 位拖到第 3 位 ⇒ 它写 3，别的行依次让位），
+/// 因为数字根本不是另一份配置，只是顺序的影子。
+///
+/// 上一版允许给单条「指定固定键」，结果是同一屏里出现「排第 1 却写着 5」：
+/// 用户看不出那个 5 从哪来，拖动之后它也不跟着变。那一版已删掉。
+///
+/// ★ 编号永远按**当前显示的这组候选**算（筛选之后也一样）：面板上写几，
+/// 按下去就选中几。若拿筛选前的表算，用户按 1 会选到一条根本没显示的项。
 public enum SearchCommandNumbering {
+
+    /// 数字键能给到几条候选（1–9）。
+    ///
+    /// ★ 面板一次画得下多少行由它推出来（见 `SearchCommandCatalog.maximumVisibleRows`）：
+    /// 「能按到哪」与「能看见哪」必须是同一件事。
+    public static let numberedLimit = 9
+
+    /// 可供用户选择的数字键。`0` 不在其中 —— 它固定归「打开设置」，
+    /// 让用户把 0 指给某个位置，就等于把兜底入口占掉。
+    public static var availableKeys: [Int] { Array(1...numberedLimit) }
+
+    /// 候选用得着的全部编号（与 `items` 一一对应，没有编号的为 nil）。
+    ///
+    /// 只由**显示顺序**决定：第 1 行是 1 …… 第 9 行是 9，第 10 行起 nil，
+    /// 「打开设置」是 0。
+    /// 一次算出整组而不是「按单个下标算」：编号是整屏的事，
+    /// 少算一个空位就会让后面所有行错位。
+    public static func keys(in items: [SearchCommandItem]) -> [Int?] {
+        var out = [Int?](repeating: nil, count: items.count)
+        var next = 1
+        for index in items.indices {
+            if items[index].id == SearchCommandCatalog.settingsItemID {
+                out[index] = 0
+                continue
+            }
+            guard next <= numberedLimit else { continue }
+            out[index] = next
+            next += 1
+        }
+        return out
+    }
 
     /// 第 `index` 条候选对应哪个数字键。`nil` = 这条没有数字键。
     public static func key(for index: Int, in items: [SearchCommandItem]) -> Int? {
         guard items.indices.contains(index) else { return nil }
-        if items[index].id == SearchCommandCatalog.settingsItemID { return 0 }
-        var ordinal = 0
-        for earlier in items.indices where earlier < index {
-            if items[earlier].id != SearchCommandCatalog.settingsItemID { ordinal += 1 }
-        }
-        return ordinal < 9 ? ordinal + 1 : nil
+        return keys(in: items)[index]
     }
 
     /// 数字键对应第几条候选。`nil` = 这个数字当前没有对应项（按了不做事）。
     public static func index(forKey key: Int, in items: [SearchCommandItem]) -> Int? {
+        guard (0...numberedLimit).contains(key) else { return nil }
         if key == 0 {
             return items.lastIndex { $0.id == SearchCommandCatalog.settingsItemID }
         }
-        guard (1...9).contains(key) else { return nil }
-        var ordinal = 0
-        for (index, item) in items.enumerated() where item.id != SearchCommandCatalog.settingsItemID {
-            ordinal += 1
-            if ordinal == key { return index }
-        }
-        return nil
+        return keys(in: items).firstIndex { $0 == key }
     }
 }
 

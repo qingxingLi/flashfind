@@ -88,6 +88,12 @@ final class AppModel: ObservableObject {
     @Published var tokenBar: SearchTokenBar = .empty
     /// 命令面板里当前选中的候选下标。
     @Published var commandSelection: Int = 0
+    /// 命令面板的候选顺序与数字快捷键（用户可在「设置 ▸ 搜索」里改）。
+    ///
+    /// ★ 判定（怎么重排、谁占哪个数字、什么情况回落到默认）全在 Core 的
+    /// `SearchQuickPickSettings` / `SearchCommandArrangement` / `SearchCommandNumbering`。
+    /// 这里只持有**当前值**并负责落盘 —— 与 `showExperimentalSources` 同一个套路。
+    @Published private(set) var quickPick = SearchQuickPickSettings.empty
     /// 本机这一侧的来源（本机搜索方式、已挂载 SMB 共享、文件夹选择）。
     ///
     /// 状态搬走之后，界面观察的仍是 AppModel —— 所以和前几轮一样必须桥接
@@ -168,6 +174,17 @@ final class AppModel: ObservableObject {
         guard !AppEnvironment.isPreview || fixtureMode else { status = "UI 预览不修改真实设置"; return }
         showExperimentalSources = value
         preferences.set(value, forKey: ExperimentalSources.storageKey)
+    }
+
+    /// 命令面板的顺序/快捷键落了新值：广播 + 落盘。
+    ///
+    /// ★ 写在主文件而不是 extension：`quickPick` 是 `private(set)`，
+    /// setter 只能出现在同一文件里（`showExperimentalSources` 同理）。
+    /// ★ 预览态不写真实偏好 —— 打开预览看一眼不该改掉用户的设置。
+    func applyQuickPick(_ next: SearchQuickPickSettings) {
+        guard !AppEnvironment.isPreview || fixtureMode else { status = "UI 预览不修改真实设置"; return }
+        quickPick = next
+        next.save(to: preferences)
     }
 
     // MARK: 检查更新（实现在 AppModel+UpdateCheck.swift）
@@ -360,6 +377,10 @@ final class AppModel: ObservableObject {
          mountDiscovery: @escaping @Sendable () throws -> [SMBMountCandidate] = { try SMBMountCandidate.discover() }) {
         fixtureMode = AppEnvironment.isPreview && ProcessInfo.processInfo.environment["FF_UI_INTERACTIVE"] == "1"
         self.preferences = fixtureMode ? InMemoryClientPreferences() : (preferences ?? AppEnvironment.defaults)
+        // ★ 紧跟着 preferences 读：命令面板的顺序/快捷键是**用户配置**，
+        //   预览包与截图也要照它渲染（放到后面会被预览分支的 early return 跳过，
+        //   于是「设置里排好了、预览里还是默认顺序」——那正是要拿预览排除的假象）。
+        quickPick = SearchQuickPickSettings.load(from: self.preferences)
         self.credentialAccessAllowed = credentialAccessAllowed && !AppEnvironment.isPreview
         // ★ wizard 必须在下面任何捕获 self 的闭包之前构造好：
         // Swift 的初始化分析把「闭包捕获 self」也算作使用 self，

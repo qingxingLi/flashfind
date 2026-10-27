@@ -50,6 +50,11 @@ parser.add_argument('--app-from-zip',
                          '主二进制仍有 1914 字节差异（LC_UUID 一类）。而「只改 DMG 包装」不该换掉'
                          '用户已经装过的那份二进制：同版本号下出现两个不同的二进制，比不升级更糟。'
                          '此模式下 zip 原样带入，只重做 DMG。')
+parser.add_argument('--arch', choices=('arm64', 'x86_64'), default='arm64',
+                    help='产品架构。arm64（默认）就是本机原生；x86_64 走交叉编译：'
+                         'Swift 用 `--triple`，Dart 核心必须由 x86_64 的 SDK 产出'
+                         '（见 scripts/build_mynas_resources.py --arch），'
+                         '两段架构必须一致——混起来的症状是「能启动、搜索永远失败」。')
 parser.add_argument('--identity', default='-',
                     help='codesign 身份。默认 "-" = ad-hoc（本机没有 Developer ID 证书时的既定做法，'
                          '包能用但不经公证，用户首次打开要右键「打开」）。'
@@ -91,6 +96,42 @@ SEARCH_GLYPH_NAMES = ('ShanXunGlyph.png', 'ShanXunGlyph@2x.png')
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def release_dir(scratch):
+    """release 产物目录。
+
+    本机原生构建落在 `<scratch>/release`；用 `--triple` 交叉编译时 SwiftPM
+    会多插一层 `<arch>-apple-macosx/release`（目录名**不带**系统版本号，
+    所以按前缀 glob 而不是拼 `x86_64-apple-macosx13.0`）。
+    """
+    if args.arch != 'arm64':
+        for candidate in sorted(scratch.glob(args.arch + '-apple-macos*/release')):
+            return candidate
+    return scratch / 'release'
+
+def verify_architectures(app):
+    """包里每个 Mach-O 都必须是目标架构。
+
+    最坏的混搭是「app 是 x86_64、`mynas-core` 是 arm64」：Intel 机器上装得上、
+    开得起来、界面正常，只有搜索永远失败（核心进程根本起不来）。那种问题
+    用户只会说「搜不到东西」，排查成本极高——所以在这里一次性拦住。
+    """
+    targets = ['Contents/MacOS/FlashFind2App',
+               'Contents/Helpers/' + HELPER_NAME,
+               'Contents/Resources/MyNAS/bin/mynas-core',
+               'Contents/Resources/MyNAS/native/TrustHTTP']
+    found = {}
+    for rel in targets:
+        result = subprocess.run(['lipo', '-archs', str(app / rel)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        archs = result.stdout.split()
+        found[rel] = archs
+        if args.arch not in archs:
+            record['architectures'] = found
+            save()
+            raise SystemExit('%s is %s, expected %s' % (rel, archs, args.arch))
+    record['architectures'] = found
+    save()
 
 def inputs():
     glyph_paths = [client / 'Resources/Brand' / n for n in SEARCH_GLYPH_NAMES]
@@ -341,7 +382,7 @@ def package_dmg(app, readme, app_name, file_stem):
     record['dmg_stage'] = {p.name: ('symlink -> ' + os.readlink(p)) if p.is_symlink() else 'entry'
                            for p in sorted(stage.iterdir(), key=lambda q: q.name)}
 
-    dmg = out / (file_stem + '-arm64.dmg')
+    dmg = out / (file_stem + '-' + args.arch + '.dmg')
     volname = ('闪寻 ' + version) if args.release else ('FlashFind Trial ' + build_number)
     dmg.unlink(missing_ok=True)
     run(['hdiutil', 'create', '-volname', volname, '-srcfolder', str(stage),
@@ -430,7 +471,7 @@ def repack_from_zip():
                         'entries': verify_helpers_directory(app),
                         'sha256': sha(app / 'Contents/Helpers' / HELPER_NAME)}
     record.update(version=version, build=build_number, app=str(app),
-                  channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0')
+                  channel='release' if args.release else 'trial', architecture=args.arch, minimum_macos='13.0')
     record['app_source'] = {
         'mode': 'reused-from-zip',
         'zip': str(source_zip.relative_to(project)),
@@ -487,12 +528,15 @@ record['tmpdir_kept_default'] = env.get('TMPDIR', '')
 # ★ Helper 的身份必须在**链接之前**核对：嵌进二进制的是 HelperInfo.plist，
 #   两份分叉时链接照样成功，错误只会在客户端握手时露出来。
 helper_info = helper_packaging_identity()
+# SwiftPM 已没有 `--arch`（只在 Xcode 构建系统里存在）；交叉编译用 `--triple`。
+arch_flags = [] if args.arch == 'arm64' else ['--triple', 'x86_64-apple-macosx13.0']
 run(['swift', 'build', '--package-path', str(client), '--scratch-path', str(scratch), '-c', 'release',
-     '--disable-sandbox', '--only-use-versions-from-resolved-file'], 'compile', env=env)
+     '--disable-sandbox', '--only-use-versions-from-resolved-file'] + arch_flags, 'compile', env=env)
 record['sources_after'] = inputs()
 if record['sources_before'] != record['sources_after']:
     save(); raise SystemExit('Source changed during compile; artifact not packaged')
-binary = scratch / 'release/FlashFind2App'
+bin_root = release_dir(scratch)
+binary = bin_root / 'FlashFind2App'
 info = plistlib.loads((client / 'Resources/Packaging/Info.plist').read_bytes())
 app_name, file_stem, version, build_number = app_identity(info)
 app = out / (app_name + '.app')
@@ -514,7 +558,7 @@ record['onboarding_html_sha256'] = sha(app / 'Contents/Resources/Onboarding/sear
 #   真实存在；文案里写成肯定句的那一刻，这里就成了可被用户当场证伪的断言。
 # ★ 组装顺序固定：先验二进制里嵌的版本 → 再复制进包 → 签 Helper → 最后签主 App。
 #   签完之后不许再往二进制里塞任何东西，那会让签名失效。
-helper_binary = scratch / 'release/FlashFindMCP'
+helper_binary = bin_root / 'FlashFindMCP'
 if not helper_binary.is_file():
     save(); raise SystemExit('helper binary missing: ' + str(helper_binary))
 record['helper'] = verify_helper_binary(helper_binary, helper_info)
@@ -579,14 +623,25 @@ if args.reuse_mynas_resources:
                           for p in sorted(reuse.rglob('*')) if p.is_file()},
     }
 else:
+    # ★ `--arch` 必须往下传：不传的话，交叉编 x86_64 时这一步会按默认 arm64
+    #   去编 Dart 核心，而 AOT 的产出架构恒等于宿主 SDK ⇒ 直接卡在架构自检上；
+    #   更糟的是若有人把自检关掉，会得到一个「app 是 x86_64、核心是 arm64」的包。
     run(['python3', str(client / 'scripts/build_mynas_resources.py'), '--output', str(resources_dir),
-         '--temporary-alias', str(tmp_alias)], 'mynas-resources')
+         '--temporary-alias', str(tmp_alias)]
+        + ([] if args.arch == 'arm64' else ['--arch', args.arch]), 'mynas-resources')
 # 交付前整体自检：.app 里不允许出现编译中间物。
 # （MyNAS-build-cache 曾被打进 Resources，体积 7MB → 41MB。）
 leaked = [str(p.relative_to(app)) for p in app.rglob('*')
           if p.is_file() and (p.suffix in ('.pcm', '.swiftmodule') or 'build-cache' in p.parts)]
 if leaked:
     raise SystemExit('build cache leaked into app: ' + ', '.join(leaked[:5]))
+# ★ 编译日志同理不许进包：里面有构建机的绝对路径，装着项目目录名
+#   （2026-10-27 审查 F03 在 1.1.17 build56 就在了，一直没人发现）。
+#   资源层已经卡过一次，这里在整个 .app 上再卡一次——将来若有人往别处
+#   拷日志（Resources/ 根、Helpers/），也照样拦住。
+app_logs = sorted(str(p.relative_to(app)) for p in app.rglob('*.log'))
+if app_logs:
+    raise SystemExit('build log leaked into app: ' + ', '.join(app_logs[:5]))
 record['app_file_count'] = sum(1 for p in app.rglob('*') if p.is_file())
 record['app_bytes'] = sum(p.stat().st_size for p in app.rglob('*') if p.is_file())
 for component in ('bin/mynas-core', 'native/TrustHTTP'):
@@ -596,7 +651,7 @@ for component in ('bin/mynas-core', 'native/TrustHTTP'):
 record['mynas_runtime'] = verify_mynas_runtime(app)
 (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 record.update(version=info['CFBundleShortVersionString'], build=info['CFBundleVersion'], app=str(app),
-              channel='release' if args.release else 'trial', architecture='arm64', minimum_macos='13.0',
+              channel='release' if args.release else 'trial', architecture=args.arch, minimum_macos='13.0',
               signing_identity=args.identity,
               hardened_runtime=args.identity != '-')
 # ★ 先签 Helper，再签主 App：主 App 的签名把 `Contents/` 下每个文件的内容纳入封存，
@@ -613,6 +668,8 @@ run(['otool', '-L', str(macos / 'FlashFind2App')], 'linked-libraries')
 # An unsigned or unverifiable product is kept for diagnosis, never marked installable.
 if verify.returncode:
     save(); raise SystemExit('Signature verification failed; app retained for diagnosis, no installer generated')
+# 签名之后核架构：四个 Mach-O 任一另一种架构，包就是「装得上、某功能永远失败」。
+verify_architectures(app)
 readme = out / '安装前说明.txt'
 if args.release:
     # 正式版只写版本号：构建号是内部序号，同一个 1.0.1 会为修 bug 重打若干次，
@@ -621,7 +678,7 @@ if args.release:
     readme.write_text(f'闪寻 {version}\n正式发布版。\n未Developer ID签名或公证；本包不安装或修改NAS服务。\n', encoding='utf-8')
 else:
     readme.write_text(f'闪寻 {version} / 客户端 build{build_number}\n真实试用候选，非稳定发布。受测范围及未测项目请阅读PM-CLI-004交付说明。\n未Developer ID签名或公证；本包不安装或修改NAS服务。\n', encoding='utf-8')
-zip_path = out / (file_stem + '-arm64.zip')
+zip_path = out / (file_stem + '-' + args.arch + '.zip')
 run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(zip_path)], 'zip')
 record['zip_sha256'] = sha(zip_path)
 

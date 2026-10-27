@@ -1611,14 +1611,55 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(field.contains("size: 15"), "限定的字号要比关键词小")
     }
 
-    /// ★ 类型面板十条（九种类型 + 打开设置）必须**全部显示得出来**。
+    /// ★ 两个面板都必须画满十条（数字 1–9 + 0），而且**不许把多出来的候选截断**。
     ///
-    /// 数字能按到哪，就得显示到哪：只画前六条的话，按 7 / 8 / 9 / 0
-    /// 选中的是列表外面的项 —— 用户按了数字，结果却不是屏幕上那一条。
-    func testFileTypePaletteDisplaysAllNumberedRows() throws {
-        let code = codeOnly(try appSource("AppModel+SearchCommand.swift"))
-        XCTAssertTrue(code.contains("commandKind == .fileType ? 10 : 6"),
-                      "类型面板必须显示满十条，否则编号 7–9 与 0 指向看不见的项")
+    /// 数字能按到哪，就得显示到哪：按 7 / 8 / 9 / 0 选中的必须是屏幕上那一条。
+    /// 2026-10-26 真实报障：OpenList 勾了 A0001–A0004 四个文件夹，`\` 面板
+    /// 只画出第一行 —— 行数上限写死 6，`prefix(maximumVisible)` 把剩下的裁掉了。
+    func testCommandPaletteDrawsEveryNumberedRow() throws {
+        let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
+        let limit = try XCTUnwrap(braceBlock(after: "var commandMaximumVisible:", in: model))
+        XCTAssertTrue(limit.contains("SearchCommandCatalog.maximumVisibleRows"),
+                      "行数上限必须来自 Core（1–9 加 0 推出来的十条），不许在 App 层另写一个数")
+        XCTAssertFalse(limit.contains("? 10 : 6"),
+                       "位置面板不许再压到六条：那会让数字 7/8/9 指向屏幕外的位置")
+
+        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
+        XCTAssertFalse(palette.contains("prefix(maximumVisible)"),
+                       "候选不许按行数上限截断：被裁掉的搜索根既看不见也点不到")
+        XCTAssertTrue(palette.contains("ScrollView(.vertical"),
+                      "超过一屏要能滚动，而不是只画前十行")
+        XCTAssertTrue(palette.contains("proxy.scrollTo("),
+                      "上下键翻到屏幕外的候选时，必须把它滚进可视区")
+        XCTAssertTrue(palette.contains(".frame(height: CGFloat(maximumVisible) * rowHeight)"),
+                      "滚动区的固定高度必须与浮窗高度用同一个上限，否则面板被切掉一截")
+    }
+
+    /// ★ 面板的行必须能用**鼠标点**（2026-10-27 用户要求：不只有按键一条路）。
+    ///
+    /// 面板不是 `List`／`NSTableView`，没有原生点击行为 —— 不显式挂
+    /// `onTapGesture`，习惯用鼠标的用户在这个面板里一条都选不了。
+    /// 悬停也要选中：点之前得先看清会点中哪一条。
+    func testCommandPaletteRowsCanBePickedWithTheMouse() throws {
+        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
+        XCTAssertTrue(palette.contains(".onTapGesture { onPick(index) }"),
+                      "★ 没有点击手势，这个面板对鼠标用户就是死的")
+        XCTAssertTrue(palette.contains(".onHover { inside in"),
+                      "鼠标移上来要选中（高亮），否则点之前不知道会点中谁")
+        XCTAssertTrue(palette.contains("let onPick: (Int) -> Void"))
+        XCTAssertTrue(palette.contains("let onHover: (Int) -> Void"))
+
+        let view = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(view.contains("onPick: { index in"), "面板的点击必须接到模型")
+        XCTAssertTrue(view.contains("model.pickCommand(at: index)"),
+                      "★ 点击与数字键要走同一条执行路径：各写一份迟早只改一边")
+        XCTAssertTrue(view.contains("model.hoverCommand(at: $0)"),
+                      "悬停也要接到模型：选中状态只有一份")
+        // ★ 判在 `commandPalette` 的块里：整份文件还有两处 `focused = true`
+        //   （显示面板、收到通知），拿全文查的话「点完不还焦点」这条断言是聋的。
+        let paletteCall = try body(of: "commandPalette", in: view)
+        XCTAssertTrue(paletteCall.contains("focused = true"),
+                      "点完要把焦点还给输入框，否则选完位置还得再点一次才能接着打字")
     }
 
     /// ★ 浮窗高度必须按面板**实际显示的行数**算，不能写死 6。
@@ -1657,12 +1698,17 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertEqual(windows.components(separatedBy: "isPresented = true").count - 1, 2)
         XCTAssertEqual(windows.components(separatedBy: "isPresented = false").count - 1, 4,
                        "设置/向导关闭后必须清除呈现标记，不能在下一次激活时复活")
+        let restoreSource = codeOnly(try appSource("WindowRestore.swift"))
         let helper = try XCTUnwrap(braceBlock(after: "func restorePresentedPreferencesWindow(",
-                                             in: codeOnly(try appSource("WindowRestore.swift"))))
-        XCTAssertTrue(helper.contains("isMiniaturized"), "不能擅自还原用户主动最小化的窗口")
+                                             in: restoreSource))
         XCTAssertTrue(helper.contains("makeKeyAndOrderFront"))
         XCTAssertFalse(helper.contains("rootView"), "授权返回不能重建表单并清空草稿")
         XCTAssertFalse(helper.contains("cancelDraft"))
+        // 「哪个窗口算数」只有一处定义，最小化的排除规则跟着它一起搬了家：
+        // 断言盯住现居地，规则本身不变 —— 擅自还原用户主动最小化的窗口同样是缺陷。
+        let picker = try XCTUnwrap(braceBlock(after: "func presentedPreferencesWindows(",
+                                              in: restoreSource))
+        XCTAssertTrue(picker.contains("isMiniaturized"), "不能擅自还原用户主动最小化的窗口")
     }
 
     /// 删除键删限定的判定必须在 Core，不许 App 层自己写顺序。
@@ -2734,6 +2780,48 @@ final class AppLayerStructureTests: XCTestCase {
                       "同一个文件再按一次应当关闭（要先判 isVisible + sameItem），而不是重新弹一次")
     }
 
+    /// ★ 钥匙串授权框关掉之后，设置窗口必须被主动提回最前。
+    ///
+    /// 用户原话（2026-10-26）：「每次更新重新登陆后，输入钥匙串密码后，
+    /// 闪寻设置界面就闪退了」。查下来既不是崩溃也不是退出：
+    ///
+    /// - 统一日志 17:24:38 把进程状态记成 `running-active-NotVisible`，
+    ///   **pid 一直活到 17:25:14 之后**；
+    /// - 没有 AppKit 的 `finishing close`，**窗口也没关**；
+    /// - 崩溃报告机制同时段用段错误程序验证过（立刻产出 `.ips`），而闪寻没有报告。
+    ///
+    /// 真因是层叠：授权框属于系统（SecurityAgent），框一关系统把激活还给
+    /// **先前活跃的另一个 App**；闪寻是 `LSUIElement` 常驻应用，实测 `frontmost`
+    /// 恒为 `false`、`activate` 不生效，于是设置窗口被压到对方窗口后面，
+    /// 屏幕上只剩对方 —— 看着就是「界面凭空消失」。日志里对应
+    /// `FUSBProcessWindowState: occluded`。
+    ///
+    /// 这条守两件事：① 有人订阅「交互式读凭据」（没人订阅 = 没修）；
+    /// ② 提回前台走已有的 `restorePresentedPreferencesWindow`，且**提两次**
+    ///    （立即一次 + 隔一拍一次：激活交接是异步的）。
+    func testInteractiveCredentialReadBringsPreferencesWindowForward() throws {
+        let app = codeOnly(try appSource("FlashFind2App.swift"))
+        XCTAssertTrue(app.contains("CredentialStore.onInteractiveRead = {"),
+                      "没人订阅交互式读凭据 —— 钥匙串框关掉后设置窗口会沉到别的 App 后面")
+        XCTAssertTrue(app.contains("bringPreferencesForwardAfterSystemPrompt()"),
+                      "订阅了却没把窗口提回前台")
+
+        let restore = codeOnly(try appSource("WindowRestore.swift"))
+        let forward = try body(of: "bringPreferencesForwardAfterSystemPrompt", in: restore)
+        let calls = forward.components(separatedBy: "raisePresentedPreferencesWindow()").count - 1
+        XCTAssertEqual(calls, 2,
+                       "要提两次：框关掉系统才把激活还给对方，只提一次会被重新压上来（实际 \(calls) 次）")
+
+        // ★ 承重的是「激活」这一句。实测（build 56 测量包 18:31:49.933）：
+        //   非激活态下只调 makeKeyAndOrderFront，`keyWindow` 仍为 nil、`isActive` 仍为 0，
+        //   窗口整组留在前台 App 下面 700 ms 都没翻上来。把它删掉＝这个缺陷复发。
+        let raise = try body(of: "raisePresentedPreferencesWindow", in: restore)
+        XCTAssertTrue(raise.contains("NSApp.activate"),
+                      "提窗口前必须先激活应用：非激活态下 makeKeyAndOrderFront 不生效")
+        XCTAssertTrue(raise.contains("restorePresentedPreferencesWindow("),
+                      "激活之后还得把窗口排到最前")
+    }
+
     /// 按名字取一个函数的函数体（含外层花括号）。括号配平。
     ///
     /// ★ 用配平切块而不是全局 `contains`：`isSourceReady` 这种词在别处也有，
@@ -2798,5 +2886,257 @@ final class AppLayerStructureTests: XCTestCase {
                       + "用 sourceID 查在 id 含非法字符时会永远查不到")
         XCTAssertTrue(sources.contains("filter(\\.enabled)"),
                       "只列已启用的来源：停用的来源不该出现在位置面板里")
+    }
+
+    // MARK: - 命令面板：顺序与数字快捷键
+
+    /// ★ 设置 ▸ 搜索页必须给出**一段两栏**：左位置、右类型，各带拖动排序 + 数字键。
+    ///
+    /// 这一段守的是「入口在不在、入口在不在同一处」。规则（怎么排、第几行是几号）
+    /// 在 Core，界面只把动作接给模型 —— 所以这里同时要求界面**不自己算编号**。
+    func testSearchSettingsExposeQuickPickOrderAndKeys() throws {
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+        let searchForm = try body(of: "searchForm", in: settings)
+        // 用户 2026-10-26 手绘定稿：一个「命令快捷键」标题下左右并排，
+        // 不再拆成上下两段（拆开时要来回看才知道两个 2 撞不撞）。
+        XCTAssertEqual(searchForm.components(separatedBy: "QuickPickSettingsSection(").count - 1, 1,
+                       "两栏必须在同一段里：拆成两段就又回到「来回看」的老样子")
+        XCTAssertEqual(searchForm.components(separatedBy: "QuickPickColumn(").count - 1, 2,
+                       "左「搜索位置」右「文件类型」，缺一栏等于只做了一半功能")
+        for title in ["搜索位置", "文件类型"] {
+            XCTAssertTrue(searchForm.contains("title: \"\(title)\""),
+                          "栏标题必须是「\(title)」：用户要的就是这两个词")
+        }
+        for kind in [".location", ".fileType"] {
+            XCTAssertTrue(searchForm.contains("kind: \(kind),"),
+                          "\(kind) 那一页要写明自己是哪个面板：页签初始选中与恢复默认都靠它")
+            XCTAssertTrue(searchForm.contains("rows: model.quickPickRows(\(kind))"),
+                          "\(kind) 那一栏的数据必须来自模型的同一个入口（面板与设置页共用顺序）")
+            // ★ 2026-10-27 定稿：行尾的号只读，排序只留「拖」；删掉与换掉走右键。
+            //   三条动作都必须接到 Core，不许界面自己改一份内存里的顺序。
+            XCTAssertTrue(searchForm.contains("onDelete: { model.deleteQuickPick(\(kind), id: $0) }"),
+                          "\(kind) 的右键删除必须落到 Core 的隐藏表（只跳过界面那一行，下次刷新它又回来了）")
+            XCTAssertTrue(searchForm.contains("onReplace: { model.replaceQuickPick(\(kind), id: $0, with: $1) }"),
+                          "\(kind) 的替换必须落到「同一位次换人」")
+            XCTAssertTrue(searchForm.contains("replacements: { model.quickPickReplacements(\(kind), id: $0) }"),
+                          "\(kind) 的替换候选取自 Core：界面各算一份迟早多出一条重复项")
+            XCTAssertTrue(searchForm.contains("moveQuickPick(\(kind), from: $0, to: $1)"),
+                          "\(kind) 要支持拖动排序")
+        }
+
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        XCTAssertEqual(section.components(separatedBy: "Section {").count - 1, 1,
+                       "只有一段：多段就会多出一个标题，页签也就散了")
+        // 用户 2026-10-26 二次定稿：点页签切换，切换时内容向左滑。
+        XCTAssertTrue(section.contains("pickerStyle(.segmented)"),
+                      "两页要能点着切（分段控件），不能又回到并排两栏")
+        XCTAssertFalse(section.contains("HStack(alignment: .top"),
+                       "并排两栏已经废弃：半宽放不下长名字")
+        // ★ 判在 `select(_:)` 的函数体里：整份文件另有一处 `withAnimation(.spring(`
+        //   （落手升/降温），拿全文查 `withAnimation(` 的话这条断言是聋的
+        //   —— build 66 第一轮变异（把切页动画摘掉）就绿着跑过去了。
+        let selectBody = try body(of: "select", in: section)
+        XCTAssertTrue(selectBody.contains("withAnimation(.easeOut("),
+                      "切换必须有动画，否则内容凭空换掉、看不出是换页")
+        XCTAssertTrue(section.contains(".transition(slideTransition)"),
+                      "切页要挂位移过渡：只有状态变、没有过渡等于瞬切")
+        // ★ 审查 F02：`transition` 只在视图**插入/移除**时求值。只换参数、
+        //   不换身份，过渡一次都不会跑（内容会变、高度会变，看起来「像是动了」）。
+        XCTAssertTrue(section.contains(".id(columns[chosenIndex].kind)"),
+                      "★ 页面身份必须绑到页签上：少了它，`transition` 永远不触发（审查 F02）")
+        XCTAssertTrue(section.contains("removal: .offset(x: forward ? -slide : slide)"),
+                      "旧页要往反方向滑走：只淡出、不位移就没有「换页」的方向感")
+        XCTAssertTrue(section.contains("forward = next > chosenIndex"),
+                      "方向要在换页之前定下来（换完之后再比就比不出前后了）")
+        XCTAssertTrue(section.contains(".clipped()"),
+                      "滑出去的那一页必须裁掉，否则压到段落外面")
+        XCTAssertTrue(section.contains(".onDrag"), "没有起拖，用户就没法排序")
+        XCTAssertTrue(section.contains(".onDrop"), "只有起拖没有落点判定，拖了也不生效")
+        // ★ 2026-10-27 定稿：行尾的号码**只读**，不再是下拉选择器。
+        //   上一版那里是「选个号把行搬过去」—— 与拖动是同一件事的两种写法，
+        //   两套入口摆在一起，用户得先分辨哪个才是排序。
+        XCTAssertFalse(section.contains("private func keyPicker"),
+                       "行尾不许再是选择器：排序只留拖动一个入口")
+        XCTAssertEqual(section.components(separatedBy: "Picker(").count - 1, 1,
+                       "整段只该有一个 Picker —— 页签那个分段控件")
+        XCTAssertTrue(section.contains("row.key.map(String.init)"),
+                      "行尾号码必须来自 Core 算好的行号，界面不许自己数")
+        XCTAssertFalse(section.contains("onChooseKey"), "旧的「选数字」入口必须彻底消失")
+        XCTAssertFalse(section.contains("SearchCommandNumbering.numberedLimit"),
+                       "设置页不再算「能选几档」：那档数已经随选择器一起删掉了")
+        // ★ 拖起来是**整行虚影**，不是一个小把手图标（用户 2026-10-27）。
+        XCTAssertTrue(section.contains("} preview: {"), "起拖必须带预览：没有 preview 就退回系统对把手拍的快照")
+        XCTAssertTrue(section.contains("QuickPickDragPreview(row: row)"),
+                      "虚影必须是整行（标题/副标题/号码），行名才是身份")
+        // ★ 放下之后从原位置升/降到新位置，而不是瞬移。
+        XCTAssertTrue(section.contains("withAnimation(.spring("),
+                      "落手要包在动画事务里：`ForEach` 的 id 稳定，包了才会做位置插值")
+        // ★ 右键：删掉 / 替换成别的位置或格式（用户 2026-10-27）。
+        XCTAssertTrue(section.contains(".contextMenu"), "整行要有右键菜单")
+        XCTAssertTrue(section.contains("\"删除该快捷方式\""), "右键第一项是删除")
+        XCTAssertTrue(section.contains("Menu(\"替换为\")"), "右键还要能把这一行换成别的位置/格式")
+        XCTAssertFalse(section.contains("onAssign"), "旧版的「指定键」入口必须彻底消失，不许留两套语义")
+        XCTAssertFalse(section.contains("maxVisible"), "行数上限是面板的事，设置页不该再算一遍")
+        // ★ 预览钩子只能落在预览构建里：少了 `isPreview` 这道门，
+        //   正式版用户设一个环境变量就能把设置页开在第二页。
+        XCTAssertTrue(section.contains("AppEnvironment.isPreview"),
+                      "初始页签的预览钩子必须有 isPreview 守卫")
+        // ★ 拖动状态必须是一栏一份：做成子视图，`@State` 自然每栏一个实例；
+        //   放在容器层就会让左栏的落点高亮闪到右栏去。
+        XCTAssertTrue(section.contains("private struct QuickPickColumnView"),
+                      "栏要单独成视图：两栏的拖动状态各归各的，不许共用一个落点")
+    }
+
+    /// ★ 审查 F01：排序拖拽的载荷里不许装行 id。
+    ///
+    /// 位置行的 id 是 `target:<来源标识>:<根路径>`，根路径就是用户 NAS 上的
+    /// 部门／客户／项目文件夹名。拖拽是**跨应用**通道：用 `NSString` 造 provider，
+    /// 系统会顺带注册 `public.utf8-plain-text` 与 `public.url` 两种公开表示，
+    /// 拖到任何一个接受文本的地方，接收方都能读出这份路径。
+    ///
+    /// 本地排序只需要「是本窗口在拖」，标识本来就存在内存里的 `draggingID`，
+    /// 载荷退化成常量标记即可。
+    func testQuickPickDragPayloadCarriesNoLocationIdentity() throws {
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        XCTAssertFalse(section.contains("NSItemProvider(object:"),
+                       "★ 载荷不许用 NSString 造：会被注册成公开文本与 URL，接收方读得到完整路径（审查 F01）")
+        XCTAssertTrue(section.contains("NSItemProvider(item: Self.reorderMarker as NSSecureCoding"),
+                      "载荷只能是常量标记，且类型由我们显式指定")
+        XCTAssertTrue(section.contains("typeIdentifier: Self.reorderType.identifier"),
+                      "必须显式指定私有类型，否则系统又会按内容推断回公开类型")
+        XCTAssertTrue(section.contains("UTType(exportedAs: \"com.flashfind.quickpick-row\")"),
+                      "排序拖拽要有自己的私有类型")
+        XCTAssertTrue(section.contains(".onDrop(of: [Self.reorderType]"),
+                      "落点只接受这个私有类型")
+        XCTAssertFalse(section.contains(".plainText"),
+                       "★ 旧版按纯文本收落点：等于把「本窗口排序」和「任意文本」并成一条通道")
+        // 载荷不许由行内容决定 —— 路径就是这样被带出去的。
+        let providerLine = section.split(separator: "\n")
+            .first { $0.contains("NSItemProvider(item:") } ?? ""
+        XCTAssertFalse(providerLine.contains("row."),
+                       "★ provider 的实参里出现 row.* 就说明载荷又和行内容绑上了（路径会跟着走）")
+        XCTAssertTrue(providerLine.contains("reorderMarker"),
+                      "provider 实参必须正是那个常量标记")
+    }
+
+    /// ★ 拖动虚影是**整行**：`onDrag` 必须挂在行尾（HStack 收尾之后），
+    /// 不是挂在内侧那个把手上 —— 挂在把手上拖出去的只是一个小图标，
+    /// 用户看不出自己拿的是哪一条（2026-10-27 用户要求）。
+    func testQuickPickDragIsAttachedToTheWholeRow() throws {
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        let row = try body(of: "row", in: section)
+        XCTAssertEqual(row.components(separatedBy: ".onDrag").count - 1, 1,
+                       "整行只该有一处起拖：多了就说明有一处还挂在子视图上")
+        let drag = try XCTUnwrap(row.range(of: ".onDrag {"), "找不到起拖")
+        let wholeRow = try XCTUnwrap(row.range(of: ".frame(maxWidth: .infinity, alignment: .leading)"),
+                                     "找不到整行的 frame：判据靠它区分「整行」与「把手」")
+        XCTAssertTrue(wholeRow.lowerBound < drag.lowerBound,
+                      "★ 起拖要挂在整行（HStack 收尾之后），不是挂在内侧那个把手上")
+        XCTAssertTrue(row.contains("QuickPickDragPreview(row: row)"), "虚影必须是整行")
+        let handle = try XCTUnwrap(row.range(of: "line.3.horizontal"))
+        XCTAssertFalse(row[handle.upperBound..<drag.lowerBound].contains(".onDrag"),
+                       "把手只剩视觉提示，不许自己挂起拖")
+    }
+
+    /// ★ 右键菜单的两项动作必须落到模型（再落到 Core 的隐藏表），
+    /// 不是界面上假装一下（假装的话，关掉设置页再打开那条又回来了）。
+    func testQuickPickRowContextMenuDeletesAndReplaces() throws {
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        let row = try body(of: "row", in: section)
+        XCTAssertTrue(row.contains("column.onDelete(row.id)"), "删除要落到 Core")
+        XCTAssertTrue(row.contains("column.onReplace(row.id, candidate.id)"), "替换要落到 Core")
+        XCTAssertTrue(row.contains("column.replacements(row.id)"),
+                      "替换候选取自调用方（Core 判定），界面不许自己列一份")
+        XCTAssertTrue(row.contains("ForEach(alternatives)"), "每个候选都要能点")
+        XCTAssertTrue(row.contains(".contextMenu"), "菜单挂在整行上，不是藏在某个按钮里")
+    }
+
+    /// 私有类型标识在 Swift 与 `Info.plist` 各写一遍：写错一边编译照样过，
+    /// 运行时表现为「拖了没反应」——所以这条把两边对起来比。
+    func testQuickPickReorderTypeIsDeclaredInInfoPlist() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("Resources/Packaging/Info.plist")
+        let data = try Data(contentsOf: url)
+        let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        let declarations = plist?["UTExportedTypeDeclarations"] as? [[String: Any]]
+        let identifier = "com.flashfind.quickpick-row"
+
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        XCTAssertTrue(section.contains(identifier), "Swift 侧的标识必须就是这一个")
+        XCTAssertTrue((declarations ?? []).compactMap { $0["UTTypeIdentifier"] as? String }
+                        .contains(identifier),
+                      "★ Info.plist 必须声明同一个标识：只写一边，拖拽在别的进程里认不出来")
+        let conforms = (declarations ?? [])
+            .first { $0["UTTypeIdentifier"] as? String == identifier }?["UTTypeConformsTo"] as? [String]
+        XCTAssertTrue(conforms?.contains("public.data") == true,
+                      "导出类型要 conform 到 public.data，否则不是一个可搬运的数据类型")
+    }
+
+    /// 预览钩子：`FF_UI_QUICKPICK_SWITCH` 能让设置页定时切一次。
+    ///
+    /// 要它是因为过渡只存在于插入/移除的那几帧里：人手点完再截图只能拿到结束态，
+    /// 首尾两张图都正常既证明不了有动画，也证明不了没有（审查 F02 就这么漏的）。
+    func testQuickPickPreviewSwitchHookIsGuardedAndSharesTheTabsPath() throws {
+        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
+        XCTAssertTrue(section.contains("FF_UI_QUICKPICK_SWITCH"),
+                      "没有这个钩子就没法在程序控制下截到过渡的中间帧")
+        // ★ 只取这个函数的**函数体**：整份文件里还有别的 `isPreview`（初始页签那条），
+        //   拿全文查的话，钩子自己丢了守卫也照样绿。
+        let start = try XCTUnwrap(section.range(of: "private func switchPageInPreviewIfRequested"),
+                                  "钩子函数不见了")
+        let rest = section[start.lowerBound...]
+        let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
+        let hook = String(rest[rest.startIndex..<end])
+        XCTAssertTrue(hook.contains("AppEnvironment.isPreview"),
+                      "★ 钩子必须有 isPreview 守卫：正式版设个环境变量就能让设置页自己换页")
+        XCTAssertTrue(hook.contains("select("),
+                      "钩子必须走页签同一条换页路径，不许另写一份")
+        // 页签本身也只能走 select：两份切换逻辑迟早只改一边。
+        XCTAssertTrue(section.contains("set: { select($0) }"),
+                      "页签的 selection 要落到同一个 select(_:)")
+    }
+
+    /// ★ 面板的顺序与编号都必须来自「同一份用户设置」，而且**编号只由顺序决定**。
+    ///
+    /// 最容易犯的错：拖动排序了，编号却还带着一份「用户指定过的键」——
+    /// 于是同一行排第 1 却写着 5，用户拖动之后号也不变（2026-10-26 报障）。
+    func testPaletteOrderAndKeysComeFromTheSavedSettings() throws {
+        let code = try appModelCode()
+        let items = try body(of: "commandItems", in: code)
+        XCTAssertTrue(items.contains("SearchCommandArrangement.arrange("),
+                      "候选顺序必须走 Core 的重排，不能只按目录自然顺序")
+        XCTAssertTrue(items.contains("quickPick.order(for: kind)"),
+                      "顺序要取用户设置；取错了拖动排序就是白做")
+        XCTAssertTrue(items.contains("hidden: quickPick.hiddenIDs(for: kind)"),
+                      "★ 删掉的候选必须在这一层滤掉：只在界面里跳一行，下次刷新它又回来了")
+
+        let numbers = try body(of: "commandNumbers", in: code)
+        XCTAssertTrue(numbers.contains("SearchCommandNumbering.keys(in: filteredCommandItems)"),
+                      "编号只能由当前显示的候选顺序算出来")
+        XCTAssertFalse(numbers.contains("assigned"),
+                       "★ 不许再传一份「指定键」：那会让拖动后的数字不跟着变")
+
+        let pick = try body(of: "pickCommand", in: code)
+        XCTAssertFalse(pick.contains("assigned"),
+                       "数字键反查也要同一条规则，否则「写几按几」不成立")
+
+        // 三个写入口：拖动（from/to）、删除（hide）、替换（replace）。
+        // 后两个都是 2026-10-27 加的右键动作，都必须落到 Core。
+        XCTAssertTrue(code.contains("func deleteQuickPick(_ kind: SearchCommandKind, id: String)"),
+                      "删除入口必须存在")
+        XCTAssertTrue(code.contains("next.hide(id, kind: kind, among: commandItems(for: kind))"),
+                      "★ 删除必须记进 Core 的隐藏表：只从界面列表里跳过，关掉设置页它又回来了")
+        XCTAssertTrue(code.contains("func replaceQuickPick(_ kind: SearchCommandKind, id: String, with newID: String)"),
+                      "替换入口必须存在")
+        XCTAssertTrue(code.contains("next.replace(id, with: newID, kind: kind"),
+                      "替换必须落到「同一位次换人」")
+        // 旧的行尾选号入口必须彻底删掉：留着就是第二套排序语义。
+        XCTAssertFalse(code.contains("moveToKey"),
+                       "★ 「选个数字把行搬过去」已经随行尾选择器一起删了，不许留死代码")
+
+        let rows = try body(of: "quickPickRows", in: code)
+        XCTAssertTrue(rows.contains("quickPick.rows("),
+                      "设置页的行由 Core 统一算（含「不列打开设置」），界面不许各写一份")
     }
 }

@@ -56,9 +56,24 @@ extension AppModel {
     /// 命令面板的全部候选（未过滤）。
     var commandItems: [SearchCommandItem] {
         guard let kind = commandKind else { return [] }
-        return SearchCommandCatalog.items(kind: kind,
-                                          sources: commandSources,
-                                          includeLocal: localEnabled)
+        return commandItems(for: kind)
+    }
+
+    /// 某一种面板的候选（按用户排过的顺序）。
+    ///
+    /// ★ 顺序来自 Core：`SearchCommandArrangement.arrange` 只认 id，
+    /// 表里没有的候选（新加的来源/搜索根）自然排到末尾，因此这一层
+    /// 不需要任何「新增来源要不要插队」的判断。
+    func commandItems(for kind: SearchCommandKind) -> [SearchCommandItem] {
+        let natural = SearchCommandCatalog.items(kind: kind,
+                                                 sources: commandSources,
+                                                 includeLocal: localEnabled)
+        return SearchCommandArrangement.arrange(natural,
+                                                order: quickPick.order(for: kind),
+                                                // ★ 删掉的候选必须在这里滤掉，而不是在界面里
+                                                //   藏一行：设置页与面板读的是同一个入口，
+                                                //   只在一处藏，另一处就会把删掉的又画出来。
+                                                hidden: quickPick.hiddenIDs(for: kind))
     }
 
     /// 按当前筛选词过滤后的候选。
@@ -73,19 +88,22 @@ extension AppModel {
         return items[min(max(0, commandSelection), items.count - 1)]
     }
 
-    /// 面板最多显示多少条候选。
+    /// 面板一次最多画多少行候选。
     ///
-    /// ★ 类型面板必须能显示满十条：它的九条类型 + 打开设置**全都有数字**，
-    /// 只画出前六条的话，按 7/8/9/0 选中的是列表外的项。
-    /// 位置面板保持六条 —— 位置可能有很多个，超出就该继续打字筛。
-    var commandMaximumVisible: Int {
-        commandKind == .fileType ? 10 : 6
-    }
+    /// ★ 两个面板共用同一个上限，而且它来自 Core（`SearchCommandCatalog.maximumVisibleRows`
+    /// = 数字键 1–9 + 0 对应的十条）。以前位置面板压到六条、理由是「位置可能很多，
+    /// 超出就该继续打字筛」——实际后果是一次真实报障：OpenList 勾了四个文件夹，
+    /// 面板只画出 A0001，A0002–A0004 既看不见也点不到，数字 7/8/9/0 全指向屏幕外。
+    /// **能按到的编号必须都在屏幕上**；超出的走滚动，不截断。
+    var commandMaximumVisible: Int { SearchCommandCatalog.maximumVisibleRows }
 
     /// 每条候选在面板上显示的数字编号（没有则 nil）。
+    ///
+    /// ★ 编号与顺序来自同一份设置：编号**就是**行号（`SearchCommandNumbering`
+    /// 只认顺序），所以拖动之后这里立刻跟着变 —— 面板上写「3」的那一行，
+    /// 按 3 一定选中它。
     var commandNumbers: [Int?] {
-        let items = filteredCommandItems
-        return items.indices.map { SearchCommandNumbering.key(for: $0, in: items) }
+        SearchCommandNumbering.keys(in: filteredCommandItems)
     }
 
     // MARK: - 前置限定
@@ -148,10 +166,31 @@ extension AppModel {
     /// 手指就在数字键上，面板把编号写在脸上了 —— 没有理由要求用户
     /// 先用方向键挪过去再回车。
     func pickCommand(_ number: Int) {
-        guard let index = SearchCommandNumbering.index(forKey: number, in: filteredCommandItems)
+        guard let index = SearchCommandNumbering.index(forKey: number,
+                                                       in: filteredCommandItems)
         else { return }
         commandSelection = index
         executeSelectedCommand()
+    }
+
+    /// ★ 鼠标点某一行就执行它。
+    ///
+    /// 与数字键同一条路径（`commandSelection` 写下来 + `executeSelectedCommand`）：
+    /// 两条入口各写一份「执行」迟早只改一边，用户会遇到「按 2 有效、点第 2 行没反应」。
+    func pickCommand(at index: Int) {
+        guard filteredCommandItems.indices.contains(index) else { return }
+        commandSelection = index
+        executeSelectedCommand()
+    }
+
+    /// ★ 鼠标停在哪一行，选中就是哪一行。
+    ///
+    /// 指针移上去就该高亮，否则用户点之前不知道会点中谁（尤其候选超过一屏、
+    /// 或者筛选之后行号全变了的时候）。
+    func hoverCommand(at index: Int) {
+        guard filteredCommandItems.indices.contains(index) else { return }
+        guard commandSelection != index else { return }
+        commandSelection = index
     }
 
     /// 应用位置限定。
@@ -224,5 +263,68 @@ extension AppModel {
         tokenBar.clear(slot)
         commandSelection = 0
         changedQuery()
+    }
+
+    // MARK: - 设置：顺序（也就是数字键）
+
+    /// 设置页里某一面板的行（已排好序、已算好编号，且不含「打开设置」）。
+    ///
+    /// ★ 设置页与面板读的是同一个 `commandItems(for:)`：两处各排一次，
+    /// 迟早会排出两种顺序，而用户看到的是两边对不上。
+    func quickPickRows(_ kind: SearchCommandKind) -> [SearchQuickPickRow] {
+        quickPick.rows(for: kind, in: commandItems(for: kind))
+    }
+
+    /// 这一面板有没有被改过（决定「恢复默认」是否可点）。
+    func canResetQuickPick(_ kind: SearchCommandKind) -> Bool {
+        quickPick.hasCustomization(for: kind)
+    }
+
+    /// 拖动排序：把第 `from` 行挪到第 `to` 行（下标来自 `quickPickRows`）。
+    ///
+    /// 传的是**整份候选**（含末尾的「打开设置」）：`move` 自己会跳过它，
+    /// 而且「打开设置」永远排在最后，所以两者的下标是对齐的。
+    func moveQuickPick(_ kind: SearchCommandKind, from: Int, to: Int) {
+        var next = quickPick
+        next.move(kind, from: from, to: to, among: commandItems(for: kind))
+        applyQuickPick(next)
+    }
+
+    /// 删掉一条快捷方式：面板里不再出现它。
+    ///
+    /// ★ 「删掉」必须记在设置里（`SearchQuickPickSettings.hide`）：候选是每次从
+    /// 「目录 + 用户配置」现算的，光在界面上跳过这一行，下次刷新它又回来了。
+    func deleteQuickPick(_ kind: SearchCommandKind, id: String) {
+        var next = quickPick
+        guard next.hide(id, kind: kind, among: commandItems(for: kind)) else { return }
+        applyQuickPick(next)
+    }
+
+    /// 把这一行换成别的位置 / 别的格式（位次不变，数字也就不变）。
+    func replaceQuickPick(_ kind: SearchCommandKind, id: String, with newID: String) {
+        var next = quickPick
+        guard next.replace(id, with: newID, kind: kind, among: commandItems(for: kind)) else { return }
+        applyQuickPick(next)
+    }
+
+    /// 这一行能换成哪些候选（右键菜单里「替换为」的子项）。
+    ///
+    /// ★ 候选是目录里的**其它全部**条目（含此刻已显示的那些）：
+    /// 「把第 1 行的 pdf 换成第 9 行的文档」是替换的正常用法，
+    /// Core 的 `replace` 会把文档从第 9 行搬过来，不会留下两行。
+    /// 被删过的条目也在这里 —— 那正好是「删错了怎么找回来」的入口。
+    func quickPickReplacements(_ kind: SearchCommandKind, id: String) -> [SearchCommandItem] {
+        let all = SearchCommandCatalog.items(kind: kind,
+                                             sources: commandSources,
+                                             includeLocal: localEnabled,
+                                             includeSettings: false)
+        return SearchCommandReplacement.candidates(all: all, excluding: id)
+    }
+
+    /// 恢复这一面板的自然顺序（编号随之回到 1–9 顺排）。
+    func resetQuickPick(_ kind: SearchCommandKind) {
+        var next = quickPick
+        next.reset(kind)
+        applyQuickPick(next)
     }
 }

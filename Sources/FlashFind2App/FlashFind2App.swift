@@ -74,6 +74,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 不能先闪一下浅色再变。启动路径上漏这一句，设置页里选了也不生效——
         // 那种缺陷编译能过、运行也不报错。
         model.applyAppearance()
+        // 读凭据时若弹过钥匙串授权框，框一关系统就把激活还给别的 App，
+        // 设置窗口会被压在它后面 —— 用户看到的是「点完允许界面一下就没了」。
+        // 订阅点放在 Core 里（`CredentialStore.onInteractiveRead`），因为它认得出
+        // 「这次读允许系统交互」；窗口怎么救只有 App 层知道，所以在这里接上。
+        CredentialStore.onInteractiveRead = {
+            Task { @MainActor in bringPreferencesForwardAfterSystemPrompt() }
+        }
         // AI 助手的 IPC 监听。放在这儿而不是 onboarding 之后：引导页可能停留很久，
         // 而 `flashfind-mcp` 可能在用户还没点完引导时就被客户端拉起来了。
         // 抢不到 socket（另一份闪寻在跑）时它自己会安静退出这条路径（§1.3.3.1）。
@@ -174,30 +181,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         OnboardingWindow.shared.show(model: model)
     }
-    private weak var lastPreferencesWindow: NSWindow?
-
-    func applicationWillResignActive(_ notification: Notification) {
-        let key = NSApp.keyWindow
-        let window = key?.sheetParent ?? key ?? NSApp.mainWindow
-        if let window,
-           window === NASWizardWindow.shared.presentedWindow || window === SettingsWindow.shared.presentedWindow {
-            lastPreferencesWindow = window
-        }
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        // 主动唤起搜索或仍有应用内模态窗口时，不抢它们的焦点。
-        guard searchPanel?.isKeyWindow != true, NSApp.modalWindow == nil else { return }
-        restorePresentedPreferencesWindow(preferred: lastPreferencesWindow)
-    }
-
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if restorePresentedPreferencesWindow(preferred: lastPreferencesWindow) {
-            NSApp.activate(ignoringOtherApps: true)
-            return true
-        }
+        // 先恢复设置/登录窗口，再让浮窗上来：顺序反了浮窗会抢走焦点，
+        // 用户重开应用时看到的是个空搜索框，刚在填的登录表单不见了。
+        restorePresentedPreferencesWindow()
         searchPanel?.show()
         return true
+    }
+
+    /// 从别的 App 切回本应用（含系统授权框关掉之后）：有呈现中的设置/向导窗口就提回最前。
+    ///
+    /// 「系统授权框关掉」这条正是用户报障的那条路（钥匙串密码 → 界面消失），
+    /// 详见 `bringPreferencesForwardAfterSystemPrompt`。
+    ///
+    /// 但不能抢刚被快捷键唤起的搜索浮窗：那一刻用户在打字，设置窗口只是上次留下的。
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if searchPanel?.isKeyWindow == true { return }
+        restorePresentedPreferencesWindow()
     }
     func applicationWillTerminate(_ notification: Notification) {
         mcpAuthority.stop()

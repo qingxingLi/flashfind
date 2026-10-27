@@ -279,6 +279,40 @@ struct SettingsView: View {
                 }
             }
 
+            // ── 命令快捷键（位置 / 文件类型 左右并排）──
+            //
+            // `\` 与 `/` 面板都是「手指在键盘上，按数字就走」的入口，所以
+            // 顺序与数字键必须能调：常用位置排在前面、常用类型排在前面，
+            // 才谈得上肌肉记忆。两栏的行都由 Core 算出（`SearchQuickPickRow`），
+            // 这里只把动作接给模型 —— 顺序与编号规则不写在界面里。
+            //
+            // ★ 并排而不是上下两段：两者是「同一个面板的两个页签」，
+            // 并排放才能一眼确认「2 是此 Mac、2 是 word」会不会撞车。
+            QuickPickSettingsSection(columns: [
+                QuickPickColumn(
+                    kind: .location,
+                    title: "搜索位置",
+                    rows: model.quickPickRows(.location),
+                    canReset: model.canResetQuickPick(.location),
+                    onMove: { model.moveQuickPick(.location, from: $0, to: $1) },
+                    onDelete: { model.deleteQuickPick(.location, id: $0) },
+                    onReplace: { model.replaceQuickPick(.location, id: $0, with: $1) },
+                    replacements: { model.quickPickReplacements(.location, id: $0) },
+                    onReset: { model.resetQuickPick(.location) }
+                ),
+                QuickPickColumn(
+                    kind: .fileType,
+                    title: "文件类型",
+                    rows: model.quickPickRows(.fileType),
+                    canReset: model.canResetQuickPick(.fileType),
+                    onMove: { model.moveQuickPick(.fileType, from: $0, to: $1) },
+                    onDelete: { model.deleteQuickPick(.fileType, id: $0) },
+                    onReplace: { model.replaceQuickPick(.fileType, id: $0, with: $1) },
+                    replacements: { model.quickPickReplacements(.fileType, id: $0) },
+                    onReset: { model.resetQuickPick(.fileType) }
+                ),
+            ])
+
             if !model.status.isEmpty {
                 Section {
                     Text(model.status).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary)

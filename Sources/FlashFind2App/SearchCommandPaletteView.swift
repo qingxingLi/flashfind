@@ -19,13 +19,35 @@ struct SearchCommandPaletteView: View {
     /// 0 固定给「打开设置」。界面只负责画出来。
     let numbers: [Int?]
     private var rowHeight: CGFloat { 34 }
-    /// 最多显示多少条候选。
-    /// 只显示六条的话，数字 7/8/9/0 指向的全是**看不见的项** ——
-    /// 用户按了数字，选中的却是列表外的东西。数字能按到哪，就得显示到哪。
+    /// 面板一次画得下多少行候选。
+    ///
+    /// ★ 它同时是「数字键能按到哪」的上界：1–9 给前九条、0 给「打开设置」，
+    /// 十条正好全在屏幕上。候选比这多时**不截断**，改成滚动 ——
+    /// 截断会把用户配过的位置彻底藏起来（`\` 面板只显示第一个 OpenList 文件夹）。
     let maximumVisible: Int
 
-    private var visibleItems: [SearchCommandItem] {
-        Array(items.prefix(maximumVisible))
+    /// 鼠标移到第几行 ⇒ 选中就是那一行（先高亮、再决定点不点）。
+    let onHover: (Int) -> Void
+    /// 鼠标点了第几行 ⇒ 执行它（与按数字键同一条路径）。
+    ///
+    /// ★ 键盘与鼠标必须是**同一件事**：只做键盘的话，习惯用鼠标的用户
+    /// 在这个面板里一条都选不了（面板本身不是列表控件，没有原生点击行为）。
+    let onPick: (Int) -> Void
+
+    /// 候选多到画不下时，面板固定这么高并允许滚动。
+    private var needsScrolling: Bool { items.count > maximumVisible }
+
+    private var rowList: some View {
+        // ★ 渲染**全部**候选，不 `prefix`。`maximumVisible` 只用来定高度。
+        //
+        // 之前是 `Array(items.prefix(maximumVisible))`，于是 A0002 之后的搜索根
+        // 连画都不画：按 7/8/9 能选中，屏幕上却一条都没有 —— 用户看到的
+        // 是「面板里只有第一个文件夹」。
+        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+            row(item, index: index,
+                number: index < numbers.count ? numbers[index] : nil,
+                selected: index == selection)
+        }
     }
 
     var body: some View {
@@ -50,18 +72,28 @@ struct SearchCommandPaletteView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .frame(height: rowHeight)
-            } else {
-                ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
-                    row(item, number: index < numbers.count ? numbers[index] : nil,
-                        selected: index == selection)
+            } else if needsScrolling {
+                // 超出行数上限：固定高度 + 滚动，选中项始终滚进可视区。
+                // 上下键翻到第 11 条时，面板不会「看起来没反应」。
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(spacing: 0) { rowList }
+                    }
+                    .frame(height: CGFloat(maximumVisible) * rowHeight)
+                    .onChange(of: selection) { value in
+                        guard items.indices.contains(value) else { return }
+                        proxy.scrollTo(items[value].id, anchor: .center)
+                    }
                 }
+            } else {
+                rowList
             }
         }
         .padding(.vertical, 4)
         .background(.regularMaterial)
     }
 
-    private func row(_ item: SearchCommandItem, number: Int?, selected: Bool) -> some View {
+    private func row(_ item: SearchCommandItem, index: Int, number: Int?, selected: Bool) -> some View {
         HStack(spacing: 8) {
             // ★ 数字写在最前：手指就在数字键上，看到编号直接按，
             // 不必先用方向键挪过去再回车。没有编号的位置留空对齐。
@@ -83,6 +115,14 @@ struct SearchCommandPaletteView: View {
         .frame(height: rowHeight)
         .background(selected ? Color.accentColor.opacity(0.14) : Color.clear)
         .contentShape(Rectangle())
+        // ★ 鼠标：移上来就选中（先看清会点中哪一条），点下去就执行。
+        //   两者都走模型的同一个 `commandSelection`，与上下键/数字键不打架。
+        .onHover { inside in
+            if inside { onHover(index) }
+        }
+        .onTapGesture { onPick(index) }
+        // 滚动到选中项要用这个 id（候选超过一屏时）。
+        .id(item.id)
         .accessibilityIdentifier("command-item-\(item.id)")
     }
 

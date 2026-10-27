@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.17
+- **当前版本**：1.1.18
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -25,7 +25,9 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
   没连上的来源也在列表里（副标题写「· 未连接」），选中它先连上再搜。
 - **`/` 选类型**：pdf / word / excel / ppt / 照片 / 视频 / 音乐 / 压缩包 / 文档。
   类型过滤在客户端做，可以和位置叠加。
-- 两个面板的候选都带数字，**按数字直接选中**；最后一条「打开设置…」固定按 **0**。
+- 两个面板的候选都带数字，**按数字直接选中，也可以直接用鼠标点**；最后一条「打开设置…」固定按 **0**。
+- 想改顺序或删掉不用的：设置 ▸ 搜索 ▸ **命令快捷键**。拖动整行排序、右键删除或换成别的位置/格式；
+  顺序改了数字跟着变（**第几行就是几号**）。
 - 结果列表里 **↓** 选中、**空格** 预览、再按 **空格** 关闭，**↩** 用系统方式打开。
 
 ## 支持什么设备
@@ -105,13 +107,13 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1563 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1599 项 + MyNASCore 的行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1563 项
+swift test                       # 1599 项
 cd MyNASCore && dart test_*.dart # 9 个套件
 ```
 
@@ -122,7 +124,9 @@ cd MyNASCore && dart test_*.dart # 9 个套件
 
 ## 已知限制
 
-- **仅 arm64**（Apple Silicon）。`LSMinimumSystemVersion = 13.0`，Intel Mac 装不了。
+- **双架构分开发包**：Apple Silicon 用 `arm64` 包，Intel Mac 用 `x86_64` 包，
+  两个包内容相同、按机器的芯片选对应的那个（关于本机 → 芯片）。
+  没有做 universal 单包（体积会翻倍）。`LSMinimumSystemVersion = 13.0`。
 - **未做 Developer ID 签名与公证**。分发包是 ad-hoc 签名，
   Gatekeeper 会拦截。首次打开的放行方式见 `docs/安装与首次打开.md`。
 - **凭据存系统钥匙串**。但本包是 ad-hoc 签名、没有

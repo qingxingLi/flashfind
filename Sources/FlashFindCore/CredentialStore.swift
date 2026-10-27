@@ -76,6 +76,22 @@ public enum CredentialStore {
     /// 变更观察者（诊断用）。实现方不得抛错或阻塞。
     public static var onMutation: ((Mutation) -> Void)?
 
+    /// 一次**允许与系统交互**的读刚刚结束（`allowInteraction: true`）。
+    ///
+    /// 为什么 Core 要报这件事：钥匙串 ACL 不认这个包时，系统会弹框要密码。
+    /// **框一关，系统把激活还给先前活跃的另一个 App**，我们的窗口就被压到它后面。
+    /// 现场（2026-10-26，1.1.17 build 54）：点「登录」→ 输密码点「始终允许」→
+    /// 整块界面在 125ms 内消失。查统一日志才发现**进程活着**
+    /// （`running-active-NotVisible`）、窗口也没关（没有 AppKit 的 `finishing close`），
+    /// 只是被前台那个 App 的窗口盖住了 —— 用户只会说「闪退了」。
+    ///
+    /// 救窗口是 AppKit 的事，Core 不引入 AppKit，所以只把「刚发生过」报出去，
+    /// 由 App 层 `bringPreferencesForwardAfterSystemPrompt()` 决定怎么办。
+    ///
+    /// 与 `onMutation` 一样：实现方不得抛错或阻塞；成功、用户点拒绝、读不到，
+    /// 三种情况都要报 —— 因为三种情况下那个框都弹过、都可能把窗口甩到后面。
+    public static var onInteractiveRead: (() -> Void)?
+
     public static func sourceKey(_ account: String) -> String {
         for prefix in [CredentialAccount.sourcePrefix, CredentialAccount.profilePrefix]
         where account.hasPrefix(prefix) {
@@ -102,6 +118,9 @@ public enum CredentialStore {
     public static func read(account: String, identity: CredentialIdentity? = nil,
                             allowInteraction: Bool = false) -> String? {
         guard !account.isEmpty else { return nil }
+        // ★ 用 defer 报，不写在成功分支后面：用户点「拒绝」、密码读不出来时
+        //   那个授权框一样弹过，窗口一样被甩到后面 —— 那两种情况更需要救。
+        defer { if allowInteraction { onInteractiveRead?() } }
         lock.lock(); let store = backend; lock.unlock()
         var value = store.read(account: account, allowInteraction: allowInteraction)
         if value == nil, allowInteraction, store is KeychainSecretStore,

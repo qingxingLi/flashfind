@@ -103,7 +103,14 @@ struct SearchView: View {
                                  selection: model.commandSelection,
                                  activeTargetLabel: model.locationLabel,
                                  numbers: model.commandNumbers,
-                                 maximumVisible: model.commandMaximumVisible)
+                                 maximumVisible: model.commandMaximumVisible,
+                                 onHover: { model.hoverCommand(at: $0) },
+                                 onPick: { index in
+                                     model.pickCommand(at: index)
+                                     // 点完把焦点还给输入框：选完位置通常还要接着打字，
+                                     // 不还焦点的话用户得再点一次输入框才开始输入。
+                                     focused = true
+                                 })
     }
 
     var body: some View {

@@ -78,6 +78,34 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertThrowsError(try CredentialStore.save("s3cret", account: ""))
     }
 
+    /// 交互式读必须报一声：钥匙串授权框关掉之后要靠它把设置窗口提回前台。
+    ///
+    /// 判据是「这次读**允许系统交互**」，不是「读到了没有」—— 后台读
+    /// （启动自动连接、设置页渲染）不该把窗口甩到前台，那是另一种骚扰。
+    func testInteractiveReadReportsSoTheWindowCanBeBroughtBack() throws {
+        var reports = 0
+        CredentialStore.onInteractiveRead = { reports += 1 }
+        defer { CredentialStore.onInteractiveRead = nil }
+
+        try CredentialStore.save("s3cret", account: account)
+        XCTAssertEqual(CredentialStore.read(account: account), "s3cret")
+        XCTAssertEqual(reports, 0, "后台读不会弹授权框，不能报")
+
+        XCTAssertEqual(CredentialStore.read(account: account, allowInteraction: true), "s3cret")
+        XCTAssertEqual(reports, 1, "用户点的登录会弹授权框，读完必须报一声")
+    }
+
+    /// 用户点「拒绝」（或本机根本没有这条）时同样要报：
+    /// 框一样弹过、窗口一样会被甩到别的 App 后面 —— 那种情况更需要救。
+    func testInteractiveReadReportsEvenWhenNothingComesBack() {
+        var reports = 0
+        CredentialStore.onInteractiveRead = { reports += 1 }
+        defer { CredentialStore.onInteractiveRead = nil }
+
+        XCTAssertNil(CredentialStore.read(account: "nas-source:从没存过", allowInteraction: true))
+        XCTAssertEqual(reports, 1, "读不到也不能把这一声吞掉")
+    }
+
     func testFileIsOwnerReadWriteOnlyAndDirectoryIsOwnerOnly() throws {
         try CredentialStore.save("s3cret", account: account)
         let filePermissions = try permissions(of: CredentialStore.fileURL)

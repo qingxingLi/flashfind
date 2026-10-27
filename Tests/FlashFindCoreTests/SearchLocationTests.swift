@@ -274,6 +274,67 @@ final class SearchCommandCatalogTests: XCTestCase {
         XCTAssertEqual(items.last?.id, SearchCommandCatalog.settingsItemID)
     }
 
+    /// ★ 一个来源里勾了多个文件夹 ⇒ **每一条**都要进候选。
+    ///
+    /// 2026-10-26 真实报障：「路径下 openlist 选中好几个文件夹的搜索位置时，
+    /// 只显示第一个的文件夹」。配置里 `scopes` 明明是 `/A0001…/A0004` 四条，
+    /// 面板里只有 A0001 —— 界面按行数上限裁掉了其余三条
+    /// （见 `SearchCommandCatalog.maximumVisibleRows`）。
+    ///
+    /// 这条守的是「Core 把每一条都交出来」，裁切在界面层，不许再回来。
+    func testEveryRootOfOneSourceIsListed() {
+        let items = locationItems(sources: [source(id: "ol", name: "openlist",
+                                                   roots: ["/A0001", "/A0002", "/A0003", "/A0004"])])
+        let roots = items.filter {
+            if case .search(.sourceRoot) = $0.action { return true }
+            return false
+        }
+        XCTAssertEqual(roots.map(\.title), ["A0001", "A0002", "A0003", "A0004"],
+                       "同一个来源的四个搜索根必须全在候选里，不能只留第一个")
+        XCTAssertEqual(roots.map(\.subtitle), Array(repeating: "openlist", count: 4))
+    }
+
+    /// ★ 面板画得下的行数 = 数字键 1–9 加「打开设置」这一条 0，共十条。
+    ///
+    /// 「能按到哪」与「能看见哪」必须是同一个数：上限比带编号的候选少，
+    /// 按下去的数字就指向屏幕外（用户按 7 选中了 A0002，面板上却什么都没变）。
+    /// 这条在 Core 里锁死，App 层只能引用，不许另写一个数。
+    func testVisibleRowsCoverEveryNumberedCandidate() {
+        XCTAssertGreaterThanOrEqual(SearchCommandCatalog.maximumVisibleRows,
+                                    SearchCommandNumbering.numberedLimit + 1,
+                                    "行数上限至少覆盖 1–9 与 0")
+        // 两条基础项 + 七个搜索根 = 九条带编号的候选，再加「打开设置」正好十条。
+        let items = locationItems(sources: [
+            source(id: "ol", name: "openlist", roots: ["/A0001", "/A0002", "/A0003", "/A0004"]),
+            source(id: "syn", name: "群晖", roots: ["/照片", "/文档", "/备份"]),
+        ])
+        XCTAssertEqual(items.count, SearchCommandCatalog.maximumVisibleRows)
+        var keys: [Int?] = []
+        for index in items.indices { keys.append(SearchCommandNumbering.key(for: index, in: items)) }
+        XCTAssertEqual(keys, [1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+                       "前九条按顺序 1–9，「打开设置」固定 0")
+        XCTAssertEqual(SearchCommandNumbering.index(forKey: 0, in: items), items.count - 1)
+        XCTAssertEqual(SearchCommandNumbering.index(forKey: 9, in: items),
+                       items.count - 2, "数字 9 是第九个带编号的候选（这里正是第三个搜索根「备份」）")
+    }
+
+    /// 候选多到画不下时，编号规则照样成立 —— 界面负责滚动，不负责删。
+    func testNumberingStaysCorrectBeyondOneScreen() {
+        let items = locationItems(sources: [
+            source(id: "ol", name: "openlist",
+                   roots: ["/A0001", "/A0002", "/A0003", "/A0004", "/A0005"]),
+            source(id: "syn", name: "群晖", roots: ["/照片", "/文档", "/备份", "/归档"]),
+        ])
+        XCTAssertGreaterThan(items.count, SearchCommandCatalog.maximumVisibleRows,
+                             "这个用例的前提就是候选超过一屏")
+        XCTAssertEqual(SearchCommandNumbering.key(for: items.count - 1, in: items), 0,
+                       "「打开设置」无论排第几都是 0")
+        XCTAssertNil(SearchCommandNumbering.key(for: SearchCommandCatalog.maximumVisibleRows - 1, in: items),
+                     "第十条带编号的候选之后不再给数字（只能滚动或用方向键）")
+        XCTAssertEqual(SearchCommandNumbering.index(forKey: 0, in: items), items.count - 1,
+                       "0 必须仍能选中排在最末尾的「打开设置」")
+    }
+
     /// ★ 类型面板的每一条都带一个**词汇表认得**的格式词。
     ///
     /// 少了这条，「word」这种显示名会被当成关键词 —— 面板显示选上了，
