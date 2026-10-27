@@ -88,6 +88,8 @@ final class AppModel: ObservableObject {
     @Published var tokenBar: SearchTokenBar = .empty
     /// 命令面板里当前选中的候选下标。
     @Published var commandSelection: Int = 0
+    /// 只有键盘导航请求自动定位；鼠标悬停只改变高亮。
+    @Published var commandKeyboardNavigationRevision: UInt64 = 0
     /// 命令面板的候选顺序与数字快捷键（用户可在「设置 ▸ 搜索」里改）。
     ///
     /// ★ 判定（怎么重排、谁占哪个数字、什么情况回落到默认）全在 Core 的

@@ -45,6 +45,12 @@ import '../upstream_file_types.dart';
 /// 单页条数。实测 100 条耗时 ~100–275ms；1000 条虽被接受但没必要。
 const int _pageSize = 100;
 
+/// 同时进行的 root 搜索数。
+///
+/// 4 是折中：公网站点常见单请求 0.2–3 s，10 个存储串行要几十秒；
+/// 并发太高又容易被网关限流（实测 429 在突发请求下有出现）。
+const int _rootConcurrency = 4;
+
 /// 单次请求最多翻多少页。**必须有上限**：`total` 由服务端给，
 /// 拿它当循环终止条件是信任远端；这里再兜一层，防止异常 total 把循环拖死。
 const int _maxPages = 50;
@@ -58,9 +64,21 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
   Cancellation? _cancel;
   String? _identity;
 
-  /// 会话令牌。**只在内存里**：属会话态，不落盘、不进日志。
+  /// 会话令牌。**只在内存里**：属会话态、不落盘、不进日志。
   /// 实测有效期 48 小时，且 JWT 里带 `pwd_ts` —— 账号改密码会立即失效。
   String? _token;
+
+  /// 账号的 `base_path`（`/api/me` 给）。**游客账号常见 `/guest_dir`**。
+  ///
+  /// ★ 这是两个坐标系的换算基准，2026-10-27 真机报障的根因：
+  ///   · `list` 与请求里的 `parent` 都是**相对 base_path 的客户端坐标**（`/Book`）；
+  ///   · `/api/fs/search` 返回项的 `parent` 是**存储侧绝对路径**（`/guest_dir/Book/…`）。
+  /// 不换算 ⇒ 结果全部落在授权根之外 ⇒ 上层 `Scope.narrowTo` 判 `ScopeDenied`，
+  /// 界面表现是「搜不到 + 所选目录不在该账号的可搜索范围内」，而服务器明明回了结果。
+  ///
+  /// 实测（2026-10-27）：公网站点上两种形态都真实存在 —— 一种 `base_path='/'`，
+  /// 另一种（游客账号）`base_path='/guest_dir'`，两种都必须能搜。
+  String? _basePath;
 
   final Logger _log = Logger();
 
@@ -166,6 +184,8 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
   }) async {
     _identity = null;
     _token = null;
+    // 换账号/重登 ⇒ 必须重新读 base_path：不同账号的可见根可能完全不同。
+    _basePath = null;
     _cancel?.check();
 
     final preparedOtp = (otpCode ?? '').trim();
@@ -346,39 +366,55 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
       );
     }
 
+    // 两个坐标系换算一次就够（缓存在适配器里）；读不到按「无前缀」处理。
+    final base = await _ensureBasePath();
+
+    // ★ 多个 root **并发**搜，不再一个一个排队。
+    //
+    // 2026-10-27 报障「索引路径较多时搜索很慢」：原实现是 for 循环串行，
+    // 每个 root 先 `_ensureRootUsable`（一次 list）再 search —— **2×N 个请求全串行**。
+    // 公网站点单次 RTT 就有 0.2–3 s，10 个存储要等十几到几十秒。
+    // 这里并发 + 预检与搜索并行发（两者互不依赖），同样的请求数，墙钟时间按并发度下降。
+    final outcomes = List<_RootOutcome?>.filled(roots.length, null);
+    var cursor = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final index = cursor++;
+        if (index >= roots.length) return;
+        _cancel?.check();
+        outcomes[index] = await _searchRoot(keyword, _norm(roots[index]), base);
+      }
+    }
+
+    await Future.wait([
+      for (var i = 0; i < _rootConcurrency && i < roots.length; i++) worker(),
+    ]);
+
+    // ★ 合并按 **roots 原顺序**做：并发只改等待方式，不改结果顺序。
+    // 去重也放在这里一次性做，避免多个 worker 抢同一个 Set 造成不确定顺序。
     final seen = <String>{};
     final results = <FileItem>[];
-    // 单个 root 失败不整体失败：某台存储的上游网盘失效，不该让其他存储也搜不出东西。
     AdapterFailure? firstFailure;
-    // 至少一个 root 真的搜通了，才算「这次搜索做过」——
-    // 只有这种情况下「没结果」才是可信的「没有找到」。
     var searchedRoots = 0;
 
-    for (final root in roots) {
-      _cancel?.check();
-      final parent = _norm(root);
-      try {
-        // ★ 先确认这个存储**真的可读**，再搜。
-        //
-        // 真机实测：存储 `/C0115` 的上游网盘授权已失效 —— `list` 直接报
-        // `failed to list objs: … 40140120`，但 `/api/fs/search` 照样返回 73 条，
-        // 因为搜索只查数据库索引、不碰上游。只搜不验的后果是：
-        // 用户勾了这么个存储，会拿到一堆点不开的死链，而且看不出为什么。
-        //
-        // 预检成本是每个 root 一次 `per_page=1` 的列目录（实测几十毫秒），
-        // 换来的是「失效存储直接报错，而不是给出假结果」。
-        await _ensureRootUsable(parent);
-        await _searchOneRoot(keyword, parent, results, seen);
-        searchedRoots++;
-      } on AdapterFailure catch (failure) {
+    for (final outcome in outcomes) {
+      if (outcome == null) continue;
+      final failure = outcome.failure;
+      if (failure != null) {
         firstFailure ??= failure;
         // ★ 一个根没搜通就**上报一条**，不许静静丢掉。
         //
         // 「有别的根搜通了」只能决定**不抛异常**（那部分结果仍然有效），
         // 不能决定不报：上层拿到这些记录才知道「哪几个位置没搜」，
         // 从而把这次结果说成「不完整」，而不是「没有找到」。
-        onRootFailure?.call(RootSearchFailure(root: parent, failure: failure));
-        _log.w('OpenListAdapter: root $parent 搜索失败 => ${failure.kind}');
+        onRootFailure?.call(RootSearchFailure(root: outcome.root, failure: failure));
+        _log.w('OpenListAdapter: root ${outcome.root} 搜索失败 => ${failure.kind}');
+        continue;
+      }
+      searchedRoots++;
+      for (final item in outcome.items) {
+        if (seen.add(item.path)) results.add(item);
       }
     }
 
@@ -391,6 +427,30 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
       throw firstFailure;
     }
     return results;
+  }
+
+  /// 单个 root：预检与搜索**并行**发，两者都回来后按「以预检为准」判定。
+  ///
+  /// 预检存在的理由见 [search]：搜索只查索引、列目录才碰上游，
+  /// 「索引里有、实际读不了」的存储必须挡掉，否则用户拿到一堆点不开的死链。
+  /// 但它和搜索互不依赖 —— 串起来只是白等一个 RTT。
+  Future<_RootOutcome> _searchRoot(String keyword, String parent, String base) async {
+    final items = <FileItem>[];
+    final usable = _ensureRootUsable(parent);
+    final searching = _searchOneRoot(keyword, parent, base, items);
+
+    AdapterFailure? failure;
+    try {
+      await usable;
+    } on AdapterFailure catch (error) {
+      failure = error;
+    }
+    try {
+      await searching;
+    } on AdapterFailure catch (error) {
+      failure ??= error;
+    }
+    return _RootOutcome(parent, items, failure);
   }
 
   /// 轻量确认一个目录/存储可读（`per_page=1` 只取一条）。
@@ -408,9 +468,50 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
     _throwIfFailed(_envelope(body), action: '检查搜索位置', path: path);
   }
 
-  Future<void> _searchOneRoot(String keyword, String parent,
-      List<FileItem> results, Set<String> seen) async {
+  /// 读账号的 `base_path`。失败不致命：按 `/` 处理（老版本/网关改写都没有这个字段）。
+  Future<String> _ensureBasePath() async {
+    final cached = _basePath;
+    if (cached != null) return cached;
+
+    var base = '/';
+    try {
+      final response = await _dio.get<dynamic>(
+        '/api/me',
+        options: Options(
+          headers: <String, dynamic>{
+            'accept': 'application/json',
+            if (_token != null) 'authorization': _token!,
+          },
+          responseType: ResponseType.json,
+        ),
+      );
+      final envelope = _envelope(response.data);
+      if (envelope.code == 200) {
+        final raw = _stringField(envelope.data, 'base_path');
+        if (raw != null && raw.trim().isNotEmpty) base = _norm(raw);
+      }
+    } on DioException catch (error) {
+      _log.w('OpenListAdapter: 读取 base_path 失败，按 / 处理 => ${error.type}');
+    }
+    _basePath = base;
+    _log.i('OpenListAdapter: 账号 base_path => $base');
+    return base;
+  }
+
+  /// 存储侧绝对路径 → 客户端坐标。返回 null 表示这条不在本会话可见范围内。
+  ///
+  /// `base == '/'` 时服务端本来就用客户端坐标，原样返回。
+  static String? _clientPath(String serverPath, String base) {
+    if (base.isEmpty || base == '/') return serverPath;
+    if (serverPath == base) return '/';
+    if (serverPath.startsWith('$base/')) return serverPath.substring(base.length);
+    return null;
+  }
+
+  Future<void> _searchOneRoot(
+      String keyword, String parent, String base, List<FileItem> results) async {
     var page = 1;
+    var dropped = 0;
     while (page <= _maxPages) {
       _cancel?.check();
       final Object? body;
@@ -434,15 +535,36 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
       final data = envelope.data;
       final content = _listField(data, 'content');
       for (final item in content) {
-        final converted = _toFileItem(item, parent: null);
+        // ★ 结果项自带的是**存储侧绝对路径**（可能带 base_path 前缀）。
+        // 不换算就会落到授权根之外，上层判 ScopeDenied（见 `_basePath` 的说明）。
+        final serverParent = _norm(_stringField(item, 'parent') ?? parent);
+        final mapped = _clientPath(serverParent, base);
+        if (mapped == null) {
+          // 不在本会话可见范围内（别的账号/别的游客根）：不是「失败」，是看不见。
+          dropped++;
+          continue;
+        }
+        final converted = _toFileItem(item, parent: mapped);
         if (converted == null) continue;
-        if (seen.add(converted.path)) results.add(converted);
+        results.add(converted);
       }
 
       final total = _intField(data, 'total');
       if (content.isEmpty) break;
       if (total == null || (page * _pageSize) >= total) break;
       page++;
+    }
+    if (dropped > 0) {
+      _log.w('OpenListAdapter: root $parent 有 $dropped 条结果不在本账号可见范围内，已丢弃');
+      // ★ 一条都没换算出客户端坐标 ⇒ 不是「没找到」，而是这个 root 的返回
+      //   整体落在账号可见范围之外（base_path 与配置的位置对不上）。
+      //   静默返回空会被界面说成「没有找到」，必须报成范围错误。
+      if (results.isEmpty) {
+        throw AdapterFailure(
+          ErrorKind.scopeDenied,
+          '这个位置返回的结果都不在账号可见范围内（账号基准路径与位置不匹配）。',
+        );
+      }
     }
   }
 
@@ -454,6 +576,7 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
   Future<void> logout() async {
     _token = null;
     _identity = null;
+    _basePath = null;
     _log.i('OpenListAdapter: 已清除会话状态');
   }
 
@@ -669,4 +792,12 @@ class _Envelope {
   final int? code;
   final String? message;
   final Object? data;
+}
+
+/// 一个 root 的搜索产物：成功时 `failure == null`，`items` 可直接并入总结果。
+class _RootOutcome {
+  const _RootOutcome(this.root, this.items, this.failure);
+  final String root;
+  final List<FileItem> items;
+  final AdapterFailure? failure;
 }

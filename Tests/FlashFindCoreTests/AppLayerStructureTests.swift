@@ -1635,6 +1635,22 @@ final class AppLayerStructureTests: XCTestCase {
                       "滚动区的固定高度必须与浮窗高度用同一个上限，否则面板被切掉一截")
     }
 
+    func testCommandPaletteHoverDoesNotRequestScrolling() throws {
+        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
+        XCTAssertFalse(palette.contains(".onChange(of: selection)"),
+                       "滚轮会改变指针下的高亮项，监听高亮自动居中会把滚动拉回去")
+        XCTAssertTrue(palette.contains(".onChange(of: keyboardNavigationRevision)"))
+
+        let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
+        let keyboard = try XCTUnwrap(braceBlock(after: "func moveCommandSelection(", in: model))
+        let hover = try XCTUnwrap(braceBlock(after: "func hoverCommand(", in: model))
+        XCTAssertTrue(keyboard.contains("commandKeyboardNavigationRevision &+= 1"))
+        XCTAssertFalse(hover.contains("commandKeyboardNavigationRevision"),
+                       "悬停只更新高亮，不能发送自动定位请求")
+        let view = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(view.contains("keyboardNavigationRevision: model.commandKeyboardNavigationRevision"))
+    }
+
     /// ★ 面板的行必须能用**鼠标点**（2026-10-27 用户要求：不只有按键一条路）。
     ///
     /// 面板不是 `List`／`NSTableView`，没有原生点击行为 —— 不显式挂

@@ -3,7 +3,7 @@
 macOS 菜单栏 NAS 文件搜索工具。按下全局热键呼出搜索框，直接搜你 NAS 上的文件名，
 不用先在 Finder 里挂载共享文件夹。
 
-- **当前版本**：1.1.18
+- **当前版本**：1.1.19
 - **许可**：Apache-2.0（见 `LICENSE`）
 - **商标**：名称与图标保留，见 `TRADEMARK.md`
 - **隐私**：不收集、不上传任何数据，见 `PRIVACY.md`
@@ -35,7 +35,7 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
 | 类型 | 协议 | 说明 |
 |---|---|---|
 | 群晖 Synology | DSM `SYNO.FileStation.Search` v2 | 走 DSM 的 Web API，支持 OTP 双因子登录 |
-| OpenList | OpenList 的 `/api/fs/search` | 自带账号体系，支持 2FA 动态码；按搜索根逐根查询 |
+| OpenList | OpenList 的 `/api/fs/search` | 自带账号体系，支持 2FA 动态码；按搜索根查询，最多 4 路并发 |
 | 通用 WebDAV | WebDAV `PROPFIND` / `SEARCH` | 含飞牛 fnOS 等；OpenList 的入口是 `/dav` 且必须 https |
 | SMB/CIFS | 系统 `mount_smbfs` | 只用于打开结果，不用于搜索 |
 
@@ -107,14 +107,14 @@ mkdir -p .ff2-scratch && ln -s .ff2-scratch .ff2-alias
 ### 跑测试
 
 ```bash
-bash scripts/build.sh test      # Swift 全量 1599 项 + MyNASCore 的行为套件
+bash scripts/build.sh test      # Swift 全量 1600 项 + MyNASCore 的 11 个行为套件
 ```
 
 或分开跑：
 
 ```bash
-swift test                       # 1599 项
-cd MyNASCore && dart test_*.dart # 9 个套件
+swift test                       # 1600 项
+cd MyNASCore && dart test_*.dart # 11 个套件（两个 live 套件要真服务器，脚本里跳过）
 ```
 
 > `MyNASCore/test_webdav_live.dart` 默认在**本机**起一个真 WebDAV 服务器做端到端验证，

@@ -101,6 +101,7 @@ struct SearchView: View {
     private var commandPalette: some View {
         SearchCommandPaletteView(items: model.filteredCommandItems,
                                  selection: model.commandSelection,
+                                 keyboardNavigationRevision: model.commandKeyboardNavigationRevision,
                                  activeTargetLabel: model.locationLabel,
                                  numbers: model.commandNumbers,
                                  maximumVisible: model.commandMaximumVisible,

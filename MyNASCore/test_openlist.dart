@@ -141,6 +141,28 @@ class Fixture {
   /// 上游网盘授权失效：list 报错，search 照样靠索引返回结果。
   String? deadRoot;
 
+  /// 账号的 `base_path`（`/api/me` 给）。游客账号常见 `/guest_dir`。
+  ///
+  /// ★ 真机实测（2026-10-27）：游客账号的 `base_path` 可以落在子目录（如 `/guest_dir`），
+  ///   列目录是 `/Book`，而搜索结果 `parent` 是 `/guest_dir/Book/…`。
+  String basePath = '/';
+
+  /// 搜索结果 `parent` 前面的前缀，用来模拟上面那个「存储侧绝对路径」。
+  String searchParentPrefix = '';
+
+  /// 额外塞一条**不在本账号可见范围内**的搜索结果（parent 在 base_path 之外）。
+  String? outOfScopeParent;
+
+  /// 让 `/api/me` 回 404（模拟老版本没有这个端点 / 网关改写）。
+  bool meUnavailable = false;
+
+  /// 每个请求人为延时（毫秒），用于量并发。
+  int delayMs = 0;
+
+  /// 当前在飞请求数与历史峰值（并发用例的判据）。
+  int inFlight = 0;
+  int maxInFlight = 0;
+
   List<RecordedRequest> get searchRequests =>
       requests.where((r) => r.path == '/api/fs/search').toList();
 
@@ -153,6 +175,13 @@ class Fixture {
     searchTotal = 3;
     rootHasNoDir = false;
     deadRoot = null;
+    basePath = '/';
+    meUnavailable = false;
+    searchParentPrefix = '';
+    outOfScopeParent = null;
+    delayMs = 0;
+    inFlight = 0;
+    maxInFlight = 0;
   }
 
   Future<void> close() => server.close(force: true);
@@ -178,6 +207,12 @@ Future<Fixture> startFixture() async {
       request.headers.value('authorization'),
     ));
 
+    fixture.inFlight++;
+    if (fixture.inFlight > fixture.maxInFlight) fixture.maxInFlight = fixture.inFlight;
+    if (fixture.delayMs > 0) {
+      await Future<void>.delayed(Duration(milliseconds: fixture.delayMs));
+    }
+
     request.response.headers.contentType = ContentType.json;
 
     void reply(Map<String, Object?> envelope) {
@@ -185,6 +220,22 @@ Future<Fixture> startFixture() async {
     }
 
     switch (request.uri.path) {
+      case '/api/me':
+        // 实测：登录后拿 base_path；游客账号是 /guest_dir 之类的前缀。
+        if (fixture.meUnavailable) {
+          reply({'code': 404, 'message': 'no such endpoint', 'data': null});
+          break;
+        }
+        if (request.headers.value('authorization') != _goodToken) {
+          reply({'code': 401, 'message': 'token is invalidated', 'data': null});
+          break;
+        }
+        reply({
+          'code': 200,
+          'message': 'success',
+          'data': {'id': 2, 'username': 'guest', 'base_path': fixture.basePath},
+        });
+
       case '/api/auth/login':
         final user = body['username'];
         final pass = body['password'];
@@ -292,16 +343,29 @@ Future<Fixture> startFixture() async {
         //   1.1.11 就是在这里漏掉的：fixture 恒返回文件，于是「发错 scope」
         //   在这套测试里一条都不会红，真机上却只能搜到文件夹。
         final isDir = scope == 1;
+        final serverParent =
+            '${fixture.searchParentPrefix}${parent == '/' ? '/A0001/docs' : parent}';
         final items = List.generate(count, (i) {
           final index = start + i;
           return {
-            'parent': parent == '/' ? '/A0001/docs' : parent,
+            'parent': serverParent,
             'name': isDir ? 'hit_$index' : 'hit_$index.pdf',
             'is_dir': isDir,
             'size': 4096,
             'type': isDir ? 1 : 0,
           };
         });
+        // 模拟「索引里还有别的账号/别的游客根的文件」：上层必须丢掉，不能整体失败。
+        final outOfScope = fixture.outOfScopeParent;
+        if (outOfScope != null && page == 1) {
+          items.insert(0, {
+            'parent': outOfScope,
+            'name': 'not_mine.pdf',
+            'is_dir': false,
+            'size': 1,
+            'type': 0,
+          });
+        }
         reply({
           'code': 200,
           'message': 'success',
@@ -312,6 +376,7 @@ Future<Fixture> startFixture() async {
         reply({'code': 404, 'message': 'no such endpoint', 'data': null});
     }
 
+    fixture.inFlight--;
     await request.response.close();
   });
 
@@ -328,6 +393,118 @@ OpenListAdapter adapterFor(Fixture fixture) {
 // 测试
 // ─────────────────────────────────────────────────────────────
 
+Future<void> basePathTests(Fixture fixture) async {
+  // ignore: avoid_print
+  print('\n[1b] 账号 base_path：搜索结果的路径坐标系');
+
+  await check('base_path=/ 时搜索结果原样使用服务端路径', () async {
+    fixture.reset();
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    final items = await adapter.search('hit', roots: ['/A0001']);
+    if (items.isEmpty) throw '结果为空';
+    if (items.any((e) => !e.path.startsWith('/A0001/'))) {
+      throw '路径不对: ${items.first.path}';
+    }
+  });
+
+  await check('★ base_path=/guest_dir：搜索结果必须换算回客户端坐标', () async {
+    fixture.reset();
+    fixture.basePath = '/guest_dir';
+    fixture.searchParentPrefix = '/guest_dir';
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    final items = await adapter.search('hit', roots: ['/A0001']);
+    if (items.isEmpty) throw '结果为空';
+    for (final item in items) {
+      if (item.path.contains('guest_dir')) {
+        throw '路径仍带 base_path 前缀：${item.path}（上层会判 ScopeDenied）';
+      }
+      if (!item.path.startsWith('/A0001/')) throw '路径不在授权根内：${item.path}';
+    }
+    // 请求里的 parent 仍是**客户端坐标**，不许擅自加上前缀。
+    final sent = fixture.searchRequests.map((r) => r.body['parent']).toSet();
+    if (sent.contains('/guest_dir/A0001')) throw '不要把 base_path 拼进请求';
+  });
+
+  await check('★ 可见范围外的结果被丢弃，不整体失败', () async {
+    fixture.reset();
+    fixture.basePath = '/guest_dir';
+    fixture.searchParentPrefix = '/guest_dir';
+    fixture.outOfScopeParent = '/other_user/secret';
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    final items = await adapter.search('hit', roots: ['/A0001']);
+    if (items.isEmpty) throw '越界行不该把整次搜索弄空';
+    if (items.any((e) => e.name == 'not_mine.pdf')) throw '越界行被当成结果返回了';
+  });
+
+  await check('★ 整页结果都在可见范围外时，必须报范围错误而不是「没找到」', () async {
+    fixture.reset();
+    fixture.basePath = '/guest_dir';
+    fixture.searchParentPrefix = '/elsewhere'; // 前缀与 base_path 完全不同
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    var threw = false;
+    try {
+      await adapter.search('hit', roots: ['/A0001']);
+    } on AdapterFailure catch (error) {
+      threw = true;
+      if (error.kind != ErrorKind.scopeDenied) throw '错误类型不对: ${error.kind}';
+    }
+    if (!threw) throw '静默返回空 = 界面会说成「没有找到」';
+  });
+
+  await check('/api/me 不可用时按无前缀处理，不影响搜索', () async {
+    fixture.reset();
+    fixture.meUnavailable = true;
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    final items = await adapter.search('hit', roots: ['/A0001']);
+    if (items.isEmpty) throw '读不到 base_path 就把搜索弄失败了';
+  });
+}
+
+Future<void> concurrencyTests(Fixture fixture) async {
+  // ignore: avoid_print
+  print('\n[1c] 多个 root 并发（「索引路径多时很慢」的根因）');
+
+  await check('★ 单 root：预检与搜索并行发（在飞 2）', () async {
+    fixture.reset();
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    fixture.reset();
+    fixture.delayMs = 120;
+    await adapter.search('hit', roots: ['/A0001']);
+    if (fixture.maxInFlight < 2) {
+      throw '预检与搜索仍然是串行的：maxInFlight=${fixture.maxInFlight}';
+    }
+  });
+
+  await check('★ 4 个 root 并发搜：在飞 ≥4，墙钟远小于串行', () async {
+    fixture.reset();
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    fixture.reset();
+    fixture.delayMs = 120;
+    final watch = Stopwatch()..start();
+    final items = await adapter.search('hit',
+        roots: ['/A0001', '/B0002', '/C0003', '/D0004']);
+    watch.stop();
+    if (fixture.maxInFlight < 4) {
+      throw '并发度不够：maxInFlight=${fixture.maxInFlight}（串行实现恒为 1）';
+    }
+    // 串行下界 = 4 root ×（预检 120 + 搜索 120）= 960ms；并发 4 应 ≪ 该值。
+    if (watch.elapsedMilliseconds > 700) {
+      throw '墙钟 ${watch.elapsedMilliseconds}ms，接近串行下界 960ms';
+    }
+    if (items.isEmpty) throw '结果为空';
+    if (fixture.searchRequests.length != 4) {
+      throw '每个 root 应恰好一次搜索请求，实际 ${fixture.searchRequests.length}';
+    }
+  });
+}
+
 Future<void> main() async {
   // ignore: avoid_print
   print('\n[1] OpenList 适配器（本地 fixture 按实测契约搭）');
@@ -338,6 +515,8 @@ Future<void> main() async {
     await otpTests(fixture);
     await listTests(fixture);
     await searchTests(fixture);
+    await basePathTests(fixture);
+    await concurrencyTests(fixture);
     await partialFailureTests(fixture);
     await shapeTests(fixture);
     await registryTests();

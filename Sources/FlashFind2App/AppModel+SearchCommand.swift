@@ -129,6 +129,7 @@ extension AppModel {
         let next = commandSelection + delta
         // 上下环绕：列表比屏幕高时，停在两端会让人以为面板卡住了。
         commandSelection = ((next % count) + count) % count
+        commandKeyboardNavigationRevision &+= 1
     }
 
     /// 退出命令模式：把斜杠前缀与筛选词去掉，回到普通搜索。

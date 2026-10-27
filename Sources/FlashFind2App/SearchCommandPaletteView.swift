@@ -11,6 +11,7 @@ import FlashFindCore
 struct SearchCommandPaletteView: View {
     let items: [SearchCommandItem]
     let selection: Int
+    let keyboardNavigationRevision: UInt64
     /// 已选定的当前位置名。命令模式下显示，好让用户知道现在限在哪儿。
     let activeTargetLabel: String?
     /// 每条候选对应的数字键（没有则 nil），与 `items` 一一对应。
@@ -73,16 +74,17 @@ struct SearchCommandPaletteView: View {
                     .padding(.horizontal, 16)
                     .frame(height: rowHeight)
             } else if needsScrolling {
-                // 超出行数上限：固定高度 + 滚动，选中项始终滚进可视区。
+                // 超出行数上限：固定高度 + 原生滚动，键盘导航时自动定位。
                 // 上下键翻到第 11 条时，面板不会「看起来没反应」。
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: true) {
                         VStack(spacing: 0) { rowList }
                     }
                     .frame(height: CGFloat(maximumVisible) * rowHeight)
-                    .onChange(of: selection) { value in
-                        guard items.indices.contains(value) else { return }
-                        proxy.scrollTo(items[value].id, anchor: .center)
+                    .onChange(of: keyboardNavigationRevision) { _ in
+                        // 滚轮会让新行经过指针；悬停高亮不能把列表重新拉回中间。
+                        guard items.indices.contains(selection) else { return }
+                        proxy.scrollTo(items[selection].id, anchor: .center)
                     }
                 }
             } else {
