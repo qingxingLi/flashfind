@@ -312,6 +312,11 @@ struct SettingsPanePicker: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("设置页面")
         .accessibilityIdentifier("settings-pane-picker")
+        // 选中块滑过去的动画**只在这个 HStack 上**（`matchedGeometryEffect` 需要
+        // 一个动画上下文）。挂在这里而不是 `select` 里，是为了把作用范围锁死在
+        // 胶囊内部 —— 见 `select(_:)` 的说明。
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.80),
+                   value: selection)
         .task { await switchPaneInPreviewIfRequested() }
     }
 
@@ -435,17 +440,62 @@ struct SettingsPanePicker: View {
         isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.05)
     }
 
-    /// 换页。动画只在这一处：选中块滑过去 + 内容淡入淡出（见 `SettingsView.content`）。
+    /// 换页。动画只在**这条胶囊内部**：选中块滑过去、字重与颜色跟着变。
+    ///
+    /// ★★ 这里**不能**用 `withAnimation` 包住 `selection = next`（2026-10-28 改）：
+    ///   那是一个隐式事务，作用范围是整棵窗口视图树 —— 内容替换、卡片增删带来的
+    ///   高度变化、`ScrollView` 的滚动位置，全都会跟着做 0.34s 的弹簧插值。
+    ///   用户看到的就是「切页时里面的内容在漂」。
+    ///   改成由 picker 自己的 `.animation(value: selection)` 驱动后，动画范围
+    ///   到胶囊为止，内容区是瞬间替换（系统设置切页也是这个手感）。
     ///
     /// 「减少动态效果」打开时不滑，直接落位——系统设置里这一档也是这么做的。
     private func select(_ next: SettingsPane) {
         guard next != selection else { return }
-        if reduceMotion {
-            selection = next
-        } else {
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.80)) {
-                selection = next
-            }
+        selection = next
+    }
+}
+
+// MARK: - 滚动条
+
+/// 让设置页的滚动条**浮在内容上**（`NSScroller.Style.overlay`），不占内容宽度。
+///
+/// ★★ 2026-10-28 用户报「设置页切换的时候不同页面的对齐有问题，里边的内容会漂移」，
+///   真凶就在这里：接了鼠标的机器上系统滚动条是 **legacy（占位）** 风格，
+///   一旦某页内容超过窗口高度，滚动条会把内容区**减掉 15pt** —— 居中的卡片整体
+///   左移 7.5pt、自己还窄了 15pt。搜索页来源多时正好超一屏，另外三页不超，
+///   于是切页看到的就是「内容左右跳一下」，而且两页的卡片左缘不在一条竖线上。
+///   实测（@2x，窗口 640×648）：搜索页内容左缘 113px、高级页 128px，差 15px。
+///
+///   系统设置自己用的就是 overlay 风格：滚动条浮在内容上，内容宽度恒定。
+///   ★ 不要改成 `.scrollIndicators(.hidden)`：那会把「这页还能往下滚」的唯一
+///     提示也一起藏掉，用户只会觉得页面被截断了。
+struct SettingsOverlayScrollers: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        // 返回时还没进视图层级（`enclosingScrollView` 是 nil），下一轮再设。
+        Task { @MainActor in Self.apply(from: view) }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        Task { @MainActor in Self.apply(from: view) }
+    }
+
+    /// SwiftUI 的 `ScrollView` 底下就是 `NSScrollView`。
+    ///
+    /// ★ 不能只靠 `enclosingScrollView`：`.background(...)` 挂上去的 NSView 是
+    ///   `NSScrollView` 的**兄弟**而不是它的 documentView，往上找会拿到 nil
+    ///   （2026-10-28 第一版就是这么没生效的）。所以从窗口根视图整棵树里找。
+    private static func apply(from view: NSView) {
+        guard let root = view.window?.contentView else { return }
+        apply(in: root)
+    }
+
+    private static func apply(in view: NSView) {
+        if let scrollView = view as? NSScrollView, scrollView.scrollerStyle != .overlay {
+            scrollView.scrollerStyle = .overlay
         }
+        for subview in view.subviews { apply(in: subview) }
     }
 }

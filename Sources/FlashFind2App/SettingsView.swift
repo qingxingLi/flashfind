@@ -83,18 +83,51 @@ struct SettingsView: View {
     }
 
     /// 内容区：限宽并居中，窗口拉宽时卡片不再无限横向拉伸。
+    ///
+    /// ★★ 切页时内容「漂移」有三条成因（2026-10-28 用户报，前两条已修、
+    ///   第三条在 `SettingsPanePicker.select` 里也一并改掉了）：
+    ///   1. `ScrollView` 的滚动偏移被下一页继承 —— 四页高度不同，从滚到一半的
+    ///      搜索页切到较短的高级页，偏移先被夹紧、切回来又跳一次；
+    ///   2. 四个页面直接展开在**同一个** `VStack` 里，`pane` 一变，SwiftUI 会把
+    ///      新旧两页的卡片按位置做**隐式布局插值**，看得见的就是卡片从旧位置滑过去；
+    ///   3. 切页是 `withAnimation(.spring(0.34))` 包着写的，那个隐式事务会把
+    ///      内容替换、滚动位置、卡片高度**全部**做成弹簧插值 —— 0.34s 里内容
+    ///      一边淡一边长高变矮，肉眼看就是「飘」。
+    /// 于是：内容带 `.id(pane)`（是替换而不是插值）、切页新内容不吃动画
+    /// （`.animation(nil, value: pane)`）、滚动位置显式回顶（无动画事务）。
     private var content: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 22) { detail }
-                .padding(.horizontal, 24)
-                .padding(.top, 18)
-                .padding(.bottom, 26)
-                .frame(maxWidth: SettingsLayout.contentMaxWidth)
-                .frame(maxWidth: .infinity)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 22) { detail }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 18)
+                    .padding(.bottom, 26)
+                    .frame(maxWidth: SettingsLayout.contentMaxWidth)
+                    .frame(maxWidth: .infinity)
+                    .id(SettingsLayout.topAnchor)
+            }
+            .onChange(of: pane) { _ in scrollToTop(proxy) }
+            .onChange(of: detailSourceID) { _ in scrollToTop(proxy) }
+            // ★ 滚动条不占宽度：否则「内容超一屏的页」比别的页窄 15pt、左移 7.5pt，
+            //   切页时看着就是内容在漂（见 `SettingsOverlayScrollers`）。
+            .background(SettingsOverlayScrollers())
+            // ★ 切页**不给内容做动画**：选中块自己滑（`matchedGeometryEffect`），
+            //   内容是瞬间替换 —— 系统设置切页也是这个手感，且不会「一边淡一边长高」。
+            .animation(nil, value: pane)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: detailSourceID)
         }
-        .transition(.opacity)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: pane)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: detailSourceID)
+    }
+
+    /// 切页 / 进出来源详情都回顶部。
+    ///
+    /// 四页高度不同，留着上一页的偏移就是用户看到的「内容漂移」；
+    /// 这里不加动画 —— 回顶和交叉淡入同时做动画会变成「一边滑一边淡」。
+    private func scrollToTop(_ proxy: ScrollViewProxy) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            proxy.scrollTo(SettingsLayout.topAnchor, anchor: .top)
+        }
     }
 
     /// 打开来源向导的独立窗口。
@@ -126,13 +159,28 @@ struct SettingsView: View {
         Binding(get: { model.appearanceChoice }, set: { model.appearanceChoice = $0 })
     }
 
+    /// 四个页面。
+    ///
+    /// ★ `.id(pane)` 不是多余的：没有它，切页时 SwiftUI 会把新旧两页当作
+    ///   同一棵树的不同取值，按位置插值（卡片从旧页的位置滑到新页的位置），
+    ///   看起来就是「里面的内容在漂移」。给了 id 才是替换。
+    /// 四个页面。
+    ///
+    /// ★ `.id(pane)` 不是多余的：没有它，SwiftUI 会把新旧两页当作同一棵树的
+    ///   不同取值，按位置插值（卡片从旧页的位置滑到新页的位置），
+    ///   看起来就是「里面的内容在漂移」。给了 id 才是**替换**。
+    /// ★ 也不再挂 `.transition(.opacity)`：切页不给内容做过渡（见 `content`），
+    ///   交叉淡入在 0.16s 里就是一层「重影」，快得只让人觉得「晃了一下」。
     @ViewBuilder private var detail: some View {
-        switch pane {
-        case .general: generalForm
-        case .search: searchPane
-        case .ai: aiForm
-        case .advanced: advancedForm
+        Group {
+            switch pane {
+            case .general: generalForm
+            case .search: searchPane
+            case .ai: aiForm
+            case .advanced: advancedForm
+            }
         }
+        .id(pane)
     }
 
     // MARK: - 通用
@@ -844,6 +892,9 @@ private enum SettingsLayout {
     /// 卡片被拉到 800pt 宽时，标签与控件之间会空出一大片，
     /// 跟系统设置的观感就对不上了。
     static let contentMaxWidth: CGFloat = 560
+
+    /// 内容区顶部的锚点。切页时 `scrollTo` 它，把滚动位置拉回顶端。
+    static let topAnchor = "settings-content-top"
 }
 
 /// 完全磁盘访问的判定与入口。

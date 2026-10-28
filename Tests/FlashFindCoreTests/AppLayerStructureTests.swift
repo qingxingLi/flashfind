@@ -3567,4 +3567,53 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertFalse(code.contains(".prefix(200)"),
                        "★ 200 只许出现在 `SearchResultLimit.perSearch` 一处，界面与模型都不许再写一遍")
     }
+
+    /// 设置页切页不许「内容漂移」。
+    ///
+    /// 2026-10-28 用户报「设置页切换的时候不同页面的对齐有问题，里边的内容会出现漂移」。
+    /// 成因两条，都只在切换那一瞬间可见，静态截图看不出来：
+    /// ① `ScrollView` 的滚动偏移被下一页继承（四页高度不同，偏移被夹紧又回弹）；
+    /// ② 四个页面展开在同一个 `VStack` 里，`pane` 一变 SwiftUI 会按位置插值，
+    ///    卡片从旧页的位置滑到新页的位置。
+    /// 判据：内容带 `.id(pane)`（成为「替换」而不是「插值」）+ 切页 `scrollTo` 回顶。
+    func testSettingsPaneSwitchReplacesContentAndScrollsToTop() throws {
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+
+        XCTAssertTrue(settings.contains(".id(pane)"),
+                      "★ 内容没有 `.id(pane)`：切页时 SwiftUI 会把新旧两页按位置插值（内容漂移）")
+        XCTAssertTrue(settings.contains("ScrollViewReader"),
+                      "切页回顶需要 `ScrollViewReader`：缺了它只能继承上一页的滚动偏移")
+        XCTAssertTrue(settings.contains("proxy.scrollTo(SettingsLayout.topAnchor"),
+                      "★ 切页必须 `scrollTo` 回顶，否则从滚到一半的长页切到短页就是「漂移」")
+
+        // 回顶与交叉淡入不许各带动画：一边滑一边淡，看起来仍是在飘。
+        XCTAssertTrue(settings.contains("transaction.animation = nil"),
+                      "回顶要用无动画事务，否则会与 0.16s 的淡入叠成「边滑边淡」")
+
+        // 四页必须共用同一套根容器（同一间距、同一套卡片），否则左右边缘会各偏一点。
+        for name in ["generalForm", "searchForm", "aiForm", "advancedForm"] {
+            let block = try XCTUnwrap(braceBlock(after: "var \(name)", in: settings),
+                                      "取不到 \(name) 的块，本条断言失去意义")
+            XCTAssertTrue(block.contains("VStack(alignment: .leading, spacing: 22)"),
+                          "\(name) 的根容器与其它三页不一致（间距/对齐会各偏一点）")
+        }
+
+        // ★★ 真凶：占位滚动条。
+        //
+        // 内容超一屏的那一页会出现 legacy 滚动条，它**占掉 15pt 宽度**，
+        // 居中的卡片整体左移 7.5pt、自己也窄 15pt；另外三页不超一屏 ⇒
+        // 切页时内容左右跳一下。实测 @2x：搜索页内容左缘 113px、高级页 128px。
+        // 判据：设置页必须把 NSScrollView 的 scrollerStyle 设成 `.overlay`。
+        XCTAssertTrue(settings.contains("SettingsOverlayScrollers()"),
+                      "★ 设置页的 ScrollView 必须挂 `SettingsOverlayScrollers`："
+                      + "否则「内容超一屏的页」比别的页窄 15pt、整体左移 7.5pt")
+        let chrome = codeOnly(try appSource("SettingsChrome.swift"))
+        XCTAssertTrue(chrome.contains("scrollerStyle = .overlay"),
+                      "★ 滚动条必须改成 overlay（不占宽度）；改成 legacy 就会让长页内容整体左移")
+        XCTAssertTrue(chrome.contains("view.window?.contentView"),
+                      "★ 要从窗口根视图找 NSScrollView：`.background` 挂上去的视图是它的兄弟，"
+                      + "`enclosingScrollView` 会拿到 nil（第一版就是这么没生效的）")
+        XCTAssertFalse(settings.contains(".scrollIndicators(.hidden)"),
+                       "不许用「隐藏指示器」糊过去：那是把「还能往下滚」的唯一提示也删了")
+    }
 }
