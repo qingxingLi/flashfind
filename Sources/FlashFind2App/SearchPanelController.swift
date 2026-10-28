@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import QuartzCore
+import FlashFindCore
 
 private final class SearchPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -10,10 +12,49 @@ private final class TransparentHostingView<Content: View>: NSHostingView<Content
     override var isOpaque: Bool { false }
 }
 
-/// One material owns the entire floating search surface, including expanded results.
+/// 搜索区的两块窗口都登记在这里，键盘监视器据此判断「这个事件算不算在搜索区里」。
+///
+/// ★ 为什么需要一份登记表：键盘监视器挂在搜索框那一块的视图上，但它必须对
+///   **结果那一块窗口**里的按键同样生效（点过结果再按 ↑↓ / 空格 / 回车的场景）。
+///   逐个窗口 `===` 比较散在几处，删一块窗口就会漏一处，所以集中在这里。
+@MainActor
+final class SearchWindowRegistry {
+    static let shared = SearchWindowRegistry()
+    private weak var field: NSWindow?
+    private weak var results: NSWindow?
+
+    func register(field: NSWindow, results: NSWindow) {
+        self.field = field
+        self.results = results
+    }
+
+    func contains(_ window: NSWindow) -> Bool {
+        window === field || window === results
+    }
+
+    /// 搜索框那一块窗口的 frame。
+    ///
+    /// ★ 钉住时要拿它当锚点：「钉住」出来的是一块 10 行高的窗口，
+    ///   按「key window 的原点」摆的话会正好盖住搜索框（第一次跑就盖住了）。
+    var fieldFrame: NSRect? { field?.frame }
+}
+
+/// 搜索框那一块窗口 + 结果那一块窗口的**协调者**。
+///
+/// ## 2026-10-28：一块拆成两块
+///
+/// 用户：「钉住前后的搜索框和搜索结果都应该可以单独移动」。同一个窗口里两块
+/// 只能一起动，所以这里从此管**两**个 `NSPanel`：
+/// * 搜索框那一块（`SearchView`）：固定高，只由「有没有键位提示」决定；
+/// * 结果那一块（`SearchResultsPanelView`）：有内容才出现，高度随结果变；
+///   第一次出现时贴在搜索框下方 10pt，**之后各自独立**（拖搜索框不再带着它走）。
+///
+/// ★ 两块窗口都**没有任何表面**：玻璃由各自的模块画（`SearchModuleSurface`），
+///   中间那道 10pt 是两块窗口之间的真实空隙——桌面从里面透过来。
 @MainActor
 final class SearchPanelController {
     private let panel: NSPanel
+    private let results: SearchResultsPanelController
     var isKeyWindow: Bool { panel.isKeyWindow }
     private let model: AppModel
 #if DEBUG
@@ -21,6 +62,7 @@ final class SearchPanelController {
 #endif
     private var showObserver: NSObjectProtocol?
     private var toggleObserver: NSObjectProtocol?
+    private var focusObserver: NSObjectProtocol?
 
     init(model: AppModel) {
         self.model = model
@@ -32,28 +74,31 @@ final class SearchPanelController {
         panel.title = "闪寻"
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // ★ 窗口自己**不再有任何表面**（2026-10-27 模块化）。
+        //
+        // 原来是「一整块玻璃 + 里面一行一行」，于是只有搜索框时外面还裹着一层壳、
+        // 胶囊四周多出遮罩。现在窗口只提供一块透明画布，模块自己画玻璃。
+        //
+        // 阴影必须关掉：透明窗口的 `hasShadow` 是按**窗口矩形**算的，
+        // 会在圆角外面画一整块方形阴影。两块窗口各关各的。
+        panel.hasShadow = false
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.minSize = NSSize(width: 640, height: SearchLayout.searchHeight)
-        panel.maxSize = NSSize(width: 900, height: 620)
+        panel.maxSize = NSSize(width: 900, height: SearchLayout.searchHeight + 38)
         panel.appearance = AppEnvironment.previewAppearance
-        let material = NativeMaterialView.makeView()
         let host = TransparentHostingView(rootView: SearchView(model: model))
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
-        host.translatesAutoresizingMaskIntoConstraints = false
-        material.addSubview(host)
-        NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: material.leadingAnchor),
-            host.trailingAnchor.constraint(equalTo: material.trailingAnchor),
-            host.topAnchor.constraint(equalTo: material.topAnchor),
-            host.bottomAnchor.constraint(equalTo: material.bottomAnchor)
-        ])
-        panel.contentView = material
+        panel.contentView = host
+
+        results = SearchResultsPanelController(model: model)
+        results.onBecameVisible = { [weak self] in self?.placeResultsBelowField() }
+        SearchWindowRegistry.shared.register(field: panel, results: results.panel)
+
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - frame.height * 0.28 - SearchLayout.searchHeight))
@@ -64,6 +109,10 @@ final class SearchPanelController {
         toggleObserver = NotificationCenter.default.addObserver(forName: .toggleFlashFind2, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.toggle() }
         }
+        // 结果窗收起来 / 点了「钉住」之后，把 key 交回搜索框。
+        focusObserver = NotificationCenter.default.addObserver(forName: .focusFlashFindField, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.focusField() }
+        }
         hideObserver = NotificationCenter.default.addObserver(forName: .flashFindPanelHidden, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.removeClickOutsideMonitor() }
         }
@@ -71,13 +120,17 @@ final class SearchPanelController {
         // AppModel 不持有窗口，以前它用 `NSApplication.shared.keyWindow` 猜，
         // 而点在**其它应用**上时闪寻已失去前台、keyWindow 常为 nil，
         // 于是「点了外面，浮窗还杵在那儿」。谁持有窗口谁负责收。
-        model.hidePanel = { [weak self] in self?.panel.orderOut(nil) }
+        model.hidePanel = { [weak self] in
+            self?.panel.orderOut(nil)
+            self?.results.hide()
+        }
         // 与上一句成对：关掉设置/向导后若屏幕上没有别的窗口，由这里把浮窗放回来。
         // 走 `show()` 而不是 `orderFront`，是为了和「按快捷键唤起」完全同一条路径——
         // 查询词恢复、键位提示、点击外部关闭的监视都在里面，少走一样就会出现
         // 「浮窗回来了但点外面关不掉」这种只在某条路径上坏掉的缺陷。
         model.showPanel = { [weak self] in self?.show() }
     }
+
     func toggle() {
         if let modal = NSApplication.shared.modalWindow ?? panel.attachedSheet {
             NSApplication.shared.activate(ignoringOtherApps: true); modal.makeKeyAndOrderFront(nil); return
@@ -137,25 +190,28 @@ final class SearchPanelController {
 
     private func dismissIfClickOutside() {
         guard panel.isVisible else { return }
-        // 点在本浮窗之内一律不关。这一条同时覆盖两件事：
-        // 「点结果行/输入框」和「按住浮窗空白处拖动」——拖动时按下点仍在窗内。
+        // 点在自己这几块窗口之内一律不关。这一条同时覆盖三件事：
+        // 「点结果行 / 输入框」「按住浮窗空白处拖动」以及 2026-10-28 之后
+        // **点在那块独立的结果窗口上**——两块窗不再是同一个窗口，只判一个 frame 就会
+        // 出现「点一下结果，两块窗口一起消失」。
         //
-        // 这里以前还有一句 `guard NSEvent.pressedMouseButtons == 0 else { return }`，
-        // 意图是「正在拖拽就不算点击」。但监视的事件是 `leftMouseDown`，
-        // 此刻左键必然处于按下状态，这个条件**恒为假** ——
-        // 结果是「点击外部关闭」这个功能从未真正生效过。已删除。
-        guard !panel.frame.contains(NSEvent.mouseLocation) else { return }
-        // 点在**闪寻自己的其它窗口**上（设置窗口、添加 NAS 向导）不算「外面」。
-        // 少了这一条会出真问题：从搜索窗点「设置…」，设置窗口刚要打开，
-        // 同一次点击被判成「点了外面」把浮窗关掉，用户看到的是设置窗口一闪就没。
+        // ★★ 豁免列表只能收**此刻可见**的窗口（2026-10-28 报障：
+        //   「搜索结果钉住后，关闭搜索结果，搜索框不再点击任意位置关闭」）。
+        //   `orderOut` **不清 frame**：结果窗被收起来之后，那块 680×470 的矩形
+        //   仍然原地不动地留在搜索框正下方，于是变成一片看不见的禁点区——
+        //   用户看着是空桌面，点下去却不收窗。而钉住的窗口关掉之后也是一样
+        //   （`isReleasedWhenClosed = false`，窗口对象与 frame 都还在）。
+        //   判定住 Core（`SearchClickOutside`，可测），这里只负责把「可见」筛对。
         //
-        // 判据用**点击位置**而不是 `NSApp.keyWindow`：应用一失活 keyWindow
-        // 常常就是 nil，而「设置窗口开着、用户去点桌面」这种场景下，
-        // 用 keyWindow 会误把桌面点击豁免掉，浮窗又关不上了。
-        let location = NSEvent.mouseLocation
-        if NSApp.windows.contains(where: { $0 !== panel && $0.isVisible && $0.frame.contains(location) }) {
-            return
-        }
+        // ★ 用 `canBecomeKey` 再收一道：菜单、提示、状态栏这类辅助窗口
+        //   在弹出瞬间 `isVisible` 也为真，把它们算成「自家窗口」会误豁免点击。
+        //   搜索框、结果窗、钉住窗、设置窗都是能成为 key 的，不受影响。
+        let ownVisibleFrames = NSApp.windows
+            .filter { $0 !== panel && $0.isVisible && $0.canBecomeKey }
+            .map(\.frame)
+        guard SearchClickOutside.shouldDismiss(click: NSEvent.mouseLocation,
+                                               field: panel.frame,
+                                               otherVisibleWindows: ownVisibleFrames) else { return }
         model.hideSearch()   // 通知会顺带卸载监视，这里不用重复
     }
 
@@ -178,6 +234,16 @@ final class SearchPanelController {
             NSApplication.shared.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         }
+        // 结果那一块：有内容就摆到搜索框下方并显示。
+        //
+        // ★ 这里与 `SearchResultsPanelVisibility` 是**同一条规则的两条触发路径**
+        //   （一个是「显示时补一次」，一个是「内容变了跟着变」），两处都只会
+        //   orderFront / orderOut，重复调用没有副作用。
+        // ★ `beginSession()` 在最前面：一次新的唤起 = 回到「结果贴在搜索框下面」的默认，
+        //   用户上一轮把结果拖到哪儿都翻篇。
+        results.beginSession()
+        placeResultsBelowField()
+        results.refreshVisibility(hasContent: model.hasSearchContent)
         panel.invalidateShadow()
 #if DEBUG
         if AppEnvironment.isPreview {
@@ -192,35 +258,105 @@ final class SearchPanelController {
 #endif
     }
 
+    /// 把结果窗口的上沿贴到搜索框下沿下方 `moduleGap` 处。
+    ///
+    /// ★ 只在「第一次显示」与「每次唤起」时做：用户把它拖到别处之后，
+    ///   任何自动回位都是在跟用户抢位置。拖动搜索框也不带着它走（用户明确选的）。
+    private func placeResultsBelowField() {
+        results.align(under: panel.frame, gap: SearchModuleLayout.moduleGap)
+    }
+
+    /// 把键盘交回搜索框。
+    ///
+    /// ★ 先 `activate` 再 `makeKey`：非激活态下 `makeKeyAndOrderFront` 会返回 true
+    ///   但 `keyWindow` 仍是 nil，窗口整组留在前台 App 下面（真机踩过）。
+    private func focusField() {
+        guard panel.isVisible else { return }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
 #if DEBUG
+    /// 三处「空白处」的命中测试结果：视图类型 + 是否允许窗口背景拖动。
+    ///
+    /// ★ 两块窗口各测一遍：拖动这条缺陷（2026-10-28）在拆窗之后仍然只可能
+    ///   出在「表面把 `hitTest` 吃掉了」这一处，而两块用的是同一个修饰器——
+    ///   任何一块测出非 nil 的 hit 都说明修饰器又被绕过了。
+    private static func dragProbes(panel: NSPanel, results: NSPanel?) -> [[String: Any]] {
+        var output: [[String: Any]] = []
+        func probe(_ window: NSPanel, _ label: String, _ name: String, _ point: NSPoint) {
+            guard let host = window.contentView else { return }
+            let hit = host.hitTest(point)
+            output.append([
+                "window": label,
+                "name": name,
+                "point": [Int(point.x), Int(point.y)],
+                "hit": hit.map { String(describing: type(of: $0)) } ?? "nil",
+                "canMoveWindow": hit?.mouseDownCanMoveWindow ?? false,
+                "hostCanMoveWindow": host.mouseDownCanMoveWindow,
+            ])
+        }
+        if let host = panel.contentView {
+            let size = host.bounds.size
+            probe(panel, "field", "field-leading-padding",
+                  NSPoint(x: 6, y: size.height - SearchLayout.searchHeight / 2))
+            probe(panel, "field", "field-trailing-padding",
+                  NSPoint(x: size.width - 4, y: size.height / 2))
+        }
+        if let results, let host = results.contentView {
+            let size = host.bounds.size
+            // 结果窗：类型条左端与状态栏左下都是空白。
+            probe(results, "results", "type-bar-leading-padding",
+                  NSPoint(x: 4, y: size.height - SearchModuleLayout.typeBarHeight / 2))
+            probe(results, "results", "status-bar-left", NSPoint(x: 6, y: 6))
+        }
+        return output
+    }
+
     /// 写一份「面板此刻真的长这样」的证据 JSON 到包外 Evidence/。
     private func writePreviewEvidence() {
         let root = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Evidence", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let screenHeight = NSScreen.screens.first?.frame.maxY ?? panel.frame.maxY
-        let frame = panel.frame
-        let captureFrame = panel.attachedSheet.map { frame.union($0.frame) } ?? frame
+        // 截图要能同时框住两块窗口：只看搜索框那一块的话，
+        // 「结果窗在哪、贴没贴住」这件事在证据里根本看不见。
+        var captureFrame = panel.frame
+        if results.panel.isVisible { captureFrame = captureFrame.union(results.panel.frame) }
         let record: [String: Any] = [
             "windowNumber": panel.windowNumber,
+            "resultsWindowNumber": results.panel.isVisible ? results.panel.windowNumber : 0,
             "screenRect": [Int(captureFrame.minX - 24), Int(screenHeight - captureFrame.maxY - 24), Int(captureFrame.width + 48), Int(captureFrame.height + 48)],
-            "windowSize": [frame.width, frame.height],
+            "windowSize": [panel.frame.width, panel.frame.height],
+            "resultsWindowSize": [results.panel.frame.width, results.panel.frame.height],
+            "resultsWindowOrigin": [results.panel.frame.minX, results.panel.frame.minY],
+            "resultsWindowOffset": results.panel.frame.minY - (panel.frame.minY - SearchModuleLayout.moduleGap),
+            "resultsUserMoved": results.userMoved,
             "windowOpaque": panel.isOpaque,
-            "hostingOpaque": panel.contentView?.subviews.first?.isOpaque ?? true,
-            "material": "NSVisualEffectView.popover",
-            "blendingMode": "behindWindow",
+            "hostingOpaque": false,
+            "material": String(describing: type(of: panel.contentView!)),
             "glassClassAvailable": NSClassFromString("NSGlassEffectView") != nil,
             "preview": true,
             "backdrop": ProcessInfo.processInfo.environment["FF_UI_DESKTOP"] == "1" ? "temporary native window displaying the system desktop wallpaper" : "actual windows behind panel",
             "desktopImageAvailable": NSScreen.main.flatMap { NSWorkspace.shared.desktopImageURL(for: $0) }.flatMap { NSImage(contentsOf: $0) } != nil,
             "query": model.query,
             "resultCount": model.results.count,
+            // 上限（200）之外的**真实**匹配数：截图脚本据此判断「是 200 条截断态」
+            // 还是「本来就只有这么多」，不必靠数像素。
+            "matchedResultCount": model.matchedResultCount,
             "appearance": panel.effectiveAppearance.name.rawValue,
             "keyWindow": panel.isKeyWindow,
+            "resultsIsKeyWindow": results.panel.isKeyWindow,
             "firstResponder": panel.firstResponder.map { String(describing: type(of: $0)) } ?? "none",
             "roundedMaterialMask": (panel.contentView as? NSVisualEffectView)?.maskImage != nil,
             "mainMenuTitles": NSApplication.shared.mainMenu?.items.map(\.title) ?? [],
             "sheetAttached": panel.attachedSheet != nil,
             "sheetSize": panel.attachedSheet.map { [$0.frame.width, $0.frame.height] } ?? [],
+            // ★ 「能不能拖」的判据（2026-10-28 报障：搜索框不能拖动了）。
+            //
+            // AppKit 决定「按在窗口背景上要不要开始拖动」只有两步：
+            // ① `hitTest` 找出光标下那个视图；② 问它 `mouseDownCanMoveWindow`。
+            // 所以这两个量就是这条缺陷的唯一判据——截图看不出来，肉眼也看不出来。
+            "dragProbes": Self.dragProbes(panel: panel, results: results.panel.isVisible ? results.panel : nil),
             "cacheRoot": AppEnvironment.previewRoot.path,
             "networkEnabled": model.enabled,
             "rememberPassword": model.rememberPassword
@@ -234,6 +370,7 @@ final class SearchPanelController {
     deinit {
         if let showObserver { NotificationCenter.default.removeObserver(showObserver) }
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
+        if let focusObserver { NotificationCenter.default.removeObserver(focusObserver) }
         if let hideObserver { NotificationCenter.default.removeObserver(hideObserver) }
         Self.tearDown(global: globalClickMonitor,
                        local: localClickMonitor,
@@ -254,6 +391,9 @@ final class SearchPanelController {
 }
 
 /// SwiftUI supplies the content height. Keep the top edge fixed when results unfold.
+///
+/// ★ 两块窗口共用：搜索框那块高度基本不变（只在键位提示显隐时变一次），
+///   结果那块随结果增减而变——两者都必须**上沿固定**，否则窗口会往上蹿。
 struct SearchPanelSizing: NSViewRepresentable {
     let height: CGFloat
     let animate: Bool
@@ -265,7 +405,15 @@ struct SearchPanelSizing: NSViewRepresentable {
             var frame = panel.frame
             frame.origin.y += frame.height - height
             frame.size.height = height
-            panel.setFrame(frame, display: true, animate: animate && panel.isVisible)
+            if animate && panel.isVisible {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.18
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    panel.animator().setFrame(frame, display: true)
+                }
+            } else {
+                panel.setFrame(frame, display: true)
+            }
             panel.invalidateShadow()
         }
     }

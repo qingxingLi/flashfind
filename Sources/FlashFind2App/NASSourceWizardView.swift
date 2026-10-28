@@ -1,11 +1,21 @@
 import SwiftUI
 import FlashFindCore
 
-/// 添加/编辑 NAS 的向导。分步而不是一整页输入框：
-/// 选类型 → 填地址 → 确认证书 → 登录 → 选搜索位置。
+/// 添加/编辑搜索来源的向导。
+///
+/// ★ **三步**（2026-10-28 用户报障，之前标题写「共 4 步」而实际只有三步）：
+///   1. 选搜索来源 —— 这一页**只列来源**，点一张卡就翻页；
+///   2. 连接信息 —— 整页给表单，字段随来源不同而不同（见 `SourceConnectionLabels`）；
+///   3. 选搜索位置 —— 连接成功才到这里。
+///
+/// 为什么把「选来源」和「填地址」拆成两页：它们原来是同一屏的上下两块，
+/// 用户点了「群晖」之后下面那块表单才变得有意义，可眼睛还得往下找；
+/// 同屏也让进度显示没法自洽（选来源 + 填地址被算成两步，用户数出来是三步）。
 struct NASSourceWizardView: View {
     @ObservedObject var model: AppModel
-    @FocusState private var nameFocused: Bool
+    /// 地址栏焦点。翻到连接信息那一页时自动落在它上面 ——
+    /// 第 1 步已经选完来源了，进来就能直接敲地址。
+    @FocusState private var addressFocused: Bool
     /// 是否把局域网里的电脑、打印机也列出来。
     ///
     /// 默认不列——用户要的是 NAS，混着同事的 Mac 与打印机反而找不到。
@@ -27,6 +37,10 @@ struct NASSourceWizardView: View {
     /// 回写就会把他刚敲的字符擦掉，表现为「打不进去」。
     /// 所以输入框持自己的文本，只在解析得出结果时把意图交给模型。
     @State private var basePathText = ""
+    /// 当前在第几页。页数、页码文案、翻页方向全部由 Core 的 `SourceWizardFlow` 出。
+    @State private var page: SourceWizardPage = .source
+    /// 翻页方向：真正翻之前先记下来，新页面才知道该从左边还是右边进来。
+    @State private var forward = true
 
     private var hiddenDeviceCount: Int { discovery.devices.count - visibleDevices.count }
 
@@ -40,32 +54,43 @@ struct NASSourceWizardView: View {
     }
 
     private var isEditing: Bool { model.selectedSourceID != nil && model.nasSources.contains { $0.id == model.selectedSourceID } }
-    private var host: String { model.draftSource.hostName }
-
-    private var step: Int {
-        if model.nasTrustCandidate != nil { return 3 }
-        if !model.draftConnected { return model.draftStatus.isEmpty ? 2 : 2 }
-        return model.draftSource.scope.isEmpty ? 4 : 5
-    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollView { VStack(alignment: .leading, spacing: 20) { sections }.padding(20) }
+            pages
             Divider()
             footer
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 560, height: 620)
+        .background(WindowBackdrop())
         .onAppear {
-            if !isEditing { nameFocused = true }
             portText = PortField.text(for: model.draftSource.port)
             basePathText = BasePathField.text(for: model.draftSource.basePath)
+            // 打开时落在哪一页由 Core 判：新建 → 选来源；编辑 → 连接信息；
+            // 已连接 → 搜索位置（预览钩子造的草稿就是这一种）。
+            page = SourceWizardFlow.enteringPage(isEditing: isEditing, isConnected: model.draftConnected)
+            // 预览钩子：`FF_UI_WIZARD_PAGE=1|2|3` 直接停在某一页。
+            // 翻页要靠点卡片，而截图流程不许发合成事件（会打到用户其它窗口上），
+            // 所以只能在这里指定。正常启动读不到这个变量。
+            if AppEnvironment.isPreview,
+               let raw = ProcessInfo.processInfo.environment["FF_UI_WIZARD_PAGE"],
+               let forced = SourceWizardPage(rawValue: Int(raw) ?? 0) {
+                page = forced
+            }
+            // 预览钩子：`FF_UI_WIZARD_VENDOR=openlist` 换一个来源，看它的字段长什么样
+            // （各来源的连接信息本来就不一样，见 `SourceConnectionLabels`）。
+            if AppEnvironment.isPreview,
+               let raw = ProcessInfo.processInfo.environment["FF_UI_WIZARD_VENDOR"],
+               let vendor = NASSourceConfig.Vendor(rawValue: raw) {
+                model.setDraftVendor(vendor)
+            }
         }
         .onDisappear { discovery.stop() }
         // 「附近的设备」放在小窗里：列表可能几十台（含电脑与打印机），
         // 铺在主界面上会把「填地址 + 填账号」这个主任务挤出第一屏。
-        // 选中一台就自动关窗，主流程一步没多。
+        // 选中一台就自动关窗并翻到连接信息，主流程一步没多。
         .sheet(isPresented: $showingNearbyDevices, onDismiss: { discovery.stop() }) {
             NearbyDevicesSheet(
                 devices: visibleDevices,
@@ -76,6 +101,7 @@ struct NASSourceWizardView: View {
                 onPick: { device in
                     model.applyDiscoveredDevice(device)
                     showingNearbyDevices = false
+                    go(to: .connection)
                 },
                 onToggleAll: { showAllNearbyDevices.toggle() },
                 onRescan: { discovery.rescan(existing: model.nasSources) },
@@ -105,6 +131,14 @@ struct NASSourceWizardView: View {
             let expected = PortField.text(for: value)
             if portText != expected { portText = expected }
         }
+        // 连上了就翻到选位置那一页：第 3 步是这条流程的终点。
+        // 不翻的话用户按了「连接」之后界面看起来毫无变化（地址栏还在眼前），
+        // 要么再按一次、要么以为没连上。
+        .onChange(of: model.draftConnected) { connected in
+            // 连上 → 去选位置；断开 → 退回连接信息（位置列表会整块消失，
+            // 停在原页只剩一片空白，见 `SourceWizardFlow.page(afterDisconnectingFrom:)`）。
+            go(to: connected ? .scope : SourceWizardFlow.page(afterDisconnectingFrom: page))
+        }
         // 证书确认必须以弹窗打断：这是整个流程里唯一需要用户「停下来核对」的地方，
         // 埋在长页面里会被当成普通提示直接划过去。
         .alert("确认这台 NAS 的证书", isPresented: trustAlertBinding) {
@@ -122,6 +156,48 @@ struct NASSourceWizardView: View {
                 set: { if !$0 && !model.draftBusy { model.rejectDraftTrust() } })
     }
 
+    // MARK: 翻页
+
+    /// 翻到某一页。方向由两页的先后决定，新页面据此从侧边滑进来。
+    ///
+    /// 用 `withAnimation` 而不是 `contentTransition`：这里换的是整页内容，
+    /// 需要「旧页退、新页进」两条动画同时走，那只有 `transition` 能做到。
+    private func go(to target: SourceWizardPage) {
+        guard target != page else { return }
+        forward = SourceWizardFlow.direction(from: page, to: target) >= 0
+        withAnimation(.easeInOut(duration: 0.24)) { page = target }
+    }
+
+    private var pageTransition: AnyTransition {
+        let entering: Edge = forward ? .trailing : .leading
+        let leaving: Edge = forward ? .leading : .trailing
+        return .asymmetric(
+            insertion: .move(edge: entering).combined(with: .opacity),
+            removal: .move(edge: leaving).combined(with: .opacity)
+        )
+    }
+
+    /// 三页内容叠在同一个位置上做翻页。
+    ///
+    /// `.clipped()` 必须有：滑动的页面在动画途中会超出这块区域，
+    /// 不裁就会压到标题栏与底部按钮上。
+    private var pages: some View {
+        ZStack {
+            switch page {
+            case .source:
+                sourcePage.transition(pageTransition)
+            case .connection:
+                connectionPage.transition(pageTransition)
+            case .scope:
+                scopePage.transition(pageTransition)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    // MARK: 页头 / 页脚
+
     private var header: some View {
         HStack(spacing: 10) {
             if isEditing {
@@ -137,35 +213,120 @@ struct NASSourceWizardView: View {
             Spacer()
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
+        .background(.ultraThinMaterial)
     }
 
     private var subtitle: String {
         if model.draftBusy { return "正在连接…" }
-        if model.draftConnected && !model.draftSource.scope.isEmpty { return "已连接，可以搜索了" }
+        if model.draftConnected && !model.draftSource.scopes.isEmpty { return "已连接，可以搜索了" }
         if model.draftConnected { return "已连接，请选择搜索位置" }
-        // 入口三块是常驻的第一屏：地址还空着就是第 1 步。
-        // 选了设备或手填了地址，就进到「填账号密码」这一步。
-        if !isEditing, host.isEmpty { return "第 1 步，共 4 步" }
-        return "第 2 步，共 4 步"
+        // ★ 「第 N 步，共 M 步」只由 Core 出。写在这里就又会写出「共 4 步」。
+        return SourceWizardFlow.subtitle(for: page)
     }
 
-    @ViewBuilder private var sections: some View {
-        // 第 1 步是**入口**：群晖 / OpenList / 附近的设备，三块平铺。
-        // 选群晖或 OpenList 就是在选「走哪套接口」——下面的表单、默认协议、
-        // 端口都跟着换（见 `setDraftVendor`）；附近的设备是一个动作，
-        // 点开小窗挑一台，挑完自动关窗并回填地址。
-        //
-        // 连接成功之后不再摆这三块：那时候用户要做的是勾搜索位置，
-        // 再让他点一次品牌只会误触（换品牌会清空已填的地址与账号）。
-        if !model.draftConnected, !isEditing {
-            typeEntrySection
+    private var footer: some View {
+        HStack(spacing: 10) {
+            if SourceWizardFlow.canGoBack(from: page, isEditing: isEditing) {
+                FFSecondaryButton("上一步") { go(to: .source) }
+                    .accessibilityIdentifier("wizard-back")
+            }
+            if page == .scope, model.draftConnected {
+                FFSecondaryButton("断开", action: model.disconnectDraft)
+            }
+            Spacer()
+            // 「取消」必须真的取消：关闭窗口的同时收掉这次连接留下的一切
+            // （后台任务、暂存密码、待确认证书、已建立的 DSM 会话）。
+            FFSecondaryButton("取消") {
+                model.cancelDraft()
+                NASWizardWindow.shared.close()
+            }
+            // 「仅保存」只在新建时出现：编辑已有来源时「保存」本身就是它。
+            // 两者是两件事，不共用一个词——前者是「先记下来，之后再连」，
+            // 后者是「这台来源已经能用了」。
+            if page == .connection, !isEditing {
+                FFSecondaryButton("仅保存") { commitAndClose() }
+                    .disabled(model.draftBusy || model.draftSettling)
+                    .help("先记下配置，之后再连接")
+            }
+            primaryButton
         }
-        if model.nasTrustCandidate == nil { connectionSection }
-        sharesSection
-        if !model.draftStatus.isEmpty { statusSection }
+        .padding(.horizontal, 20).padding(.vertical, 14)
+        .background(.ultraThinMaterial)
     }
 
-    // MARK: 第 1 步 入口
+    /// 底部主按钮。**每页只有一个**主按钮，并且只在这一页真正有事可做时出现。
+    ///
+    /// 可用性一律只走 `enabled:` 参数，不在外层再叠 `.disabled`：
+    /// 组件内部本来就有一句 `.disabled(!enabled)`，两层判定会互相覆盖。
+    @ViewBuilder private var primaryButton: some View {
+        switch page {
+        case .source:
+            // 第 1 步点卡片即翻页，底下不需要按钮。
+            EmptyView()
+        case .connection:
+            if isEditing {
+                FFPrimaryButton("保存", enabled: !(model.draftBusy || model.draftSettling)) {
+                    commitAndClose()
+                }
+            } else if model.draftConnected {
+                // 已连上却还停在这一页（极少数：连接成功但翻页被跳过）——
+                // 主按钮该是「完成」，而不是再连一次。
+                FFPrimaryButton("完成", enabled: !model.draftSource.scopes.isEmpty) {
+                    commitAndClose()
+                }
+            } else {
+                FFPrimaryButton(model.draftBusy ? "正在连接…" : "连接",
+                                systemImage: "bolt.horizontal.circle",
+                                enabled: model.canConnectDraft) {
+                    model.connectDraft()
+                }
+            }
+        case .scope:
+            // 已连接但还没选搜索位置时不能保存，否则会存下一台
+            // 「连得上却搜不了」的来源，用户以为加好了，实际搜不到。
+            FFPrimaryButton("完成",
+                            enabled: !(model.draftBusy || model.draftSettling
+                                       || model.draftSource.scopes.isEmpty)) {
+                commitAndClose()
+            }
+        }
+    }
+
+    /// 保存并在**真的保存成功**之后关窗口。
+    ///
+    /// `commitDraft` 回 false（绑定被核心拒绝、落盘失败）时窗口必须留在原地，
+    /// 让用户看到原因并重试——「点了就关」会留下一份配置与实际不一致的来源。
+    private func commitAndClose() {
+        Task { @MainActor in
+            if await model.commitDraft() { NASWizardWindow.shared.close() }
+        }
+    }
+
+    // MARK: 第 1 步 搜索来源（整页只有这一块）
+
+    /// 首页：**只列搜索来源**，下面留白。
+    ///
+    /// 来源暂时只有三个，铺满一屏只会让每一块都变得很小；
+    /// 以后新增来源直接往这里加一块，不必再改布局。
+    @ViewBuilder private var sourcePage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if !model.draftConnected, !isEditing {
+                    typeEntrySection
+                } else if page == .source {
+                    // 理论到不了这里（已连接 / 编辑时首页就被跳过了），
+                    // 留一句话防呆，免得出现「一整页空白」。
+                    Text("请从搜索来源里选一台设备。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 24)
+        }
+    }
 
     /// 群晖 / OpenList / 附近的设备。
     ///
@@ -175,8 +336,8 @@ struct NASSourceWizardView: View {
     /// 「填地址 + 填账号」这个主任务挤到第一屏之外。
     private var typeEntrySection: some View {
         FFSettingsSection(title: "搜索来源") {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
-                      spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                      spacing: 10) {
                 ForEach(entryVendors) { vendor in
                     vendorEntry(vendor)
                 }
@@ -205,6 +366,8 @@ struct NASSourceWizardView: View {
             // 那些值对新品牌只有误导作用。重复点同一块是空操作。
             model.setDraftVendor(vendor)
             if !vendor.nativelySupported { model.setDraftStatus(vendor.supportMessage) }
+            // ★ 选完就翻页：这一页的职责到「选好来源」为止。
+            go(to: .connection)
         } label: {
             entryLabel(vendor.symbol, vendor.shortTitle, picked: picked)
         }
@@ -222,20 +385,24 @@ struct NASSourceWizardView: View {
     }
 
     /// 一个入口块。选中态靠描边与淡底，不再加一行「已选」的文字。
+    ///
+    /// **不写第二行说明**：块里只放图标与名字。品牌全称对「群晖 / 群晖 Synology」
+    /// 是重复，对 OpenList 更是同一个词写两遍；而这些块的下一次变化是「再加一块」，
+    /// 多一行只能靠编一句文案去填，不值得。
     private func entryLabel(_ symbol: String, _ title: String, picked: Bool) -> some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 9) {
             Image(systemName: symbol)
-                .font(.system(size: 22))
+                .font(.system(size: 26))
                 .foregroundStyle(picked ? Color.accentColor : Color.secondary)
-                .frame(height: 26)
-            Text(title).font(.callout).lineLimit(1)
+                .frame(height: 30)
+            Text(title).font(.callout)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 11)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .frame(maxWidth: .infinity, minHeight: 88)
+        .padding(.horizontal, 8)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(picked ? Color.accentColor.opacity(0.14)
                          : Color(nsColor: .quaternaryLabelColor).opacity(0.3)))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
             .stroke(picked ? Color.accentColor : Color.clear, lineWidth: 1.5))
         .contentShape(Rectangle())
     }
@@ -249,77 +416,95 @@ struct NASSourceWizardView: View {
         discovery.start(existing: model.nasSources)
     }
 
-    // MARK: Step 2 地址与账号
+    // MARK: 第 2 步 连接信息（整页给表单）
 
+    private var connectionPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                connectionSection
+                if !model.draftStatus.isEmpty { statusSection }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 24)
+        }
+        // 翻到这一页就把焦点放到地址栏：来源已经选完，进来就能敲地址。
+        .onAppear { if !isEditing { addressFocused = true } }
+        .transition(pageTransition)
+    }
+
+    /// 连接信息。字段**随来源不同**：名字取自 Core 的 `SourceConnectionLabels`，
+    /// 路径框只给 WebDAV，协议选择只给允许选明文的品牌（群晖不给，见 `Vendor`）。
     @ViewBuilder private var connectionSection: some View {
         if !model.draftConnected {
-            // IP / 端口 / 账号 / 密码合并成一个「连接信息」模块，四项一次填完。
-            // 分成两段会让用户以为要先弄地址、再弄账号，实际上它们是一组。
+            let labels = SourceConnectionLabels.forVendor(model.draftSource.vendor)
             FFSettingsSection(title: "连接信息") {
-                VStack(spacing: 10) {
-                    HStack(spacing: 10) {
-                        labeledField("IP/域名") {
-                            TextField("192.0.2.96", text: $model.draftSource.host)
+                VStack(spacing: 16) {
+                    // 地址与端口**同一行**：它们是同一件事的两段（连到哪台机的哪个门），
+                    // 拆成两行会让地址显得孤零零。端口固定 120pt——四位数端口够了，
+                    // 剩下的全给地址（OpenList 要填整条 `https://…`）。
+                    HStack(alignment: .center, spacing: 14) {
+                        fieldRow(labels.addressLabel) {
+                            TextField(labels.addressPlaceholder, text: $model.draftSource.host)
                                 .textFieldStyle(.roundedBorder)
+                                .focused($addressFocused)
+                                .accessibilityIdentifier("nas-host")
                         }
-                        labeledField("端口") {
+                        fieldRow("端口") {
                             // 字符串绑定 + 每次按键即时解析：输入过程中按钮状态就跟着变，
                             // 不需要先点一下别处让输入框失焦。
-                            TextField("5001", text: $portText)
+                            TextField(labels.portPlaceholder, text: $portText)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("nas-port")
                                 .onChange(of: portText) { value in model.setDraftPort(value) }
                         }
+                        .frame(width: 120)
                     }
-                    // 连接路径（WebDAV 专用，见 `Vendor.allowsBasePath`）。
-                    // 这类服务的 WebDAV 端点**不在站根上**：OpenList / Alist 在
-                    // `/dav`，NextCloud 在 `/remote.php/dav`。没有这个框，
-                    // 用户就没有任何办法表达这件事——只能看着「连不上」，
-                    // 而不知道差在哪一段。
-                    if model.draftAllowsBasePath {
-                        labeledField("路径") {
-                            TextField("/dav", text: $basePathText)
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityIdentifier("nas-base-path")
-                                .onChange(of: basePathText) { value in model.setDraftBasePath(value) }
-                        }
-                    }
-                    // 协议选择。**不能做成开关**：开关天生是「某项功能开着/关着」，
-                    // 而协议是二选一，两边都是有效状态、只是安全性不同。
-                    // 原来这里用 Toggle，标签在关着时写「使用加密连接 HTTPS」，
-                    // 于是「勾上」被读成「启用加密」，实际却是切到明文——
-                    // 与用户预期正好相反，且界面看上去一切正常。
-                    // 现在两段并列，两个选项都写在脸上、当前生效的被选中。
-                    if model.draftAllowsPlainHTTPChoice {
-                        labeledField("协议") {
-                            Picker("协议", selection: protocolChoiceBinding) {
-                                ForEach(NASProtocolChoice.allCases) { choice in
-                                    Text(choice.title).tag(choice)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // 路径与协议同排：两者都是「端点怎么拼」的一部分，一起填完才连得上。
+                    // 只有 WebDAV 有路径、群晖没有协议（见 `Vendor.allowsBasePath` /
+                    // `allowsPlainHTTPChoice`），所以这一行的组合是会变的：
+                    //   WebDAV = 路径 + 协议；OpenList = 只有协议；群晖 = 整行不出现。
+                    if model.draftAllowsBasePath || model.draftAllowsPlainHTTPChoice {
+                        HStack(alignment: .center, spacing: 14) {
+                            if model.draftAllowsBasePath {
+                                fieldRow("路径") {
+                                    TextField("/dav", text: $basePathText)
+                                        .textFieldStyle(.roundedBorder)
+                                        .accessibilityIdentifier("nas-base-path")
+                                        .onChange(of: basePathText) { value in model.setDraftBasePath(value) }
                                 }
                             }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .accessibilityIdentifier("nas-protocol-choice")
+                            // 协议选择。**不能做成开关**：开关天生是「某项功能开着/关着」，
+                            // 而协议是二选一，两边都是有效状态、只是安全性不同。
+                            // 原来这里用 Toggle，标签在关着时写「使用加密连接 HTTPS」，
+                            // 于是「勾上」被读成「启用加密」，实际却是切到明文——
+                            // 与用户预期正好相反，且界面看上去一切正常。
+                            // 现在两段并列，两个选项都写在脸上、当前生效的被选中。
+                            if model.draftAllowsPlainHTTPChoice {
+                                fieldRow("协议") {
+                                    Picker("协议", selection: protocolChoiceBinding) {
+                                        ForEach(NASProtocolChoice.allCases) { choice in
+                                            Text(choice.title).tag(choice)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .labelsHidden()
+                                    .accessibilityIdentifier("nas-protocol-choice")
+                                }
+                                .frame(width: 210)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    // 失败之后的**一键重试**。上面的静态提示实测不够用：
-                    // 切品牌会把协议开关清回新品牌的默认值（那是为修历史故障，
-                    // 不能去掉），用户在飞牛上开过明文、再切到 WebDAV 时，
-                    // 开关会被悄悄清成加密，于是「端口填对了却报 TLS 握手失败」。
-                    // 与其让用户自己回头找那行提示，不如在失败现场给一个按钮。
-                    if model.draftOffersPlainHTTPRetry {
-                        FFPrimaryButton("改用明文 HTTP 重试", systemImage: "arrow.triangle.2.circlepath") {
-                            model.retryDraftUsingPlainHTTP()
-                        }
-                        .accessibilityIdentifier("nas-retry-plain-http")
-                    }
-                    HStack(spacing: 10) {
-                        labeledField("账号") {
+                    Divider().padding(.vertical, 2)
+                    HStack(alignment: .bottom, spacing: 14) {
+                        fieldRow("账号") {
                             TextField("nasuser", text: $model.draftSource.username)
                                 .textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("nas-user")
                         }
-                        labeledField("密码") {
+                        fieldRow("密码") {
                             // 这里**只有**输入框。
                             //
                             // 原来下面还挂着一句「将使用本机保存的密码」——
@@ -347,35 +532,40 @@ struct NASSourceWizardView: View {
                     if model.draftSource.port != 0, !model.draftSource.hasPort {
                         rowError("端口需在 1～65535 之间")
                     }
-                    // 端口是否缺失的提示统一放在「连接」按钮旁边
-                    // （见 `connectDisabledReason`）：同一个问题只说一次，
-                    // 而且要说在用户真正会去看的地方——按钮附近。
+                    // 关闭时立刻删掉已存的旧凭据，不能只改标记——
+                    // 否则用户以为「不保存了」，密码其实还躺在文件里被自动使用。
                     HStack(spacing: 8) {
-                        // 关闭时立刻删掉已存的旧凭据，不能只改标记——
-                        // 否则用户以为「不保存了」，密码其实还躺在文件里被自动使用。
                         Toggle("记住密码", isOn: Binding(
                             get: { model.draftSource.rememberPassword },
                             set: { model.setDraftRememberPassword($0) }))
                             .font(.callout)
                         Spacer()
                     }
-                    TextField("设备名称（可留空，默认用类型名）", text: $model.draftSource.name)
-                        .textFieldStyle(.roundedBorder)
+                    .padding(.top, 2)
+                    fieldRow("名称") {
+                        TextField("可留空，默认用类型名", text: $model.draftSource.name)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("nas-name")
+                    }
+                    // 失败之后的**一键重试**。上面的静态提示实测不够用：
+                    // 切品牌会把协议开关清回新品牌的默认值（那是为修历史故障，
+                    // 不能去掉），用户在飞牛上开过明文、再切到 WebDAV 时，
+                    // 开关会被悄悄清成加密，于是「端口填对了却报 TLS 握手失败」。
+                    // 与其让用户自己回头找那行提示，不如在失败现场给一个按钮。
+                    if model.draftOffersPlainHTTPRetry {
+                        HStack {
+                            FFPrimaryButton("改用明文 HTTP 重试", systemImage: "arrow.triangle.2.circlepath") {
+                                model.retryDraftUsingPlainHTTP()
+                            }
+                            .accessibilityIdentifier("nas-retry-plain-http")
+                            Spacer()
+                        }
+                    }
                 }
-            }
-            // 按钮的可用性**只有一个来源**：`enabled:` 参数。
-            //
-            // 不要在视图外层再叠一个 `.disabled(...)`：组件内部本来就有一句
-            // `.disabled(!enabled)`，两层判定会互相覆盖，谁说了算并不直观，
-            // 表现就是「按钮看着能点却点不动」或「该灰的时候不灰」。
-            // 判定统一在模型层（`AppModel.canConnectDraft`），这里只把结果传进去。
-            FFPrimaryButton(model.draftBusy ? "正在连接…" : "连接",
-                            systemImage: "bolt.horizontal.circle",
-                            enabled: model.canConnectDraft) {
-                model.connectDraft()
             }
             // 缺什么就说清楚，而且**一直说**。灰按钮不解释自己，
             // 是用户最容易理解成「程序坏了」的界面。
+            // 判定统一在模型层（`AppModel.canConnectDraft`），这里只把结果说出来。
             if let reason = model.connectDisabledReason {
                 rowHint(reason)
             }
@@ -397,19 +587,16 @@ struct NASSourceWizardView: View {
         }
     }
 
-    /// 两列布局里的一个字段：左侧固定宽度的标签，右侧输入。
-    ///
-    /// 宽度按最长那个标签（「IP/域名」）定，四个标签左对齐才不会上下错位。
-    private func labeledField<Content: View>(_ label: String,
-                                             @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 8) {
+    /// 标签放在输入框上方，给地址和账号保留更充足的输入空间。
+    private func fieldRow<Content: View>(_ label: String,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(label)
-                .font(.callout)
+                .font(.system(.caption, weight: .medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 58, alignment: .leading)
             content()
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 协议选择器的绑定。
@@ -439,7 +626,32 @@ struct NASSourceWizardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: Step 4 搜索位置
+    // MARK: 第 3 步 搜索位置
+
+    /// 位置列表下方那行状态。
+    ///
+    /// 「已选 1 个目录」对**整根**是错的：`"/"` 不是某一层目录，
+    /// 而是「根下全部」（OpenList 根下有上千个文件夹时适配器只给这一个位置）。
+    /// 所以整根时直接说名字，不报数量。
+    private var scopeFooter: String {
+        let scopes = model.draftSource.scopes
+        if scopes.isEmpty { return "可以勾选多个。搜索会一次覆盖所有选中的目录。" }
+        if scopes == [NASScopeLabel.wholeRoot] { return "已选：\(NASScopeLabel.wholeRootName)" }
+        return "已选 \(scopes.count) 个目录"
+    }
+
+    private var scopePage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                sharesSection
+                if !model.draftStatus.isEmpty { statusSection }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 24)
+        }
+        .transition(pageTransition)
+    }
 
     @ViewBuilder private var sharesSection: some View {
         if model.draftConnected {
@@ -447,7 +659,30 @@ struct NASSourceWizardView: View {
             if model.draftUsesAdminAccount {
                 FFErrorBanner(message: model.adminAccountWarning)
             }
-            FFSettingsSection(title: "选择搜索位置", footer: model.draftSource.scopes.isEmpty ? "可以勾选多个。搜索会一次覆盖所有选中的目录。" : "已选 \(model.draftSource.scopes.count) 个目录") {
+            FFSettingsSection(
+                title: "选择搜索位置",
+                footer: scopeFooter,
+                trailing: {
+                    // 位置只有一两个时不给这两颗：那时「全选」和「勾上那一个」是同一件事。
+                    if model.offersBulkDraftScopeSelection {
+                        // 用 plain + 主题色而不是 `.link`：`.link` 会把无障碍角色变成
+                        // AXLink（旁白读成「链接」），而这两颗是动作，不是跳转。
+                        HStack(spacing: 14) {
+                            Button("全选") { model.selectAllDraftScopes() }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color.accentColor)
+                                .disabled(!model.canSelectAllDraftScopes)
+                                .accessibilityIdentifier("scopes-select-all")
+                            Button("取消全选") { model.clearAllDraftScopes() }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color.accentColor)
+                                .disabled(!model.canClearAllDraftScopes)
+                                .accessibilityIdentifier("scopes-clear-all")
+                        }
+                        .font(.callout)
+                    }
+                }
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
                     if model.draftAvailableShares.isEmpty {
                         Label("这个账号看不到任何共享目录。请检查账号权限。", systemImage: "exclamationmark.circle")
@@ -465,8 +700,11 @@ struct NASSourceWizardView: View {
                                 Image(systemName: picked ? "checkmark.circle.fill" : "circle")
                                     .foregroundStyle(picked ? Color.accentColor : Color.secondary)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(String(share.dropFirst())).font(.callout)
-                                    Text(share).font(.caption).foregroundStyle(.secondary)
+                                    Text(NASScopeLabel.text(for: share)).font(.callout)
+                                    // 整根授权的原始路径就是 "/"，再画一行只是噪声。
+                                    if !NASScopeLabel.isWholeRoot(share) {
+                                        Text(share).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                                 Spacer(minLength: 0)
                             }
@@ -492,45 +730,6 @@ struct NASSourceWizardView: View {
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.3)))
-    }
-
-    private var footer: some View {
-        HStack {
-            if model.draftConnected {
-                FFSecondaryButton("断开", action: model.disconnectDraft)
-            }
-            Spacer()
-            // 「取消」必须真的取消：关闭窗口的同时收掉这次连接留下的一切
-            // （后台任务、暂存密码、待确认证书、已建立的 DSM 会话）。
-            FFSecondaryButton("取消") {
-                model.cancelDraft()
-                NASWizardWindow.shared.close()
-            }
-            // 可用性同样只走 `enabled:`，不再在外层叠 `.disabled`——
-            // 已连接但还没选搜索位置时不能保存，否则会存下一台
-            // 「连得上却搜不了」的 NAS，用户以为加好了，实际搜不到。
-            // ★ 保存不再是无条件「点了就关」：`commitDraft` 现在会先把搜索位置
-            //   绑定等出结果——被核心拒绝或出错时**不保存**，并给出可重试的说明。
-            //   只有它回 true（配置真的落盘、范围真的生效）才关窗口。
-            FFPrimaryButton(primaryActionTitle,
-                            enabled: !(model.draftBusy || model.draftSettling
-                                       || (model.draftConnected && model.draftSource.scopes.isEmpty)),
-                            action: {
-                Task { @MainActor in
-                    if await model.commitDraft() { NASWizardWindow.shared.close() }
-                }
-            })
-        }
-        .padding(.horizontal, 20).padding(.vertical, 14)
-    }
-
-    /// 底部主按钮的文案。
-    ///
-    /// 「完成」与「仅保存」是两件不同的事，不该共用一个词：
-    /// 前者表示「这台 NAS 已经能用了」，后者只是「先把配置记下来」。
-    private var primaryActionTitle: String {
-        if isEditing { return "保存" }
-        return model.draftConnected && !model.draftSource.scopes.isEmpty ? "完成" : "仅保存"
     }
 }
 
@@ -564,6 +763,7 @@ private struct NearbyDevicesSheet: View {
                     .keyboardShortcut(.cancelAction)
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(.ultraThinMaterial)
 
             Divider()
 
@@ -600,8 +800,10 @@ private struct NearbyDevicesSheet: View {
                     .accessibilityIdentifier("nearby-rescan")
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.ultraThinMaterial)
         }
         .frame(width: 440, height: 420)
+        .background(.regularMaterial)
     }
 
     private func row(_ device: DiscoveredDevice) -> some View {

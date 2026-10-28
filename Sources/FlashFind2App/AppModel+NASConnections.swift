@@ -264,11 +264,101 @@ extension AppModel {
         } else { kind = error.localizedDescription.contains("请输入此 NAS") ? .credentials : .unknown }
         connectionStates[id]?.failureKind = kind
     }
-    func invalidate() {
-        providerCoordinator?.cancel()
+    // MARK: - 结果写入（唯一入口）
+
+    /// **唯一**的结果写入点。任何来源的新结果都必须走这里。
+    ///
+    /// 三件事必须一起做，所以不许在这里拆开写：
+    /// 1. 并进窗口（去重 → 重排 → 只留前 200）；
+    /// 2. `results` 一次赋值（一次 `objectWillChange`）；
+    /// 3. `matchedResultCount` 跟着更新（状态栏写「200 / 1374 项」要它）。
+    ///
+    /// 绕过它的后果是具体可见的：直接 `results.append(...)` 会让结果突破
+    /// 200 条上限，而直接改 `results` 又会让总数停在旧值上——
+    /// 两者都不会报错，只是界面开始说假话。
+    func integrateResults(_ incoming: [SearchResult]) {
+        guard !incoming.isEmpty else { return }
+        resultWindow.integrate(incoming)
+        results = resultWindow.rows
+        matchedResultCount = resultWindow.totalMatched
+    }
+
+    /// 候选池里还有没显示的行（「继续搜索」按钮该不该出现）。
+    ///
+    /// ★ 三个条件缺一不可：这批结果**属于当前限定**（否则按钮会出现在
+    ///   一次已经作废的列表下面）、池子里确实还有、且不是夹具。
+    var canShowMoreResults: Bool { canUseDisplayedResults && resultWindow.canShowMore }
+
+    /// 「继续搜索」：再放一批（`SearchResultLimit.step`）进列表。
+    ///
+    /// ★ 只改显示窗口，**不重新搜**：候选早在第一批时就都收下来了，
+    ///   再发一次请求既慢又可能拿到不同的集合。
+    func showMoreResults() {
+        guard resultWindow.showMore() else { return }
+        results = resultWindow.rows
+    }
+
+    /// 把当前这一批结果做成一份可钉在桌面上的快照。
+    ///
+    /// 空列表没有钉的意义（钉出来的是一块写着「0 项」的玻璃），返回 nil。
+    ///
+    /// ★ 2026-10-28 起快照还要带上**此刻的类型与位置限定**：钉住的窗口里那两个
+    ///   控件仍然在，而且能改；不带的话窗口一开出来就是「全部 / 全部位置」，
+    ///   等于把用户刚做的筛选抹掉（用户原话：「钉住以后保留文件类型和文件位置的筛选」）。
+    func currentPinnedResults() -> PinnedResults? {
+        guard canUseDisplayedResults, !results.isEmpty else { return nil }
+        return PinnedResults(query: query,
+                             rows: results,
+                             totalMatched: matchedResultCount,
+                             locationTitle: limitedLocationTitle,
+                             fileType: tokenBar.fileType,
+                             location: tokenBar.location)
+    }
+
+    /// 点「钉住」：把这一批结果搬到桌面上的独立窗口，搜索框随即空出来。
+    ///
+    /// ★ 顺序不能反：先取快照再清空。反过来的话 `currentPinnedResults()` 拿到的是
+    ///   已经被清掉的空列表，钉出来是一块写着「0 项」的玻璃。
+    /// ★ 清空走 `clearSearchSession()`：查询词、结果、选中一起清，
+    ///   界面不会出现「输入框空了但下面还挂着上一轮结果」这种自相矛盾的样子。
+    /// ★ 最后把键盘交回搜索框：用户是在结果窗里点的图钉，那块窗口马上就要消失，
+    ///   不交还的话他接着打字一个字都进不去。
+    func pinCurrentResults() {
+        guard let snapshot = currentPinnedResults() else { return }
+        // 锚点**只能是搜索框那一块**。
+        //
+        // ★ 2026-10-28 报障「钉住的位置会随机跳一下」，一半原因在这里：
+        //   原来回落成 `NSApp.keyWindow?.frame`，而 key window 此刻可能是**结果窗**
+        //   （点图钉时焦点在那一块），也可能是**上一块钉住的窗**——同一批结果
+        //   从不同的窗口钉出去，落点就不同，看起来就是「随机跳」。
+        //   拿不到搜索框时宁可按屏幕居中摆（`present` 里处理 nil），
+        //   也不要按一个每次都不一样的东西对齐。
+        let anchor = SearchWindowRegistry.shared.fieldFrame
+        guard PinnedResultsWindows.shared.present(snapshot, model: self, near: anchor) else { return }
+        clearSearchSession()
+        NotificationCenter.default.post(name: .focusFlashFindField, object: nil)
+    }
+
+    /// 清空结果。**`results = []` 出现的每一处都必须走这里**（窗口的
+    /// rows / 总数 / 去重集合三者只能一起清掉，漏一个就会「上一轮的
+    /// 匹配数」渗进这一次的界面）。
+    func clearResults() {
+        resultWindow.reset()
+        results = []
+        matchedResultCount = 0
+    }
+
+    /// 预览 / 夹具专用：直接给一份结果，不参与上限计算、不冒充匹配总数。
+    func setFixtureResults(_ rows: [SearchResult]) {
+        resultWindow = .fixture(rows)
+        results = resultWindow.rows
+        matchedResultCount = resultWindow.totalMatched
+    }
+
+    func invalidate() {        providerCoordinator?.cancel()
         contextRevision &+= 1; resultsAreCurrent = false; displayedRevision = nil
         searchTask?.cancel(); spotlight?.cancel(); queryID = UUID()
-        results = []; selected = nil; searching = false
+        clearResults(); selected = nil; searching = false
     }
     func changedQuery() {
         // 一开始输入就把首次使用的键位提示收起——它只在「还没动手」时有用。
@@ -285,23 +375,12 @@ extension AppModel {
         // 交给既有的 `SearchQueryParser` —— 用户在框里打「pdf」走的是同一条路，
         // 所以行为一致。只选了类型没打关键词时，就只发类型词（看某类型的全部文件）。
         let searchText = tokenBar.searchText(keyword: query)
-        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { results = []; selected = nil; searching = false; return }
-        // ★ 命令模式（`/` 唤起）**不发起真实搜索**。
-        //
-        // 那时的文本是「指令」，不是关键词：把它当关键词发给设备，
-        // 设备会去搜一个叫「/」或者叫「照片」的东西，白白占一次设备侧检索。
-        // 面板里选完位置之后，`applySearchTarget` 会带着关键词再调一次
-        // `changedQuery`，那时才是真搜。
-        if isCommandModeActive {
-            results = []; selected = nil; searching = false
-            resultsAreCurrent = false; displayedRevision = nil
-            return
-        }
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { clearResults(); selected = nil; searching = false; return }
         if AppEnvironment.isPreview {
-            results = AppEnvironment.fixtures(for: query); selected = results.first?.id
+            setFixtureResults(AppEnvironment.fixtures(for: query)); selected = results.first?.id
             let active = fixtureMode ? nasConnections.filter { connectionStates[$0.id]?.canSearch == true } : nasConnections
             if fixtureMode && active.isEmpty && (scope == .nas || !localEnabled) {
-                results = []; selected = nil; searchWarnings = [nasSearchAvailabilityMessage]
+                clearResults(); selected = nil; searchWarnings = [nasSearchAvailabilityMessage]
             } else if !active.isEmpty {
                 for i in results.indices {
                     results[i].connectionID = active[i % active.count].id; results[i].connectionName = active[i % active.count].name
@@ -316,7 +395,7 @@ extension AppModel {
             return
         }
         ensureProviderCoordinator();providerCoordinator?.cancel()
-        results=[];selected=nil
+        clearResults();selected=nil
         // 本机范围只有一处出处（MCP 执行侧也要套，见 `AppModel+AIAccess`）。
         applyLocalScopeToProvider()
         for provider in nativeProviders.values { provider.queryBudgetMs = max(1, min(120, nativeSearchTimeoutSeconds)) * 1000 }
@@ -375,22 +454,15 @@ extension AppModel {
             providerCoordinator?.searchDebounced(searchText,sources:requested,rootLimit:rootLimit,queryID:id) { [weak self] event in
                 guard let self,self.queryID==id,self.contextRevision==revision else { return }
                 self.recordProviderEvent(event)
-                // 批量合并。逐条 firstIndex + 逐条 append/排序是 O(n²)：
-                // 结果上千条时，单是排序就能吃掉主线程几百毫秒，界面明显卡顿。
-                // 现在按「已有索引 → 追加新项 → 一次排序」处理，O(n)。
+                // ★ 合并与排序搬到 Core 的 `SearchResultMerge`：顺序、去重、
+                //   「什么时候才需要重排」这三条判据都收在那边。
+                //   这里只做一次赋值 —— 一整批发一次 `objectWillChange`，
+                //   逐条 append 是每行发一次（结果上千条时界面就开始发涩）。
+                //
+                // ★ 上限 200 与「总共匹配了多少」也在 Core 的 `SearchResultWindow`：
+                //   它同时管 rows / totalMatched / 去重集合，三者只能一起清空。
                 if !event.results.isEmpty {
-                    var index = Dictionary(uniqueKeysWithValues: self.results.enumerated()
-                        .map { ($0.element.id, $0.offset) })
-                    var appended = false
-                    for row in event.results {
-                        if let position = index[row.id] { self.results[position] = row }
-                        else {
-                            index[row.id] = self.results.count
-                            self.results.append(row); appended = true
-                        }
-                    }
-                    self.results.sort { $0.rank == $1.rank ? $0.name < $1.name : $0.rank < $1.rank }
-                    _ = appended
+                    integrateResults(event.results)
                 }
                 if !self.results.contains(where:{$0.id==self.selected}) { self.selected=self.results.first?.id }
                 completion.note(event)

@@ -169,9 +169,9 @@ private struct WelcomeStep: View {
                 .foregroundStyle(Color.accentColor)
             Text(OnboardingStep.welcome.title)
                 .font(.system(size: 24, weight: .semibold)).padding(.top, 24)
-            Text("快速找到这台 Mac 和网络存储中的文件。")
+            Text("快速找到这台 Mac、网络存储里的文件与应用。")
                 .font(.body).foregroundStyle(.secondary).padding(.top, 10)
-            Text("一个搜索框，搜索 Mac、NAS 和网络文件")
+            Text("一个搜索框，搜索 Mac、NAS 与应用")
                 .font(.callout).foregroundStyle(.tertiary).padding(.top, 26)
             Spacer(minLength: 0)
             Spacer(minLength: 0)
@@ -253,7 +253,7 @@ private struct ShortcutStep: View {
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text("试一下：按 \(model.globalShortcut.displayName)").font(.callout)
-                Text("按一次打开搜索演示。也可以点击「继续」，快速看看搜索、空格预览与范围选择。")
+                Text("按一次打开搜索演示。也可以点击「继续」，快速看看搜索、预览、筛选与钉住。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

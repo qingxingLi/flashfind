@@ -134,8 +134,19 @@ class Fixture {
   /// 搜索每页返回的条目数上限（用于造分页）。
   int searchTotal = 3;
 
-  /// 让根目录只返回文件、不返回任何存储（用于验证 EmptyScope）。
+  /// 让根目录只返回文件、不返回任何目录（用于验证「整根仍是可用位置」）。
   bool rootHasNoDir = false;
+
+  /// 让根目录完全为空（用于验证 EmptyScope）。
+  bool rootIsEmpty = false;
+
+  /// 根目录下的**目录数**。>0 时用它替换根目录内容，用来验证
+  /// 「多到列不动 ⇒ 只给整根一个位置，且只请求一页」。
+  ///
+  /// 真实站点上这个数可以达到 1724（实测某公开库），
+  /// 而服务端按 `page/per_page` 分页返回，所以 fixture 也必须分页，
+  /// 否则「只发一次请求」这条断言会因为 fixture 不分页而变成聋的。
+  int rootDirCount = 0;
 
   /// 某个存储「搜索索引里有、但实际读不了」——模拟真机上 `/C0115` 那种
   /// 上游网盘授权失效：list 报错，search 照样靠索引返回结果。
@@ -174,6 +185,8 @@ class Fixture {
     listFailureMessage = null;
     searchTotal = 3;
     rootHasNoDir = false;
+    rootIsEmpty = false;
+    rootDirCount = 0;
     deadRoot = null;
     basePath = '/';
     meUnavailable = false;
@@ -287,14 +300,29 @@ Future<Fixture> startFixture() async {
           break;
         }
         if (path == '/') {
-          final content = fixture.rootHasNoDir
-              ? _rootStorages.where((e) => e['is_dir'] != true).toList()
-              : _rootStorages;
+          List<Map<String, Object?>> content;
+          if (fixture.rootIsEmpty) {
+            content = const [];
+          } else if (fixture.rootDirCount > 0) {
+            content = List.generate(
+              fixture.rootDirCount,
+              (i) => {'name': 'D${i.toString().padLeft(4, '0')}', 'is_dir': true, 'size': 0, 'type': 1},
+            );
+          } else if (fixture.rootHasNoDir) {
+            content = _rootStorages.where((e) => e['is_dir'] != true).toList();
+          } else {
+            content = _rootStorages;
+          }
+          // 与真机一致：根目录同样按 page/per_page 分页，`total` 报总数。
+          final page = (body['page'] as num?)?.toInt() ?? 1;
+          final perPage = (body['per_page'] as num?)?.toInt() ?? 100;
+          final start = (page - 1) * perPage;
+          final slice = start >= content.length ? const [] : content.skip(start).take(perPage).toList();
           reply({
             'code': 200,
             'message': 'success',
             'data': {
-              'content': content,
+              'content': slice,
               'total': content.length,
               'readme': '',
               'header': '',
@@ -662,28 +690,67 @@ Future<void> listTests(Fixture fixture) async {
   // ignore: avoid_print
   print('\n  列目录');
 
-  await check('根目录列出存储（目录项）', () async {
+  await check('根目录列出存储（目录项），整根永远排在首位', () async {
     fixture.reset();
     final adapter = adapterFor(fixture);
     await adapter.login(username: _goodUser, password: _goodPass);
     final roots = await adapter.shareRoots();
-    expectEqual(roots.length, 2, '只有 is_dir 的项才是存储');
-    expectEqual(roots.first.path, '/A0001', '第一个存储路径');
+    // 首位是合成的「全部目录」：它是唯一能一次搜全库的位置（1 次请求），
+    // 而逐个勾选 N 个位置的代价是 2N 次请求。
+    expectEqual(roots.length, 3, '整根 + 2 个目录 + 0 个文件（文件不是位置）');
+    expectEqual(roots.first.path, '/', '整根位置在最前');
+    expectEqual(roots.first.name, '全部目录', '整根的展示名');
+    expectEqual(roots[1].path, '/A0001', '第一个存储路径');
     expectEqual(roots.last.name, 'B0002', '第二个存储名');
   });
 
-  await check('根目录只有文件时抛 EmptyScope 而不是静默返回空', () async {
+  await check('根下只有散文件时，整根仍是可用位置（不再报 EmptyScope）', () async {
     fixture.reset();
     fixture.rootHasNoDir = true;
     final adapter = adapterFor(fixture);
     await adapter.login(username: _goodUser, password: _goodPass);
+    final roots = await adapter.shareRoots();
+    // 旧行为是抛「根目录下没有任何存储」——对「文件直接堆在根上」的站点，
+    // 那句话既不成立（文件是能搜的），也没有出口（用户无处可去）。
+    expectEqual(roots.length, 1, '只有整根');
+    expectEqual(roots.single.path, '/', '整根位置');
+  });
+
+  await check('根目录真的为空时仍抛 EmptyScope（不能假装能用）', () async {
+    fixture.reset();
+    fixture.rootIsEmpty = true;
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
     try {
       await adapter.shareRoots();
-      throw StateError('期望抛 EmptyScope，实际成功返回空列表');
+      throw StateError('期望抛 EmptyScope，实际成功返回');
     } on AdapterFailure catch (e) {
       expectEqual(e.kind, ErrorKind.emptyScope, '错误种类');
       expectTrue(e.message.contains('存储'), '文案应指向「去网页端添加存储」，实际：${e.message}');
     }
+  });
+
+  await check('★ 根下上千个目录：只给整根一个位置，且只请求一页', () async {
+    fixture.reset();
+    fixture.rootDirCount = 1724; // 真机实测的那个数
+    final adapter = adapterFor(fixture);
+    await adapter.login(username: _goodUser, password: _goodPass);
+    final roots = await adapter.shareRoots();
+
+    expectEqual(roots.length, 1, '多到列不动时只留整根');
+    expectEqual(roots.single.path, '/', '整根位置');
+    // 判据用「有没有」而不是「够不够」：平铺 1724 行既列不完也勾不完，
+    // 真勾上则一次搜索要发 3448 个请求。
+    final lists = fixture.listRequests.length;
+    expectEqual(lists, 1, '只应发一次 list（per_page=100 的第一页就够判断），实际 $lists');
+
+    // 整根搜索：一次请求覆盖全库，parent 必须是 '/'、scope 必须是 0。
+    fixture.requests.clear();
+    await adapter.search('x', roots: roots.map((r) => r.path).toList());
+    final searches = fixture.searchRequests;
+    expectEqual(searches.length, 1, '整根只需一次搜索请求，实际 ${searches.length}');
+    expectEqual(searches.single.body['parent'], '/', '搜索的 parent 应为整根');
+    expectEqual(searches.single.body['scope'], 0, 'scope=0 才是「文件 + 目录」');
   });
 
   await check('★ token 失效是 HTTP 200 + code=401，必须报会话失效', () async {

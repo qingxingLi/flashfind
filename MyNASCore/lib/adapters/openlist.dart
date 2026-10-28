@@ -253,27 +253,80 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
 
   // ───────────────────────── 共享根 ─────────────────────────
 
+  /// 根下条目超过这个数，就**不再逐个当搜索位置**，只给「整个根」一个位置。
+  ///
+  /// 判据不是「界面卡不卡」，而是**搜索代价**：每个位置 = 一次预检 + 一次搜索，
+  /// 4 路并发下墙钟时间 ≈ `N/4 × RTT`。公网站点单次 RTT 0.3–3 s，
+  /// 20 个位置就已经十几秒，50 个以上基本等于不可用。
+  static const int _flatRootLimit = 50;
+
+  /// 「整个根」这个合成位置的展示名。只在根下条目多到列不动、或根下没有子目录时出现。
+  static const String _wholeRootName = '全部目录';
+
   /// OpenList 没有「共享」概念：根目录下的各项就是账号可见的存储。
   ///
   /// 这里返回根目录里的**目录**。单个存储不可用（上游网盘失效）不阻断枚举：
   /// 用户需要看到它存在、以及为什么点进去是空的——那比让它凭空消失更有用。
+  ///
+  /// ★ 两种形态必须分开处理，这是 2026-10-27 那次报障的结论
+  ///   （「首页有 N 多文件夹的怎么办」）：
+  ///   · 根下十几个存储（常见自建站点）⇒ 整根 + 逐个目录都列，用户按需勾；
+  ///   · 根下成百上千个目录（公开资源库，实测某站点 1724 个）⇒ 只给整根。
+  ///     平铺 1724 行复选框列不完也勾不完；真勾上则一次搜索要发 3448 个请求。
+  ///     而 `parent='/'` + `scope=0` 实测一次覆盖全库（含三级子目录），
+  ///     请求数从 3448 降到 2，结果一条不少 —— 收敛不是降级，是正解。
   @override
   Future<List<ShareRoot>> shareRoots() async {
     _cancel?.check();
     _log.i('OpenListAdapter: 枚举根目录（存储列表）');
 
+    // 先只取第一页看 `total`：上千条要翻十几页，连接流程没必要为此白等。
+    final total = await _rootEntryCount();
+    if (total > _flatRootLimit) {
+      _log.i('OpenListAdapter: 根下 $total 项，超过 $_flatRootLimit ⇒ 只提供整根位置');
+      return const <ShareRoot>[ShareRoot(name: _wholeRootName, path: '/')];
+    }
+
     final entries = await list('/');
-    final dirs = entries.where((entry) => entry.isDirectory).toList();
-    if (dirs.isEmpty) {
+    if (entries.isEmpty) {
       throw const AdapterFailure(
         ErrorKind.emptyScope,
         '登录成功，但根目录下没有任何存储。'
         '请先在 OpenList 网页端添加一个存储，再回来连接。',
       );
     }
-    return dirs
-        .map((entry) => ShareRoot(name: entry.name, path: _norm(entry.path)))
-        .toList();
+    // 根下只有散文件、没有子目录时，「整根」就是唯一能用的位置；
+    // 有子目录时也把整根放在首位 —— 它是唯一能「一次搜全部」的位置，
+    // 而逐个勾选 N 个位置的代价是 2N 次请求。
+    final dirs = entries.where((entry) => entry.isDirectory);
+    return <ShareRoot>[
+      const ShareRoot(name: _wholeRootName, path: '/'),
+      for (final entry in dirs) ShareRoot(name: entry.name, path: _norm(entry.path)),
+    ];
+  }
+
+  /// 根目录条目总数，**只发一次请求**（`per_page=_pageSize`）。
+  ///
+  /// 不能直接用 `list('/')` 数长度：那个会按 `total` 翻页取全，上千条要十几次
+  /// 往返。这里只需要判断「是不是多到列不动」，第一页信封里的 `total` 就够；
+  /// 少数老版本不回 `total` 时退化成「第一页的条数」，判据依然成立。
+  Future<int> _rootEntryCount() async {
+    final Object? body;
+    try {
+      body = await _request('/api/fs/list', {
+        'path': '/',
+        'password': '',
+        'page': 1,
+        'per_page': _pageSize,
+        'refresh': false,
+      });
+    } on AdapterFailure catch (failure) {
+      throw _asListFailure(failure, '/');
+    }
+    final envelope = _envelope(body);
+    _throwIfFailed(envelope, action: '列目录', path: '/');
+    final data = envelope.data;
+    return _intField(data, 'total') ?? _listField(data, 'content').length;
   }
 
   // ───────────────────────── 列目录 ─────────────────────────

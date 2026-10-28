@@ -1,4 +1,5 @@
 import SwiftUI
+import FlashFindCore
 
 struct SearchStateView: View {
     let symbol: String
@@ -23,11 +24,19 @@ struct SearchStateView: View {
 
 struct SearchStatusBar: View {
     let message: String
+    /// 当前**显示**了几条（上限之内的那一批）。
     let count: Int
+    /// 本次搜索总共匹配多少条（去重后）。`<= count` 表示没被上限截断。
+    var total: Int = 0
     let updating: Bool
     var warnings: [String] = []
+    /// 候选池里还有没显示的行（用户 2026-10-28：「对结果不满意，可以选择继续搜索」）。
+    var canShowMore: Bool = false
+    /// 点「继续搜索」：再放一批（`SearchResultLimit.step` 条）。
+    var showMore: (() -> Void)? = nil
     var configureSources: (() -> Void)? = nil
     @State private var showWarnings = false
+    private var truncated: Bool { total > count && count > 0 }
     var body: some View {
         HStack(spacing: 12) {
             Text(message.isEmpty ? "↑↓ 选择   Space 预览   ↵ 打开   ⌘↵ Finder   esc 隐藏" : message)
@@ -49,9 +58,31 @@ struct SearchStatusBar: View {
                         }.frame(width: 360).frame(maxHeight: 260)
                     }
             }
-            Text(updating ? "搜索中…" : "\(count) 项").monospacedDigit().fixedSize()
+            // ★ 被上限截断时写「200 / 1374 项」而不是只写 200：
+            //   只显示 200 会让用户以为目录里只有 200 个匹配，从而得出
+            //   「我的文件丢了」这个结论。全句在悬停里说完整。
+            Text(updating ? "搜索中…" : (truncated ? "\(count) / \(total) 项" : "\(count) 项"))
+                .monospacedDigit().fixedSize()
+                .help(truncated ? (SearchResultLimit.caption(totalMatched: total, shown: count) ?? "") : "")
+            // ★ 上限不是死路：200 条只是**第一批**。
+            //   按钮只在「池子里还有」时出现，取完自动消失——
+            //   留着它会让人以为还能继续，点了却没反应。
+            if canShowMore, let showMore {
+                Button(action: showMore) {
+                    Text(SearchResultLimit.continueTitle)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
+                .fixedSize()
+                .help(SearchResultLimit.continueHelp(remaining: max(0, total - count)))
+                .accessibilityIdentifier("search-continue-button")
+            }
         }.font(.system(size: 11)).foregroundStyle(.secondary)
             .padding(.horizontal, 22).frame(height: 32)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(truncated
+                ? "已显示 \(count) 条，共 \(total) 条匹配"
+                : "\(count) 项")
     }
 }
 

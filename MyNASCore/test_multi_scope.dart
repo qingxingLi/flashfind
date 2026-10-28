@@ -15,7 +15,8 @@ Future<void> main() async {
   _rejectsPrefixLookalikes();
   _owningRootIsCorrect();
   _rejectsEmptyAndUnsafe();
-  stdout.writeln('multi-scope: 4 项通过');
+  _wholeRootScopeIsExplicitlyGranted();
+  stdout.writeln('multi-scope: 5 项通过');
 }
 
 void _acceptsEveryRoot() {
@@ -56,20 +57,42 @@ void _owningRootIsCorrect() {
 
 void _rejectsEmptyAndUnsafe() {
   var rejected = 0;
-  // 空列表、空串列表、空根、根目录、物理卷路径、含穿越的路径——都要被拒。
+  // 空列表、空串列表、物理卷路径、含穿越的路径——都要被拒。
+  //
+  // ★ `'/'` 不在这个列表里了：它现在是「整个可见空间」这个**合法**位置，
+  //   但只对声明了整根授权的来源成立，见 `_wholeRootScopeIsExplicitlyGranted`
+  //   与 test_search_roots 的 hostile 列表（未授权的 "/" 仍被拒）。
   try { Scope.multi([]); } on CoreError catch (e) { if (e.kind == 'ScopeDenied') rejected++; }
   try { Scope.multi(['']); } on CoreError catch (e) { if (e.kind == 'ScopeDenied') rejected++; }
-  // `/` 会先被 validate 拦下（含空段）→ UnsafeLogicalPath，而不是 ScopeDenied。
-  // 两者的区别只是「在哪一步被拒」，安全效果相同：都是拒绝。
-  try { Scope('/'); } on CoreError catch (e) { if (e.kind == 'UnsafeLogicalPath' || e.kind == 'ScopeDenied') rejected++; }
   try { Scope('/volume1/secret'); } on CoreError catch (e) { if (e.kind == 'ScopeDenied') rejected++; }
   try { Scope('/示例共享/../../etc'); } on CoreError catch (e) { if (e.kind == 'UnsafeLogicalPath') rejected++; }
-  if (rejected != 5) throw StateError('应拒绝 5 种非法范围，实际 $rejected');
+  if (rejected != 4) throw StateError('应拒绝 4 种非法范围，实际 $rejected');
   // 合法多根不应被误拒：加一个不会改变计数的合法构造。
   Scope.multi(['/示例共享', '/home', '/docker']);
-  if (rejected != 5) throw StateError('合法范围被误拒');
+  if (rejected != 4) throw StateError('合法范围被误拒');
   // 其中只要有一个根非法，整组都要被拒——不能「部分放行」。
   var groupRejected = false;
   try { Scope.multi(['/示例共享', '/volume1/secret']); } on CoreError catch (e) { groupRejected = e.kind == 'ScopeDenied'; }
   if (!groupRejected) throw StateError('多根中混入未授权根时必须整组拒绝');
+}
+
+/// ★ `'/'` = 「整个可见空间」，**只在显式授权时才成立**。
+///
+/// 为什么需要它：OpenList 那种根下挂着上千个文件夹的站点（实测 1724 个），
+/// 逐个当搜索位置既列不完也勾不完，真勾上则一次搜索要发 2×N 个请求。
+/// 而 `parent='/'` 一次就覆盖全库。
+///
+/// 这不等于「放开根目录」：群晖那种按共享授权的来源，roots 里根本没有 `'/'`，
+/// 请求它照样被 `owningRoot == null` 拒掉（见 test_search_roots 的 hostile 列表）。
+void _wholeRootScopeIsExplicitlyGranted() {
+  final scope = Scope.multi(['/']);
+  if (!scope.allows('/AIR/x.rar')) throw StateError('整根授权应放行根下任意路径');
+  if (!scope.allows('/a/b/c.txt')) throw StateError('整根授权应放行任意深度');
+  if (scope.owningRoot('/AIR/x.rar') != '/') throw StateError('整根授权下的归属根应为 /');
+  // 收窄到整根本身（界面里「全部目录」存的就是这个值）。
+  if (!scope.narrowTo(['/']).allows('/任何/路径')) throw StateError('应允许收窄到整根');
+  // 收窄到整根下的某个子目录，同样成立 —— 且不允许越出这个子目录。
+  final narrowed = scope.narrowTo(['/AIR']);
+  if (!narrowed.allows('/AIR/x.rar')) throw StateError('整根之下应可收窄到子目录');
+  if (narrowed.allows('/其他/x.rar')) throw StateError('收窄后不该放行别的子目录');
 }

@@ -47,8 +47,12 @@ final class ResultActionController: ObservableObject {
 
     // MARK: - 动作
 
-    func open(_ result: SearchResult, reveal: Bool = false) {
+    /// - Parameter resolve: 取「这一行还能怎么操作」的入口。默认是当前结果列表
+    ///   （`AppModel.currentResult`）；钉住的窗口传**快照**版本（不要求还在当前结果里）。
+    func open(_ result: SearchResult, reveal: Bool = false,
+              resolve: ((SearchResult) -> SearchResult?)? = nil) {
         guard !AppEnvironment.isPreview else { onStatus("UI 预览 · 文件操作已隔离"); return }
+        let resolveRow = resolve ?? self.resolveRow
         guard let row = resolveRow(result) else {
             onStatus("搜索或权限已变化，请重新选择结果"); return
         }
@@ -106,8 +110,9 @@ final class ResultActionController: ObservableObject {
     ///
     /// QLPreviewPanel 需要一个 responder（`QLPreviewPanelDataSource`）才能显示内容，
     /// 这里用自带的预览宿主承载，避免在 App 里实现完整 datasource 协议。
-    func quickLook(_ result: SearchResult) {
+    func quickLook(_ result: SearchResult, resolve: ((SearchResult) -> SearchResult?)? = nil) {
         guard !AppEnvironment.isPreview else { onStatus("UI 预览 · 文件操作已隔离"); return }
+        let resolveRow = resolve ?? self.resolveRow
         guard let row = resolveRow(result) else {
             onStatus("搜索或权限已变化，请重新选择结果"); return
         }
@@ -135,7 +140,8 @@ final class ResultActionController: ObservableObject {
     /// 路径是「站点里的位置」（`/A0002/…`），粘到哪里都得先知道是哪个站；
     /// 链接是「能直接点开的地址」（带域名、带百分号编码）。两个菜单项都给，
     /// 标题写清各是什么——只留一个，用户复制出来的东西经常不是他想要的。
-    func copyWebLink(_ result: SearchResult) {
+    func copyWebLink(_ result: SearchResult, resolve: ((SearchResult) -> SearchResult?)? = nil) {
+        let resolveRow = resolve ?? self.resolveRow
         guard !AppEnvironment.isPreview, let row = resolveRow(result) else { return }
         guard case .webURL(let url) = row.openTarget else {
             onStatus("这条结果没有网页链接")
@@ -152,7 +158,8 @@ final class ResultActionController: ObservableObject {
     /// 网页来源（OpenList）复制的是**站点内的逻辑路径**（`/A0002/…`），
     /// 不是能直接点开的网页链接——那是另一个菜单项。状态栏要如实说一句，
     /// 否则用户粘到浏览器地址栏里会得到「找不到页面」。
-    func copyPath(_ result: SearchResult) {
+    func copyPath(_ result: SearchResult, resolve: ((SearchResult) -> SearchResult?)? = nil) {
+        let resolveRow = resolve ?? self.resolveRow
         guard !AppEnvironment.isPreview, let row = resolveRow(result) else { return }
         if case .webURL = row.openTarget {
             NSPasteboard.general.clearContents()

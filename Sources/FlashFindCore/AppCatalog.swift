@@ -145,13 +145,21 @@ public enum AppCatalog {
     /// `Safari浏览器` 靠别名整名命中拿 0，不能因为显示名多了三个字就掉到 1。
     /// 排序用它、结果行的 rank 也用它——两处各算一套就会出现
     /// 「排第一的那行 rank 写 1」这种自相矛盾。
+    ///
+    /// ★ 2026-10-28：多了**模糊**一档。原来要求 `fold(key).contains(folded)`，
+    /// 于是 `xcode` 找不到 `Xcode-beta`（子序列 `xcd` 之类）、打错一个字母
+    /// 就一条都没有。现在交给 `SearchMatch` 判等级：0/1/2 的口径一个字没变，
+    /// 子序列与容错归到 **3**（原来根本不返回的候选现在能搜到，但排在
+    /// 整名/前缀/包含之后）。
     public static func rank(for candidate: AppSearchCandidate, query: String) -> Int? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let folded = fold(trimmed)
         var best: Int?
-        for key in candidate.matchKeys where fold(key).contains(folded) {
-            let value = rank(name: key, query: trimmed)
+        for key in candidate.matchKeys {
+            let grade = SearchMatch.evaluate(name: key, query: trimmed).grade
+            guard grade != .none else { continue }
+            // 旧口径的 0/1/2 原样保留；模糊一档统一记 3。
+            let value = grade.legacyRank == 4 ? 3 : grade.legacyRank
             if best.map({ value < $0 }) ?? true { best = value }
         }
         return best

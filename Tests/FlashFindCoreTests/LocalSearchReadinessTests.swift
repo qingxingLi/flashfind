@@ -48,8 +48,32 @@ final class LocalSearchReadinessTests: XCTestCase {
         XCTAssertEqual(try LocalFolderSearch.search("%_", folders: [directory]).results.map(\.name), ["literal%_知识库.txt"])
         XCTAssertTrue(try LocalFolderSearch.search("不存在", folders: [directory]).results.isEmpty)
     }
-    func testSymlinkCannotEscapeSelectedFolder() throws {
-        let base = try root(), selected = base.appendingPathComponent("selected"), outside = base.appendingPathComponent("outside")
+    /// ★ 模糊搜索在**已选文件夹**这条路上必须真的生效。
+    ///
+    /// 1.1.x 这里是「每个词都得是文件名的子串」，输入 `bsr` 一条都搜不到，
+    /// 用户会以为文件不在。这条走完整目录遍历（不是纯函数），
+    /// 一起验「命中」「不误命中」「分数与修改时间被写进结果行」。
+    func testFuzzyMatchWorksInSelectedFolderSearch() throws {
+        let directory = try root()
+        try Data("a".utf8).write(to: directory.appendingPathComponent("best_seller_report.xlsx"))
+        try Data("b".utf8).write(to: directory.appendingPathComponent("完全无关的东西.txt"))
+
+        let abbreviation = try LocalFolderSearch.search("bsr", folders: [directory])
+        XCTAssertTrue(abbreviation.results.contains { $0.name == "best_seller_report.xlsx" },
+                      "词首缩写必须命中（这就是「模糊搜索」要解决的问题）")
+        XCTAssertFalse(abbreviation.results.contains { $0.name == "完全无关的东西.txt" },
+                       "不相干的文件不能被模糊匹配拉进来")
+
+        XCTAssertTrue(try LocalFolderSearch.search("季度总结", folders: [directory]).results.isEmpty,
+                      "★ 放宽的只是「能凑出来」，不是「什么都算命中」")
+
+        let row = try XCTUnwrap(abbreviation.results.first { $0.name == "best_seller_report.xlsx" })
+        XCTAssertGreaterThan(row.score, 0, "结果行必须带综合分，否则排序会退回旧的 rank 口径")
+        XCTAssertEqual(row.rank, 4, "模糊命中的旧 rank 仍是 4（对外口径不变）")
+        XCTAssertNotNil(row.modifiedDate, "已选文件夹这条路的修改时间要从磁盘读出来")
+    }
+
+    func testSymlinkCannotEscapeSelectedFolder() throws {        let base = try root(), selected = base.appendingPathComponent("selected"), outside = base.appendingPathComponent("outside")
         try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         try Data().write(to: outside.appendingPathComponent("知识库禁入.txt"))

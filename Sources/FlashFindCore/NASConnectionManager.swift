@@ -82,6 +82,11 @@ import Foundation
         for source in configs where source.enabled {
             if let existing = providers[source.id], existing.config == source {
                 rebuilt[source.id] = existing
+            } else if let existing = providers[source.id], existing.config.hasSameConnection(as: source) {
+                // 只有名字变了：同一条会话，**不许断也不许重建**。
+                // 以前这里落到下面的 else，结果是「改个名字 NAS 掉线，还得重新输密码」。
+                existing.updateDisplayName(source.name)
+                rebuilt[source.id] = existing
             } else {
                 if let previous = providers[source.id] { Task { await previous.disconnect() } }
                 rebuilt[source.id] = makeProvider(bridge: bridge, config: source,

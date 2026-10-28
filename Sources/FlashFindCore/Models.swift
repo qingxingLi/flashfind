@@ -108,6 +108,16 @@ public struct SearchResult: Identifiable, Hashable, Sendable {
     public var size: Int64?
     public var localURL: URL?
     public var rank: Int
+    /// 综合排序分（0…1）：匹配度 0.72 + 修改时间新近度 0.28，见 `SearchRanking`。
+    ///
+    /// ★ 默认 `0` 有明确含义：**这条结果没被评分**。`SearchResultMerge` 的
+    /// 排序键在「两侧都是 0」时会退回旧的 `(rank, name, id)` 口径 ——
+    /// 这样预览/夹具/既有测试里那些手工造的 `SearchResult` 行为完全不变，
+    /// 而真实搜索路径（`NASSearchProvider.result` 等）一定会写入分数。
+    ///
+    /// ★ 不许在界面里现算：它是**一行一次**的成本，必须跟 `rank` 一起
+    /// 在结果行生成时算完（2000 行的教训见 `DeviceTimestamp`）。
+    public var score: Double = 0
     public var modifiedDate: Date?
     public var sourceType: SearchSourceType = .nas
     public var isOnline = true

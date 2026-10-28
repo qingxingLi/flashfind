@@ -41,12 +41,24 @@ extension AppModel {
     func applyDiscoveredDevice(_ device: DiscoveredDevice) { wizard.applyDiscoveredDevice(device) }
     func setDraftPlainHTTP(_ value: Bool) { wizard.setDraftPlainHTTP(value) }
     func setSourceEnabled(_ id: String, _ value: Bool) { wizard.setSourceEnabled(id, value) }
+    /// 给已保存的来源改名：只改配置与展示，不重连、不清结果（判定在 Core 的 `NASSourceRename`）。
+    func renameSource(_ id: String, to name: String) { wizard.renameSource(id, to: name) }
     func setDraftStatus(_ message: String) { wizard.setDraftStatus(message) }
     func connectDraft() { wizard.connectDraft() }
     func retryDraftUsingPlainHTTP() { wizard.retryDraftUsingPlainHTTP() }
     func confirmDraftTrust() { wizard.confirmDraftTrust() }
     func rejectDraftTrust() { wizard.rejectDraftTrust() }
     func toggleDraftScope(_ scope: String) { wizard.toggleDraftScope(scope) }
+    /// 全选 / 取消全选：与单点勾选同一条提交管线，判定在 Core 的 `ScopeBulkSelection`。
+    /// 预览钩子：造一份「已连接、有 N 个共享」的草稿（只在预览包里生效）。
+    func loadPreviewWizardDraftIfRequested() { wizard.loadPreviewWizardDraftIfRequested() }
+    /// 预览钩子：造几台「已保存」的来源，供设置页来源详情的截图（只在预览包里生效）。
+    func loadPreviewSavedSourcesIfRequested() { wizard.loadPreviewSavedSourcesIfRequested() }
+    func selectAllDraftScopes() { wizard.selectAllDraftScopes() }
+    func clearAllDraftScopes() { wizard.clearAllDraftScopes() }
+    var offersBulkDraftScopeSelection: Bool { wizard.offersBulkDraftScopeSelection }
+    var canSelectAllDraftScopes: Bool { wizard.canSelectAllDraftScopes }
+    var canClearAllDraftScopes: Bool { wizard.canClearAllDraftScopes }
     /// - Returns: 是否真的保存成功。**调用方据此决定关不关窗口、说不说「已保存」**：
     ///   搜索位置绑定被核心拒绝时，这里是 false，窗口必须留在原地让用户重试。
     @discardableResult

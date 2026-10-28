@@ -507,6 +507,29 @@ final class NASSourceWizardController: ObservableObject {
         preferences.set(data, forKey: Self.sourcesStorageKey)
     }
 
+    /// 给**已保存**的来源改名（设置页详情里的「名称」）。
+    ///
+    /// 名字是纯展示字段：`sourceID` 由 `id` 派生、钥匙串条目按 `sourceID` 存、
+    /// 核心会话也按 `sourceID` 建 —— 三处都不看名字。所以这里刻意只做三件事：
+    /// 改配置、落盘、把新名字告诉还活着的那台 Provider。
+    ///
+    /// 三条**不做**的，每一条都对应一个具体后果：
+    /// - 不 `rebuildNativeProviders()`：`NASConnectionManager.rebuild` 会把「配置变了」的
+    ///   来源 disconnect 再换成未登录实例 —— 改个名字 NAS 就掉线，还要重新输密码；
+    /// - 不 `invalidate()`：那会清空当前结果列表，改名字不该把用户搜出来的东西清掉；
+    /// - 不 `changedQuery()`：改名不是新查询，重搜一遍纯属浪费。
+    ///
+    /// 名字的规范化在 Core（`NASSourceRename`）：空白即默认名、换行折成空格。
+    func renameSource(_ id: String, to rawName: String) {
+        guard let index = nasSources.firstIndex(where: { $0.id == id }) else { return }
+        guard NASSourceRename.isRename(stored: nasSources[index].name, to: rawName) else { return }
+        let name = NASSourceRename.normalized(rawName)
+        nasSources[index].name = name
+        persistSources()
+        // 结果行的来源徽标读 `provider.source`，它是构造时的快照，必须一起换。
+        nativeProviders[id]?.updateDisplayName(name)
+    }
+
     func setSourceStatus(_ id: String, _ mutate: (inout NASSourceStatus) -> Void) {
         var status = nasSourceStatus[id] ?? NASSourceStatus()
         mutate(&status)
@@ -1038,27 +1061,137 @@ final class NASSourceWizardController: ObservableObject {
         draftStatus = "已取消，请确认此 NAS 的地址后再试"
     }
 
+    /// 预览构建里可以直接停在「选择搜索位置」这一步：`FF_UI_WIZARD=1`
+    /// （可选 `FF_UI_WIZARD_SHARES=<个数>`，默认 9；或 `whole` = 只有一个「全部目录」）。
+    ///
+    /// 与 `FF_UI_SETTINGS` / `FF_UI_QUICKPICK_TAB` 同一路数：没有它，这一屏的截图
+    /// 只能靠真连一台 NAS 再手点过去，改动前后没法各截一张来比。
+    /// 造出来的只是**排版用的草稿**，不发任何请求；正常启动（`isPreview == false`）
+    /// 读不到这个变量，一步都不会走。
+    func loadPreviewWizardDraftIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_WIZARD"] == "1" else { return }
+        let raw = ProcessInfo.processInfo.environment["FF_UI_WIZARD_SHARES"]
+        let pool = ["/Android", "/Android TV", "/IOS", "/MacOS", "/Other",
+                    "/Switch", "/UTM", "/Windows", "/工具", "/影音",
+                    "/照片", "/文档", "/归档", "/共享", "/备份"]
+        let shares: [String]
+        if raw == "whole" {
+            // 根下上千个目录的真实站点（适配器只给这一个位置）长什么样。
+            shares = [NASScopeLabel.wholeRoot]
+        } else {
+            let count = raw.flatMap(Int.init).map { max(1, min($0, 30)) } ?? 9
+            shares = Array(pool.prefix(count))
+        }
+        draftAvailableShares = shares
+        // 默认全勾上：这样一眼就能看出「取消全选」是亮的、「全选」是灰的。
+        draftSource.scopes = shares
+        draftSource.scopes.sort()
+        draftConnected = true
+        draftStatus = "已连接，可以搜索了"
+        previewDraftLoaded = true
+    }
+
+    /// 预览草稿是否已装载：只有 `loadPreviewWizardDraftIfRequested` 会置真，
+    /// 正常启动恒为假。置真时勾选只改界面、不向任何设备发请求（预览包里没有会话）。
+    private var previewDraftLoaded = false
+
+    /// 预览钩子：造几台「已保存」的来源，好让**设置页的来源详情**能截图。
+    ///
+    /// 详情页里的那几块（名称输入框、搜索位置、账号、移除）在没有真机的机器上
+    /// 完全进不去——来源列表是空的。所以这里按 `FF_UI_SOURCES=N` 造 N 台，
+    /// 第一台带名字「客厅 NAS」并选了五个位置，其余留空（用默认类型名），
+    /// 这样一张图里就能同时看到「改过名」与「没改名」两种行。
+    ///
+    /// 只在预览包里生效（第一句就 guard），正常启动造不出来；
+    /// 造出来的东西也**不会落盘**（`persistSources` 在预览包里直接返回）。
+    func loadPreviewSavedSourcesIfRequested() {
+        guard AppEnvironment.isPreview, !previewSavedSourcesLoaded else { return }
+        guard let raw = ProcessInfo.processInfo.environment["FF_UI_SOURCES"],
+              let count = Int(raw), count > 0 else { return }
+        previewSavedSourcesLoaded = true
+        let shares = ["/Book", "/Photo", "/Video", "/Project", "/Music"]
+        var made: [NASSourceConfig] = []
+        for index in 0..<min(count, 8) {
+            var source = NASSourceConfig(
+                id: "preview-source-\(index)",
+                name: index == 0 ? "客厅 NAS" : "",
+                host: "192.0.2.\(10 + index)",
+                port: 5001,
+                username: "demo",
+                scopes: shares)
+            source.vendor = .synology
+            source.enabled = true
+            made.append(source)
+        }
+        nasSources = made
+    }
+
+    /// 与 `previewDraftLoaded` 同理：只有预览钩子会置真。
+    private var previewSavedSourcesLoaded = false
+
     /// 勾选 / 取消一个搜索位置（多选：用户可以同时选中多个共享）。
+    func toggleDraftScope(_ scope: String) {
+        guard mayEditDraftScopes() else { return }
+        var scopes = draftSource.scopes
+        if scopes.contains(scope) { scopes.removeAll { $0 == scope } } else { scopes.append(scope) }
+        scopes.sort()
+        applyDraftScopes(scopes)
+    }
+
+    /// 全选：这一屏所有位置一次勾上。
+    ///
+    /// 和单点勾选走**同一条**提交管线（`applyDraftScopes`），
+    /// 所以「连点被串行化」「过期响应丢弃」「界面先动、底层后到」这三条对它同样成立。
+    /// 集合本身由 Core 的 `ScopeBulkSelection` 算，界面与控制器都不许自己拼。
+    func selectAllDraftScopes() {
+        guard mayEditDraftScopes() else { return }
+        applyDraftScopes(ScopeBulkSelection.selectAll(available: draftAvailableShares))
+    }
+
+    /// 取消全选：一个都不勾。
+    ///
+    /// 只清界面上的选择，**不**断开登录（与单点取消的既有约定一致：
+    /// 用户的意图多半是「换一批」而不是「注销这台 NAS」）。底层也不提交空数组。
+    func clearAllDraftScopes() {
+        guard mayEditDraftScopes() else { return }
+        applyDraftScopes(ScopeBulkSelection.clearAll())
+    }
+
+    /// 三个入口（勾一个 / 全选 / 取消全选）共用的准入门。
+    ///
+    /// 不满足时把原因写进状态栏并返回 false —— 三个入口的文案必须一致，
+    /// 各写一遍迟早出现「点这颗说请先连接、点那颗什么都不说」。
+    private func mayEditDraftScopes() -> Bool {
+        // ★ 判定依据是「草稿里有没有可操作的会话」，而**不是**「有没有本次新连的会话」。
+        // 用「本次新连的会话非空」那种写法时，编辑一个已连接的来源永远进不来：
+        // 界面写着「已连接，可以搜索了」，点勾选却被一句「请先完成连接」挡回去。
+        // 借来的活会话同样能改范围（`DraftSession.canEditScopes`）。
+        // 预览草稿没有真实会话，但要让截图里能按得动这两颗按钮。
+        if previewDraftLoaded { return true }
+        guard draftSession.canEditScopes else { draftStatus = "请先完成连接"; return false }
+        // ★ 上一轮收尾还没落定时不许改范围：此刻草稿里的范围是一份马上会被
+        //   回滚覆盖的快照，勾了也白勾。
+        guard !draftSettling else { draftStatus = "正在读取这台 NAS 的当前搜索位置…"; return false }
+        return true
+    }
+
+    /// 把一份新的勾选集合提交出去。
     ///
     /// 两个防护：
     /// 1. `defer` 必须写在 Task **内部**。写在外面的话，函数创建完 Task 就返回、
     ///    立刻把 `draftBusy` 复位，用户可以连点多个共享；
     /// 2. 用递增序号丢弃过期响应——即使两个请求都在飞，最终生效的也是用户**最后点**的那个，
     ///    而不是碰巧**最后返回**的那个。
-    func toggleDraftScope(_ scope: String) {
-        // ★ 判定依据是「草稿里有没有可操作的会话」，而**不是**「有没有本次新连的会话」。
-        // 用「本次新连的会话非空」那种写法时，编辑一个已连接的来源永远进不来：
-        // 界面写着「已连接，可以搜索了」，点勾选却被一句「请先完成连接」挡回去。
-        // 借来的活会话同样能改范围（`DraftSession.canEditScopes`）。
-        guard draftSession.canEditScopes else { draftStatus = "请先完成连接"; return }
-        // ★ 上一轮收尾还没落定时不许改范围：此刻草稿里的范围是一份马上会被
-        //   回滚覆盖的快照，勾了也白勾。
-        guard !draftSettling else { draftStatus = "正在读取这台 NAS 的当前搜索位置…"; return }
-        var scopes = draftSource.scopes
-        if scopes.contains(scope) { scopes.removeAll { $0 == scope } } else { scopes.append(scope) }
-        scopes.sort()
+    private func applyDraftScopes(_ scopes: [String]) {
         // 界面立刻反映用户刚点的这一下，不等底层往返。
         draftSource.scopes = scopes
+        if previewDraftLoaded {
+            draftStatus = scopes.isEmpty
+                ? "还没选搜索位置。至少要勾一个目录才能保存。"
+                : "已选择 \(scopes.count) 个搜索位置"
+            return
+        }
         scopeSelectionSequence += 1
         pendingScopeTarget = scopes
         // **串行化**：同一时刻只允许一个 selectScopes 在飞。
@@ -1068,6 +1201,23 @@ final class NASSourceWizardController: ObservableObject {
         guard !scopeRequestInFlight else { return }
         draftBusy = true
         Task { await drainScopeRequests() }
+    }
+
+    /// 值不值得给出「全选 / 取消全选」（位置只有一个时没有意义）。
+    var offersBulkDraftScopeSelection: Bool {
+        ScopeBulkSelection.isOffered(available: draftAvailableShares)
+    }
+
+    /// 「全选」此刻可不可点：已经全勾完了就没得选。
+    var canSelectAllDraftScopes: Bool {
+        ScopeBulkSelection.canSelectAll(available: draftAvailableShares,
+                                        selected: draftSource.scopes)
+    }
+
+    /// 「取消全选」此刻可不可点：一个可用位置都没勾时没得取消。
+    var canClearAllDraftScopes: Bool {
+        ScopeBulkSelection.canClearAll(available: draftAvailableShares,
+                                       selected: draftSource.scopes)
     }
 
     /// 搜索位置选择的请求序号，用于丢弃过期响应。

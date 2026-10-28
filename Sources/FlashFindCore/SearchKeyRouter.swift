@@ -17,12 +17,6 @@ public struct SearchKeyContext: Equatable, Sendable {
     public var inResults: Bool
     /// 输入法正在组字（有 marked text）
     public var isComposing: Bool
-    /// 搜索框处于**命令模式**（文本以 `/` 开头，命令面板已展开）。
-    ///
-    /// ★ 这个上下文存在的意义：命令模式下回车是「执行这条命令」，
-    /// 不是「打开下面那条选中的结果」。不区分的话，用户在面板里选中一个位置
-    /// 按回车，去打开的却是下面那条文件结果 —— 面板看着在，回车却不听它的。
-    public var inCommandMode: Bool
     /// 搜索框最前面有没有已选定的限定（位置 / 类型）。
     public var hasSearchToken: Bool
     /// 输入框里除限定之外还有没有关键词。
@@ -33,7 +27,6 @@ public struct SearchKeyContext: Equatable, Sendable {
 
     public init(keyCode: UInt16, hasCommand: Bool, hasOtherModifier: Bool,
                 inSearchField: Bool, inResults: Bool, isComposing: Bool,
-                inCommandMode: Bool = false,
                 hasSearchToken: Bool = false,
                 keywordEmpty: Bool = true) {
         self.keyCode = keyCode
@@ -42,7 +35,6 @@ public struct SearchKeyContext: Equatable, Sendable {
         self.inSearchField = inSearchField
         self.inResults = inResults
         self.isComposing = isComposing
-        self.inCommandMode = inCommandMode
         self.hasSearchToken = hasSearchToken
         self.keywordEmpty = keywordEmpty
     }
@@ -57,15 +49,6 @@ public enum SearchKeyRoute: Equatable, Sendable {
     case copyPath       // ⌘C 复制路径
     case hide           // esc 隐藏浮窗
     case passThrough    // 交还给系统与文本控件
-    // ── 命令模式（`/` 唤起命令面板）──
-    /// ↑ / ↓ 在命令候选之间移动。
-    case commandMove(Int)
-    /// ↩ 执行当前选中的命令。
-    case commandSubmit
-    /// esc 退出命令模式（回到普通搜索，而不是关掉整个浮窗）。
-    case commandCancel
-    /// 数字键 0–9 直接选中对应候选。
-    case commandPick(Int)
     // ── 前置限定 ──
     /// 删除键删掉搜索框最前面那排限定里的一个。
     case deleteSearchToken
@@ -95,28 +78,6 @@ public enum SearchKeyRouter {
         // 免得抢走 ⌘⇧F、⌥↑ 这类系统或文本组合。
         guard context.inSearchField || context.inResults, !context.hasOtherModifier else {
             return .passThrough
-        }
-
-        // ★ 命令模式先于所有普通路由判定。
-        //
-        // 顺序不能反：命令模式下 ↩ 是「执行命令」，↑↓ 是「在候选之间移动」，
-        // esc 是「退出命令模式」。若先走普通分支，回车会去打开文件结果，
-        // esc 会把整个浮窗关掉——命令面板将完全无法用键盘操作。
-        if context.inCommandMode {
-            switch context.keyCode {
-            case 125, 116: return .commandMove(1)
-            case 126, 114: return .commandMove(-1)
-            case 36, 76: return .commandSubmit
-            case 53: return .commandCancel
-            default:
-                // ★ 命令模式下数字键**一律被接管**，不进输入框。
-                //
-                // 手指就在数字键上：面板已经把编号写在脸上了，还要求用户
-                // 用方向键挪到那一条再回车，等于白给的信息不用。
-                // 代价是筛不出名字里带数字的位置（极少见），可以接受。
-                if let digit = Self.digitKeyCodes[context.keyCode] { return .commandPick(digit) }
-                return .passThrough
-            }
         }
 
         switch context.keyCode {
@@ -149,12 +110,6 @@ public enum SearchKeyRouter {
         }
     }
 
-    /// 主键盘区数字键的虚拟键码 → 数字。
-    ///
-    /// 键码不是连续的（5 和 6 之间隔着 22/23 的错位），查表比算偏移可靠。
-    private static let digitKeyCodes: [UInt16: Int] = [
-        29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9,
-    ]
 }
 
 /// 方向键选中结果后，Space 作用于结果；重新输入时回到文本编辑。

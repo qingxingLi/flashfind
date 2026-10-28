@@ -69,7 +69,7 @@ extension AppModel {
     /// 那是明显自相矛盾的界面。
     func clearSearchSession() {
         query = ""
-        results = []
+        clearResults()
         selected = nil
         searchFailure = nil
         searchWarnings = []

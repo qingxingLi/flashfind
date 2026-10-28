@@ -49,6 +49,16 @@ final class AppModel: ObservableObject {
     }
     @Published var query = ""
     @Published var results: [SearchResult] = []
+    /// 本次搜索**去重后**匹配到的总条数。
+    ///
+    /// ★ 它与 `results.count` 不是一回事：`results` 最多
+    /// `SearchResultLimit.perSearch`（200）条，而设备可能匹配到几千条。
+    /// 状态栏写「200 / 1374 项」靠的就是这个数——只写 200 会让用户
+    /// 以为目录里就这么多。
+    @Published var matchedResultCount = 0
+    /// 结果窗口（保留 top 200 + 累计总数 + 去重集合）。唯一写入点是
+    /// `integrateResults(_:)`，**不许**绕开它直接改 `results`。
+    var resultWindow = SearchResultWindow()
     @Published var selected: String?
     @Published var searchFailure: String?
     @Published var searchWarnings: [String] = []
@@ -80,20 +90,19 @@ final class AppModel: ObservableObject {
     @Published var selectedConnectionID: String?
     @Published var connectionStates: [String: NASConnectionState] = [:]
     @Published var scope: SearchScope = .all
-    /// 搜索框最前面那排已选定的限定（位置 + 文件类型）。
+    /// 当前生效的搜索限定（位置 + 文件类型）。
     ///
     /// ★ 它不是 `scope` 的替代品，而是**在 scope 之上的进一步收窄**：
     /// `scope` 决定「本机 / NAS / 全部」，`tokenBar` 决定「哪个来源的哪个根」
-    /// 与「什么格式」。两个限定可叠加（`\照片` + `/pdf`）。
-    @Published var tokenBar: SearchTokenBar = .empty
-    /// 命令面板里当前选中的候选下标。
-    @Published var commandSelection: Int = 0
-    /// 只有键盘导航请求自动定位；鼠标悬停只改变高亮。
-    @Published var commandKeyboardNavigationRevision: UInt64 = 0
-    /// 命令面板的候选顺序与数字快捷键（用户可在「设置 ▸ 搜索」里改）。
+    /// 与「什么格式」。两个限定可叠加（侧边栏选一个位置 + 类型条选 pdf）。
     ///
-    /// ★ 判定（怎么重排、谁占哪个数字、什么情况回落到默认）全在 Core 的
-    /// `SearchQuickPickSettings` / `SearchCommandArrangement` / `SearchCommandNumbering`。
+    /// ★ 2026-10-28 之后搜索框里**不再画**这排标签，状态仍由它持有：
+    ///   侧边栏高亮、类型条选中、`SearchRequestPlan` 的收窄都读它。
+    @Published var tokenBar: SearchTokenBar = .empty
+    /// 位置候选顺序（用户可在「设置 ▸ 搜索」里改）。
+    ///
+    /// ★ 判定（怎么重排、什么情况回落到默认）全在 Core 的
+    /// `SearchQuickPickSettings` / `SearchCommandArrangement`。
     /// 这里只持有**当前值**并负责落盘 —— 与 `showExperimentalSources` 同一个套路。
     @Published private(set) var quickPick = SearchQuickPickSettings.empty
     /// 本机这一侧的来源（本机搜索方式、已挂载 SMB 共享、文件夹选择）。
@@ -178,16 +187,10 @@ final class AppModel: ObservableObject {
         preferences.set(value, forKey: ExperimentalSources.storageKey)
     }
 
-    /// 命令面板的顺序/快捷键落了新值：广播 + 落盘。
-    ///
-    /// ★ 写在主文件而不是 extension：`quickPick` 是 `private(set)`，
-    /// setter 只能出现在同一文件里（`showExperimentalSources` 同理）。
-    /// ★ 预览态不写真实偏好 —— 打开预览看一眼不该改掉用户的设置。
-    func applyQuickPick(_ next: SearchQuickPickSettings) {
-        guard !AppEnvironment.isPreview || fixtureMode else { status = "UI 预览不修改真实设置"; return }
-        quickPick = next
-        next.save(to: preferences)
-    }
+    // ★ 2026-10-28：`applyQuickPick` 随「设置 ▸ 搜索 ▸ 搜索工具（位置顺序）」一起删了。
+    //   `quickPick` 本身还在，而且**仍在生效**——`commandItems(for:)` 按它排侧边栏、
+    //   并按它藏掉用户当年删过的位置。只是现在没有任何界面能改它，
+    //   于是「写」这一侧（setter / 落盘）也就没有用处了。
 
     // MARK: 检查更新（实现在 AppModel+UpdateCheck.swift）
     //
@@ -302,6 +305,21 @@ final class AppModel: ObservableObject {
     /// 判成空闲并**直接回收**（Automatic Termination，不是崩溃、没有崩溃报告）。
     /// 用户看到的就是「点完登录闪退」。判定规则在 `LastWindowClosePolicy`。
     var showPanel: (() -> Void)?
+    /// 结果那一块窗口此刻是不是 key。
+    ///
+    /// ★ 2026-10-28 结果搬进独立窗口之后才需要它：键盘路由判「用户在结果区操作」
+    ///   靠的是「焦点不在输入框」，而输入框的 `FocusState` **不会**因为用户点了
+    ///   另一个窗口就变 false —— 不读这个真实的窗口状态，点完结果按 ↑↓ / 空格
+    ///   会全部落空（表现为「点了结果之后键盘就死了」）。
+    @Published var resultsWindowIsKey = false
+    /// 此刻该不该有「结果那一块」。
+    ///
+    /// 判定在 Core（`SearchModuleLayout.showsContentModule`），这里只是把
+    /// 两个入参取出来——窗口控制器与 SwiftUI 视图都读它，避免各算一遍。
+    var hasSearchContent: Bool {
+        SearchModuleLayout.showsContentModule(hasQuery: !keywordIsEmpty,
+                                              hasOpenFailure: openFailure != nil)
+    }
     var contextRevision: UInt64 = 0
     var displayedRevision: UInt64?
     var displayedQuery = ""
@@ -488,7 +506,11 @@ final class AppModel: ObservableObject {
                 if ProcessInfo.processInfo.environment["FF_UI_FIXTURE_EMPTY"] != "1" {
                     _ = addConnection()
                 }
-                changedQuery(); return
+                changedQuery()
+                #if DEBUG
+                applyPreviewSampleResultsIfRequested()
+                #endif
+                return
             }
             if ProcessInfo.processInfo.environment["FF_UI_MULTI_NAS"] == "1" {
                 enabled = true
@@ -508,7 +530,11 @@ final class AppModel: ObservableObject {
                 selectConnection("preview-nas-a")
             }
             query = ProcessInfo.processInfo.environment["FF_UI_QUERY"] ?? ""
-            changedQuery(); return
+            changedQuery()
+            #if DEBUG
+            applyPreviewSampleResultsIfRequested()
+            #endif
+            return
         }
         let defaults = self.preferences
         // ★ R01：全新安装时下面两个 key 都不存在，而 `bool(forKey:)` 对**不存在**的 key
@@ -562,6 +588,119 @@ final class AppModel: ObservableObject {
     //
     // 启动后自动连接、以及连接进行中用户改主意时的作废判定，
     // 随 Stage 3A 搬走。
+
+    #if DEBUG
+    /// 预览构建：造 N 条样例结果，用来看**结果列表**长什么样。
+    ///
+    /// 为什么需要它：预览态下本机搜索是关的、NAS 又没真连，`FF_UI_QUERY` 只能
+    /// 得到一张空状态图。而这一轮要验的恰恰是「结果行的遮罩」「悬停时字变大变小」，
+    /// 没有行就什么都验不了。名字与路径都是编的，只走视图，不发任何请求。
+    ///
+    /// `FF_UI_SAMPLE_RESULTS=6`。发布构建里整个方法被编译掉。
+    func applyPreviewSampleResultsIfRequested() {
+        guard AppEnvironment.isPreview,
+              let raw = ProcessInfo.processInfo.environment["FF_UI_SAMPLE_RESULTS"],
+              let count = Int(raw), count > 0 else { return }
+        let names = ["季度报告-2026Q3.pdf", "项目周报-第43周.docx", "设计规范-玻璃材质.md",
+                     "发布会演讲稿.txt", "财务汇总-2026.xlsx", "客户访谈记录-10月.pdf",
+                     "架构评审纪要.md", "年度预算草案.numbers"]
+        let dirs = ["/Users/Shared/团队文档/2026", "/Users/Shared/项目/闪寻", "/Users/Shared/会议"]
+        let now = Date()
+        // ★ 走 `setFixtureResults` 而不是直接赋 `results`：
+        //   ① 排序用真实的 `SearchResultMerge.precedes`（score 主导）；
+        //   ② 状态栏的「N 项」来自窗口，不是 `results.count` 的巧合。
+        //   score 也真的算：不算是 0，排序就退回旧的 rank 口径，
+        //   截图只能证明「能摆几行」，证明不了「按匹配度与时间排」。
+        setFixtureResults((0..<min(count, names.count)).map { index in
+            let name = names[index]
+            let directory = dirs[index % dirs.count]
+            let path = directory + "/" + name
+            var row = SearchResult(id: "sample-\(index)", name: name, relativePath: path,
+                                   sourceID: nil, sourceName: "此 Mac", kind: "file",
+                                   size: Int64(1024 * (index + 3)),
+                                   localURL: URL(fileURLWithPath: path),
+                                   rank: index)
+            row.modifiedDate = now.addingTimeInterval(-86_400 * Double(index))
+            row.score = SearchRanking.score(name: name, path: path, query: query,
+                                            modified: row.modifiedDate, now: now).score
+            return row
+        })
+        resultsAreCurrent = true
+        // 样例结果不该带真实告警：否则状态栏写「请先填写 NAS 的地址和账号」，
+        // 看截图的人会以为那是新界面的一部分。
+        searchWarnings = []
+        // 同理：`status` 里还挂着「已添加 NAS 1；请填写 HTTPS 索引地址…」那种
+        // 预览装配过程的回执，也不是界面的一部分。
+        status = ""
+        displayedRevision = contextRevision
+        displayedQuery = query
+        displayedScope = scope
+        displayedTokenBar = tokenBar
+    }
+
+    /// 预览构建：造 240 条结果，用来看**上限生效时**的状态栏与结果区。
+    ///
+    /// 为什么需要它：预览壳的 fixture 只回 4 条（搜索什么都一样），
+    /// 「200 / 240 项」这个状态永远到不了，而它正是这轮改动的可见部分。
+    /// 数字也不是编的：240 条真的走 `setFixtureResults` → `SearchResultWindow.fixture`，
+    /// 被同一个 `perSearch` 截到 200，总数照实记 240。
+    ///
+    /// `FF_UI_TRUNCATED=1`。发布构建里整个方法被编译掉。
+    func applyPreviewTruncatedResultsIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_TRUNCATED"] == "1" else { return }
+        let now = Date()
+        let total = SearchResultLimit.perSearch + 40
+        setFixtureResults((0..<total).map { index in
+            let name = "项目资料-\(String(format: "%03d", index)).pdf"
+            let path = "/Users/Shared/项目/\(name)"
+            var row = SearchResult(id: "trunc-\(index)", name: name, relativePath: path,
+                                   sourceID: nil, sourceName: "此 Mac", kind: "file",
+                                   size: 2048 + Int64(index), localURL: nil, rank: 2)
+            row.modifiedDate = now.addingTimeInterval(-86_400 * Double(index))
+            row.score = SearchRanking.score(name: name, path: path, query: query,
+                                            modified: row.modifiedDate, now: now).score
+            return row
+        })
+        resultsAreCurrent = true
+        searchWarnings = []
+        status = ""
+        displayedRevision = contextRevision
+        displayedQuery = query
+        displayedScope = scope
+        displayedTokenBar = tokenBar
+    }
+
+    /// 预览构建：把结果清空，只看「没有找到」那套提示。
+    ///
+    /// 为什么需要它：预览壳里挂着一台 fixture 来源，**任何**关键词都能搜到四条
+    /// 假文件（fixture 不按关键词过滤），于是「无结果提示」这个状态在预览态
+    /// 永远到不了——而它恰好是这一轮要验的东西（提示里要指出「在哪个位置没找到」）。
+    /// 这个钩子只清结果、不动搜索状态，`hasQuery` 仍为真，界面因此落在空状态上。
+    ///
+    /// `FF_UI_EMPTY_RESULTS=1`。发布构建里整个方法被编译掉。
+    func applyPreviewEmptyResultsIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_EMPTY_RESULTS"] == "1" else { return }
+        clearResultsForPreviewScreenshot()
+    }
+
+    /// 把结果清空（预览截图用，不做环境变量判断）。
+    ///
+    /// 单独抽出来是给 `FF_UI_SIDEBAR_SWEEP` 用的：那一组连拍要证明「换页有动画」，
+    /// 而动画要**两页内容不一样**才看得出来（内容相同的话交叉淡化等于没变化）。
+    /// 预览态没有真搜索，只好由这里模拟「这一页有结果、那一页空着」。
+    func clearResultsForPreviewScreenshot() {
+        clearResults()
+        searchWarnings = []
+        status = ""
+        resultsAreCurrent = true
+        displayedRevision = contextRevision
+        displayedQuery = query
+        displayedScope = scope
+        displayedTokenBar = tokenBar
+    }
+    #endif
 
     // 「读取已保存的原生 NAS 来源」随 Stage 3A 并入 `AppModel+NativeSources.swift`。
 

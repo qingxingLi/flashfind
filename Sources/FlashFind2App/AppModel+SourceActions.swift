@@ -122,7 +122,7 @@ extension AppModel {
                 health = .unconfigured; message = "请填写地址与账号"; required = .continueSetup
             } else if !source.scopes.isEmpty {
                 health = connected ? .ready : .offline
-                let names = source.scopes.map { String($0.dropFirst()) }.joined(separator: "、")
+                let names = source.scopes.map(NASScopeLabel.text(for:)).joined(separator: "、")
                 message = connected ? "已连接，搜索位置：\(names)" : "已保存，尚未连接"
                 required = connected ? nil : .retry
             } else {
@@ -130,7 +130,10 @@ extension AppModel {
                 message = connected ? "已连接，请选择搜索位置" : "已保存，请选择搜索位置"
                 required = .continueSetup
             }
-            let scope = provider?.config.scopes.joined(separator: "、") ?? source.scopes.joined(separator: "、")
+            // 位置名统一走 `NASScopeLabel`：`"/"` 直接 `dropFirst()` 会变成空白，
+            // 摘要里就成了「搜索位置：、」。
+            let scope = (provider?.config.scopes ?? source.scopes)
+                .map(NASScopeLabel.text(for:)).joined(separator: "、")
             setSourceStatus(source.id) {
                 $0.health = health
                 $0.message = message

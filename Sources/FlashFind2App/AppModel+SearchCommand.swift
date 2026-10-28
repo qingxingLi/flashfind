@@ -1,36 +1,33 @@
 import Foundation
 import FlashFindCore
 
-/// 命令面板（斜杠唤起）的 App 层状态与动作。
+/// 位置 / 文件类型这两组「限定」在 App 层的入口。
 ///
-/// ★ 这里只做「转发」：**判定全在 Core**
-/// （`SearchCommandParser` / `SearchCommandCatalog` / `SearchCommandNumbering` /
-/// `SearchTokenBar`）。App 层不可单测（它是 executableTarget），所以
-/// 「什么算命令模式」「面板里该列哪些候选」「编号是多少」「删除键删哪个」
-/// 都不许写在这里。
+/// ★ 2026-10-28：用户把「输入命令」整套取消了（`\` / `/` 不再唤起面板，
+///   `SearchCommandMode` / `SearchCommandParser` 与命令面板视图一并删除）。
+///   这个文件因此只剩**没有命令 UI 也照样要用的那一半**：
+///   - 侧边栏的候选与顺序；
+///   - 位置 / 类型的限定动作（类型条与侧边栏都走这里）；
+///   - 删除键撤回最近一个限定。
+///
+/// ★ 2026-10-28 再减一次：设置页那一行「搜索工具 ▸ 命令快捷键」（位置顺序）也删了——
+///   用户原话「没有用了」。至此 `quickPick` 只剩**读**：
+///   `commandItems(for:)` 仍按用户以前排过的顺序与删掉的项来排侧边栏，
+///   但已经没有任何界面能改它（所以 `applyQuickPick` 也一并删掉）。
+///
+/// 判定仍然全在 Core（`SearchCommandCatalog` / `SearchSidebar` / `SearchQuickPickSettings` /
+/// `SearchTokenBar`），App 层只转发——它是 executableTarget，不可单测。
 extension AppModel {
 
-    // MARK: - 判定
+    // MARK: - 候选
 
-    /// 当前是否命令模式、是哪一种面板、筛选词与关键词分别是什么。
-    var commandMode: SearchCommandMode { SearchCommandParser.parse(query) }
-
-    /// 命令模式是否激活（面板该显示了）。
-    var isCommandModeActive: Bool {
-        if case .command = commandMode { return true }
-        return false
-    }
-
-    /// 面板的种类（非命令模式为 nil）。
-    var commandKind: SearchCommandKind? { commandMode.kind }
-
-    /// 命令面板的候选来源（只用得到位置面板）。
+    /// 位置面板的候选来源（只用得到位置面板）。
     ///
     /// 数据源是**已授权的搜索根**（用户自己勾选过的那些），不是设备上
-    /// 全部可见的目录 —— 面板里的每一条都必须能立刻执行。
+    /// 全部可见的目录 —— 侧边栏里的每一条都必须能立刻执行。
     ///
     /// ★ **不按「已连接」过滤**（2026-10-26 报障）：App 重启后不会自动连 NAS，
-    /// 按 `ready` 过滤会让用户配好的 NAS 在面板里集体消失，只剩「全部位置 / 此 Mac」。
+    /// 按 `ready` 过滤会让用户配好的 NAS 在侧边栏里集体消失，只剩「全部位置 / 此 Mac」。
     /// 未连上的来源照样列出来，选中时由 `applySearchTarget` 先连再搜。
     /// ★ 字典键用 `config.id`（`nativeProviders` 就是这么建的），不是 `sourceID`：
     /// `sourceID` 是过滤非法字符后的**协议标识**，两者只有在 id 本身合法时才相等。
@@ -53,13 +50,7 @@ extension AppModel {
         return nativeProviders[config.id]?.ready == true
     }
 
-    /// 命令面板的全部候选（未过滤）。
-    var commandItems: [SearchCommandItem] {
-        guard let kind = commandKind else { return [] }
-        return commandItems(for: kind)
-    }
-
-    /// 某一种面板的候选（按用户排过的顺序）。
+    /// 某一种候选（按用户排过的顺序，已滤掉删掉的）。
     ///
     /// ★ 顺序来自 Core：`SearchCommandArrangement.arrange` 只认 id，
     /// 表里没有的候选（新加的来源/搜索根）自然排到末尾，因此这一层
@@ -71,45 +62,10 @@ extension AppModel {
         return SearchCommandArrangement.arrange(natural,
                                                 order: quickPick.order(for: kind),
                                                 // ★ 删掉的候选必须在这里滤掉，而不是在界面里
-                                                //   藏一行：设置页与面板读的是同一个入口，
+                                                //   藏一行：设置页与侧边栏读的是同一个入口，
                                                 //   只在一处藏，另一处就会把删掉的又画出来。
                                                 hidden: quickPick.hiddenIDs(for: kind))
     }
-
-    /// 按当前筛选词过滤后的候选。
-    var filteredCommandItems: [SearchCommandItem] {
-        SearchCommandCatalog.filter(commandItems, by: commandMode.filter)
-    }
-
-    /// 当前选中的候选（默认第一条 —— 回车就是它）。
-    var selectedCommandItem: SearchCommandItem? {
-        let items = filteredCommandItems
-        guard !items.isEmpty else { return nil }
-        return items[min(max(0, commandSelection), items.count - 1)]
-    }
-
-    /// 面板一次最多画多少行候选。
-    ///
-    /// ★ 两个面板共用同一个上限，而且它来自 Core（`SearchCommandCatalog.maximumVisibleRows`
-    /// = 数字键 1–9 + 0 对应的十条）。以前位置面板压到六条、理由是「位置可能很多，
-    /// 超出就该继续打字筛」——实际后果是一次真实报障：OpenList 勾了四个文件夹，
-    /// 面板只画出 A0001，A0002–A0004 既看不见也点不到，数字 7/8/9/0 全指向屏幕外。
-    /// **能按到的编号必须都在屏幕上**；超出的走滚动，不截断。
-    var commandMaximumVisible: Int { SearchCommandCatalog.maximumVisibleRows }
-
-    /// 每条候选在面板上显示的数字编号（没有则 nil）。
-    ///
-    /// ★ 编号与顺序来自同一份设置：编号**就是**行号（`SearchCommandNumbering`
-    /// 只认顺序），所以拖动之后这里立刻跟着变 —— 面板上写「3」的那一行，
-    /// 按 3 一定选中它。
-    var commandNumbers: [Int?] {
-        SearchCommandNumbering.keys(in: filteredCommandItems)
-    }
-
-    // MARK: - 前置限定
-
-    /// 搜索框最前面那排限定（带槽位——点哪一枚就删哪一枚）。
-    var searchTokens: [SearchTokenBar.Token] { tokenBar.tokens }
 
     /// 当前位置限定的名字（不限定时为 nil）。
     var locationLabel: String? { SearchTargetLabel.label(for: tokenBar.location) }
@@ -122,88 +78,14 @@ extension AppModel {
 
     // MARK: - 动作
 
-    /// 移动命令面板的候选选择。
-    func moveCommandSelection(_ delta: Int) {
-        let count = filteredCommandItems.count
-        guard count > 0 else { commandSelection = 0; return }
-        let next = commandSelection + delta
-        // 上下环绕：列表比屏幕高时，停在两端会让人以为面板卡住了。
-        commandSelection = ((next % count) + count) % count
-        commandKeyboardNavigationRevision &+= 1
-    }
-
-    /// 退出命令模式：把斜杠前缀与筛选词去掉，回到普通搜索。
-    func cancelCommandMode() {
-        if case .command = commandMode {
-            query = ""
-        }
-        commandSelection = 0
-    }
-
-    /// 执行当前选中的命令。
+    /// 应用位置限定（侧边栏点一下走这里）。
     ///
-    /// - `.search(target)`：设好位置限定，把关键词留给用户继续输入。
-    /// - `.filterFileType(type)`：设好类型限定，同上。
-    /// - `.openSettings`：打开设置，命令模式结束。
-    ///
-    /// ★ 前两种**不**保留斜杠文本：用户选的是「在哪儿搜 / 搜什么格式」，
-    /// 那个词已经变成前面那枚蓝色小字了，再留在输入框里只会又被搜一遍。
-    func executeSelectedCommand() {
-        guard let item = selectedCommandItem else { return }
-        commandSelection = 0
-        switch item.action {
-        case .search(let target):
-            applySearchTarget(target)
-        case .filterFileType(let type):
-            applyFileType(type)
-        case .openSettings:
-            cancelCommandMode()
-            NotificationCenter.default.post(name: .openFlashFindSettings, object: nil)
-        }
-    }
-
-    /// ★ 数字键直接选中对应候选。
-    ///
-    /// 手指就在数字键上，面板把编号写在脸上了 —— 没有理由要求用户
-    /// 先用方向键挪过去再回车。
-    func pickCommand(_ number: Int) {
-        guard let index = SearchCommandNumbering.index(forKey: number,
-                                                       in: filteredCommandItems)
-        else { return }
-        commandSelection = index
-        executeSelectedCommand()
-    }
-
-    /// ★ 鼠标点某一行就执行它。
-    ///
-    /// 与数字键同一条路径（`commandSelection` 写下来 + `executeSelectedCommand`）：
-    /// 两条入口各写一份「执行」迟早只改一边，用户会遇到「按 2 有效、点第 2 行没反应」。
-    func pickCommand(at index: Int) {
-        guard filteredCommandItems.indices.contains(index) else { return }
-        commandSelection = index
-        executeSelectedCommand()
-    }
-
-    /// ★ 鼠标停在哪一行，选中就是哪一行。
-    ///
-    /// 指针移上去就该高亮，否则用户点之前不知道会点中谁（尤其候选超过一屏、
-    /// 或者筛选之后行号全变了的时候）。
-    func hoverCommand(at index: Int) {
-        guard filteredCommandItems.indices.contains(index) else { return }
-        guard commandSelection != index else { return }
-        commandSelection = index
-    }
-
-    /// 应用位置限定。
-    ///
-    /// 关键词部分（`\照片 报告` 里的「报告」）保留在输入框里，
-    /// 用户接着补字即可；筛选词（位置名）随命令一起丢掉。
+    /// ★ 输入框**一个字都不动**：2026-10-27 起「限定位置」有两个可见入口
+    ///   （侧边栏、设置里的位置顺序），都不是在输入框里敲前缀，
+    ///   所以这里没有任何「把命令前缀抹掉」的事可做——早先那句
+    ///   `query = keyword` 在非命令模式下会把用户的字清空，是一条真实报障。
     func applySearchTarget(_ target: SearchTarget) {
-        let keyword: String
-        if case .command(_, _, let k) = commandMode { keyword = k } else { keyword = "" }
         tokenBar.setLocation(target)
-        query = keyword
-        commandSelection = 0
         // 位置变了 ⇒ 立刻重搜一次：用户已经明确说了「在哪儿搜」，
         // 等他再敲一个字才搜是白等。
         changedQuery()
@@ -236,96 +118,85 @@ extension AppModel {
     }
 
     /// 应用类型限定（与位置限定可叠加）。
+    ///
+    /// ★ 与 `applySearchTarget` 同一条：**不动输入框**。类型条点一下走这里，
+    ///   用户的字必须原样留着。
     func applyFileType(_ type: SearchFileTypeCatalog.FileType) {
-        let keyword: String
-        if case .command(_, _, let k) = commandMode { keyword = k } else { keyword = "" }
         tokenBar.setFileType(type)
-        query = keyword
-        commandSelection = 0
         changedQuery()
     }
 
-    /// ★ 删除键：删掉最前面那排限定里的一个。
+    // MARK: - 侧边栏与类型条（同一份限定的两种手势）
+
+    /// 侧边栏的行。
+    ///
+    /// ★ 直接吃 `commandItems(for: .location)`：与 `\` 面板**同一份**候选，
+    /// 连用户在设置里排过的顺序、删掉的候选都是同一套。两处各列一遍，
+    /// 迟早会有一边少了某个搜索根。
+    var sidebarEntries: [SearchSidebar.Entry] {
+        SearchSidebar.entries(from: commandItems(for: .location))
+    }
+
+    /// 当前位置限定在侧边栏里高亮哪一行（找不到为 nil —— 不假装选中「全部」）。
+    var sidebarSelectionID: String? {
+        SearchSidebar.selectedID(for: tokenBar.location, in: sidebarEntries)
+    }
+
+    /// 当前**限定**位置的显示名（没限定就是 nil）。
+    ///
+    /// ★ 必须用 `limitedLocationTitle`：`.unrestricted` 时侧边栏高亮的那一行叫
+    /// 「全部位置」，但那是「不限定」的名字。拿它当位置名，空结果提示会写成
+    /// 「“全部位置”里没有匹配的文件……或换回“全部”」（截图里真出现过）。
+    var limitedLocationTitle: String? {
+        SearchSidebar.limitedLocationTitle(for: tokenBar.location, in: sidebarEntries)
+    }
+
+    /// 点侧边栏第 `index` 行。
+    ///
+    /// ★ 点已经在用的那一行**什么都不做**：`applySearchTarget` 会重搜一次，
+    /// 而用户只是点了一下当前位置，重搜只会让列表白闪一下。
+    func selectSidebarEntry(at index: Int) {
+        let entries = sidebarEntries
+        guard entries.indices.contains(index) else { return }
+        guard entries[index].id != sidebarSelectionID else { return }
+        applySearchTarget(entries[index].target)
+    }
+
+    /// 类型条当前选中的段。
+    var typeBarSelectionID: String { SearchTypeBar.selectedID(for: tokenBar.fileType) }
+
+    /// 点类型条某一段（「全部」= 清掉类型限定）。
+    ///
+    /// ★ 「选中的那段是哪一段」与「这一段对应什么限定」两件换算都在 Core
+    /// （`SearchTypeBar`），这里只做分流——视图里不许出现 `if id == "type:all"`。
+    func selectTypeBarSegment(_ id: String) {
+        guard id != typeBarSelectionID else { return }
+        if let type = SearchTypeBar.fileType(for: id) {
+            applyFileType(type)
+        } else {
+            clearFileType()
+        }
+    }
+
+    /// 清掉类型限定，回到「全部」。
+    func clearFileType() {
+        guard tokenBar.hasFileType else { return }
+        tokenBar.clear(.fileType)
+        changedQuery()
+    }
+
+    /// ★ 删除键：撤回最近设的那个限定。
     ///
     /// 删哪个由 Core 的 `SearchTokenBar` 判定（关键词还在时就归文本编辑）。
+    ///
+    /// ★ 2026-10-27 输入行里那排蓝色标签删掉之后，这是**唯一**还能「一键撤限定」
+    ///   的入口：位置与类型各自有可见入口（侧边栏 / 类型条），但都需要点两下
+    ///   （挪到「全部位置」/「全部」）。所以键盘这一条**留着**——
+    ///   它撤的是真的限定，效果马上能从侧边栏高亮与结果看出来。
+    ///   ★ 判定仍在 Core：`keywordEmpty` 不成立时删除键不抢，字才删得动。
     func deleteSearchToken() {
         guard let slot = tokenBar.slotToRemoveOnBackspace(keywordEmpty: keywordIsEmpty) else { return }
-        deleteSearchToken(slot)
-    }
-
-    /// ★ 点某一枚限定：删的就是**被点的那一枚**。
-    ///
-    /// 与删除键是两条不同的规则，不能共用：
-    ///   · 删除键归「撤销最近一步」——还受「关键词为空」这个前提约束
-    ///     （输入框里有字时，删除键必须留给文本编辑，否则字删不动）；
-    ///   · 点标签是**直接指着它**说「去掉这个」——没有歧义，也不该被
-    ///     「输入框里还有字」挡住（1.1.16 里点了没反应就是共用了一条规则）。
-    func deleteSearchToken(_ slot: SearchTokenBar.Slot) {
         tokenBar.clear(slot)
-        commandSelection = 0
         changedQuery()
-    }
-
-    // MARK: - 设置：顺序（也就是数字键）
-
-    /// 设置页里某一面板的行（已排好序、已算好编号，且不含「打开设置」）。
-    ///
-    /// ★ 设置页与面板读的是同一个 `commandItems(for:)`：两处各排一次，
-    /// 迟早会排出两种顺序，而用户看到的是两边对不上。
-    func quickPickRows(_ kind: SearchCommandKind) -> [SearchQuickPickRow] {
-        quickPick.rows(for: kind, in: commandItems(for: kind))
-    }
-
-    /// 这一面板有没有被改过（决定「恢复默认」是否可点）。
-    func canResetQuickPick(_ kind: SearchCommandKind) -> Bool {
-        quickPick.hasCustomization(for: kind)
-    }
-
-    /// 拖动排序：把第 `from` 行挪到第 `to` 行（下标来自 `quickPickRows`）。
-    ///
-    /// 传的是**整份候选**（含末尾的「打开设置」）：`move` 自己会跳过它，
-    /// 而且「打开设置」永远排在最后，所以两者的下标是对齐的。
-    func moveQuickPick(_ kind: SearchCommandKind, from: Int, to: Int) {
-        var next = quickPick
-        next.move(kind, from: from, to: to, among: commandItems(for: kind))
-        applyQuickPick(next)
-    }
-
-    /// 删掉一条快捷方式：面板里不再出现它。
-    ///
-    /// ★ 「删掉」必须记在设置里（`SearchQuickPickSettings.hide`）：候选是每次从
-    /// 「目录 + 用户配置」现算的，光在界面上跳过这一行，下次刷新它又回来了。
-    func deleteQuickPick(_ kind: SearchCommandKind, id: String) {
-        var next = quickPick
-        guard next.hide(id, kind: kind, among: commandItems(for: kind)) else { return }
-        applyQuickPick(next)
-    }
-
-    /// 把这一行换成别的位置 / 别的格式（位次不变，数字也就不变）。
-    func replaceQuickPick(_ kind: SearchCommandKind, id: String, with newID: String) {
-        var next = quickPick
-        guard next.replace(id, with: newID, kind: kind, among: commandItems(for: kind)) else { return }
-        applyQuickPick(next)
-    }
-
-    /// 这一行能换成哪些候选（右键菜单里「替换为」的子项）。
-    ///
-    /// ★ 候选是目录里的**其它全部**条目（含此刻已显示的那些）：
-    /// 「把第 1 行的 pdf 换成第 9 行的文档」是替换的正常用法，
-    /// Core 的 `replace` 会把文档从第 9 行搬过来，不会留下两行。
-    /// 被删过的条目也在这里 —— 那正好是「删错了怎么找回来」的入口。
-    func quickPickReplacements(_ kind: SearchCommandKind, id: String) -> [SearchCommandItem] {
-        let all = SearchCommandCatalog.items(kind: kind,
-                                             sources: commandSources,
-                                             includeLocal: localEnabled,
-                                             includeSettings: false)
-        return SearchCommandReplacement.candidates(all: all, excluding: id)
-    }
-
-    /// 恢复这一面板的自然顺序（编号随之回到 1–9 顺排）。
-    func resetQuickPick(_ kind: SearchCommandKind) {
-        var next = quickPick
-        next.reset(kind)
-        applyQuickPick(next)
     }
 }

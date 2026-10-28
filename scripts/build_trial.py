@@ -217,6 +217,21 @@ def embedded_info_plist(binary):
     return plistlib.loads(raw)
 
 
+def parse_command_plist(text):
+    """解析命令的 `-plist` stdout（bytes），允许尾部混入非 XML 输出。
+
+    macOS 27.2（Xcode 27.1 工具链）开始，`hdiutil attach/detach -plist`
+    会在 plist 结束后**再往 stdout 追加一行 deprecation 警告**——
+    直接 `plistlib.loads` 会报 "junk after document element"。
+    判据取 `</plist>` 最后一次出现的末尾：plist 本身不嵌套出现该串，
+    截到那里就是完整的 XML 文档。
+    """
+    end = text.rfind(b'</plist>')
+    if end >= 0:
+        text = text[:end + len(b'</plist>')]
+    return plistlib.loads(text)
+
+
 def verify_helper_binary(binary, expected):
     """对将要进包的那个 Helper 做身份自检，返回证据字典。"""
     embedded = embedded_info_plist(binary)
@@ -395,7 +410,7 @@ def package_dmg(app, readme, app_name, file_stem):
     # 「里面有什么」。这是唯一能证明用户挂载后看到什么的检查。
     attached = run(['hdiutil', 'attach', str(dmg), '-readonly', '-nobrowse', '-noautoopen', '-plist'],
                    'dmg-inspect-attach')
-    entities = plistlib.loads(attached.stdout).get('system-entities', [])
+    entities = parse_command_plist(attached.stdout).get('system-entities', [])
     mounted = next((e for e in entities if e.get('mount-point')), None)
     if not mounted:
         raise SystemExit('hdiutil attach reported no mount point')
@@ -407,7 +422,7 @@ def package_dmg(app, readme, app_name, file_stem):
         probe = run(['diskutil', 'info', '-plist', mounted['dev-entry']], 'dmg-inspect-volume', required=False)
         if probe.returncode == 0:
             try:
-                volume = plistlib.loads(probe.stdout).get('VolumeName')
+                volume = parse_command_plist(probe.stdout).get('VolumeName')
             except ValueError:
                 volume = None
         contents = {p.name: ('symlink -> ' + os.readlink(p)) if p.is_symlink() else 'entry'

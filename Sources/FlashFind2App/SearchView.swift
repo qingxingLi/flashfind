@@ -1,65 +1,123 @@
 import SwiftUI
 import FlashFindCore
 
+/// 搜索框那一块窗口的**页面**。
+///
+/// ## 2026-10-27 的模块化（历史）
+///
+/// 当时用户要求「搜索框一块、搜索结果一块，中间留 10pt 空白」，两块在**同一个窗口**里
+/// 上下排开，本文件负责算整窗高度。
+///
+/// ## 2026-10-28：两块变成**两个窗口**
+///
+/// 用户：「钉住前后的搜索框和搜索结果都应该可以单独移动」。同一个窗口里两块永远一起动，
+/// 所以这里只留搜索框那一块，结果那一块搬去 `SearchResultsPanel.swift` 自己的窗口。
+/// 本文件因此只剩三件事：**画搜索框模块、算这一块的高度、收发键盘**。
+///
+/// ★ 位置与高度的联动也一并消失：这一块的高度只由「有没有键位提示」决定，
+///   结果增减不再改变它的尺寸（它们已经不在一个窗口里）。
 struct SearchView: View {
     @ObservedObject var model: AppModel
     @State private var settingsPage: SettingsPane = .search
     @State private var configuredPreviewSettings = false
-    @State private var lastResultsHeight: CGFloat = 0
     @FocusState private var focused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 辅助功能「降低透明度」：开着时遮罩回到不透明的老方案。
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    /// 搜索区的表面：玻璃 或 macOS 15 的老方案。判定在 Core，这里只取结论。
+    private var glassStyle: SearchGlassStyle {
+        #if DEBUG
+        // `FF_UI_SEARCH_LEGACY=1`：在这台 macOS 27 上强制走老方案，
+        // 用来核对「macOS 15 及以下保持原方案」到底长什么样。
+        // 没有它，「向下兼容」只能靠读代码相信——那正是最容易骗自己的地方。
+        if AppEnvironment.isPreview,
+           ProcessInfo.processInfo.environment["FF_UI_SEARCH_LEGACY"] == "1" { return .legacy }
+        #endif
+        return SearchGlass.style(reduceTransparency: reduceTransparency)
+    }
+
+    // MARK: - 派生状态
 
     private var hasQuery: Bool { !model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    private var pending: Bool { !model.isCommandModeActive && hasQuery && !model.canUseDisplayedResults && model.searchFailure == nil }
-    private var visibleResults: [SearchResult] {
-        hasQuery && model.searchFailure == nil ? model.results : (model.canUseDisplayedResults ? model.results : [])
-    }
-    private var searchIsEnabled: Bool {
-        (model.localEnabled && model.scope != .nas) || (model.enabled && model.scope != .local)
-    }
+    private var showsHint: Bool { !hasQuery && model.searchHintsVisible }
 
-    private var showsStatus: Bool { !visibleResults.isEmpty || !model.searchWarnings.isEmpty }
+    // MARK: - 高度
 
-    private var expandedHeight: CGFloat {
-        guard hasQuery, !model.isCommandModeActive else { return 0 }
-        if visibleResults.isEmpty {
-            let height: CGFloat = (model.searchFailure != nil || (model.scope == .nas && !model.hasSelectedNASSource) ? 148 : 112) + (showsStatus ? 32 : 0)
-            return model.searchFailure == nil && (pending || model.searching) ? max(height, lastResultsHeight) : height
-        }
-        return CGFloat(min(visibleResults.count, SearchLayout.maximumVisibleRows)) * SearchLayout.rowHeight + 12 + 32
-    }
-    private var panelHeight: CGFloat {
-        SearchLayout.searchHeight + expandedHeight + hintHeight + openFailureBannerHeight + commandPaletteHeight
-    }
+    /// 键位提示占的高度。输入框一有内容它就收起，所以要跟着算，否则会多出一块空白。
+    private var hintHeight: CGFloat { 38 }
 
-    /// 命令面板占的高度。
+    /// 这一块窗口的高度。
     ///
-    /// 它不在 `expandedHeight` 里（那是指结果区），必须自己加进来 ——
-    /// 少算了这一截，面板会被浮窗底边切掉一多半，用户只看到两行候选。
-    private var commandPaletteHeight: CGFloat {
-        guard model.isCommandModeActive else { return 0 }
-        // ★ 行数上限必须与面板实际显示的行数一致，否则面板会被浮窗底边切掉
-        // （数字能按到哪、就得显示到哪，两者是同一个数）。
-        let rows = max(1, min(model.filteredCommandItems.count, model.commandMaximumVisible))
-        let rowHeight: CGFloat = 34
-        // 有已限定位置时上方还有一条状态行（28pt）+ 一条分隔线。
-        let header: CGFloat = model.locationLabel == nil ? 0 : 29
-        // 上下内边距各 4pt。
-        return header + CGFloat(rows) * rowHeight + 8
-    }
-    /// 打开失败提示条占的高度。它不是结果区的一部分，也不在 `expandedHeight` 里，
-    /// 所以必须自己加进浮窗高度——否则提示条会被挤成一条窄边，正文整段被切掉。
-    private var openFailureBannerHeight: CGFloat {
-        model.openFailure == nil ? 0 : SearchLayout.openFailureBannerHeight
+    /// ★ 与 `SearchFieldModule.height(showsHint:hintHeight:)` 必须同式：
+    ///   那一边约束自己、这一边决定窗口，差一个常量就多出一条空白或被裁掉一截。
+    private var fieldModuleHeight: CGFloat {
+        SearchFieldModule.height(showsHint: showsHint, hintHeight: hintHeight)
     }
 
-    /// 首次使用的键位提示占的高度。输入框一有内容它就收起，所以要跟着算高度，
-    /// 否则面板会多出一块空白。
-    private var hintHeight: CGFloat { showsHint ? 38 : 0 }
+    // MARK: - 模块
+
+    private var fieldModule: some View {
+        SearchFieldModule(query: $model.query, focused: $focused,
+                          searching: model.searching || pending,
+                          syncing: model.syncing,
+                          submit: model.openSelectedResult,
+                          research: model.changedQuery,
+                          openSettings: openSettings,
+                          showsHint: showsHint,
+                          hintLines: SearchHintGuide.lines,
+                          hintHeight: hintHeight,
+                          style: glassStyle)
+    }
+
+    /// 关键词已输入、但还没有可显示的结果、也没报错 —— 也就是「正在搜」。
+    private var pending: Bool {
+        hasQuery && !model.canUseDisplayedResults && model.searchFailure == nil
+    }
+
+    var body: some View {
+        fieldModule
+            .frame(maxWidth: .infinity)
+            .frame(height: fieldModuleHeight)
+            .background(SearchPanelSizing(height: fieldModuleHeight, animate: !reduceMotion).frame(width: 0, height: 0))
+            .background(keyboardScope)
+            .onChange(of: model.query) { _ in model.changedQuery() }
+            .onChange(of: model.scope) { _ in model.changedQuery() }
+            // 没人理它也会自己消失：摆在那儿超过几秒就不是提示，是障碍。
+            .onChange(of: model.searchHintsVisible) { visible in
+                guard visible else { return }
+                Task {
+                    try? await Task.sleep(for: .seconds(8))
+                    model.dismissSearchHints()
+                }
+            }
+            .onAppear {
+                model.showSearch(); focused = true
+                applyPreviewHooks()
+            }
+            .onExitCommand { model.hideSearch() }
+            .onReceive(NotificationCenter.default.publisher(for: .showFlashFind2)) { _ in focused = true }
+            // 结果窗口关掉 / 点了「钉住」之后，键盘必须回到这里（见通知定义处）。
+            .onReceive(NotificationCenter.default.publisher(for: .focusFlashFindField)) { _ in focused = true }
+            // 设置是独立窗口而不是 sheet：sheet 会把设置挂在搜索浮窗下，
+            // 没有红绿灯、没有独立关闭入口，用户会觉得「关不掉」。
+            .onReceive(NotificationCenter.default.publisher(for: .openFlashFindSettings)) { _ in
+                openSettings()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .closePreviewSettings)) { _ in
+                if AppEnvironment.isPreview { SettingsWindow.shared.close() }
+            }
+    }
+
+    /// 把键盘作用域挂到这一块上。
+    ///
     /// 键盘作用域单独成块：十几个闭包全写进 `body` 会让类型检查爆掉，
     /// 表现为「compiler is unable to type-check this expression」。
     private var keyboardScope: some View {
-        SearchKeyboardScope(enabled: true, searchFocused: focused,
+        SearchKeyboardScope(enabled: true,
+                            // ★ 两个窗口共用一个监视器：事件落在结果窗上也算「在搜索区里」。
+                            accepts: { SearchWindowRegistry.shared.contains($0) },
+                            searchFocused: focused,
                             query: model.query,
                             // ★ 这里问的是「**有没有可选的条目**」，不是「已经选中了没有」。
                             //
@@ -70,142 +128,28 @@ struct SearchView: View {
                             // ⇒ 导航不激活 ⇒ 紧接着按空格仍然只打出一个空格，
                             // 用户必须按两次方向键才看得到预览（「空格没反应」的另一种复现）。
                             hasSelectableResult: model.canUseDisplayedResults && !model.results.isEmpty,
+                            // 焦点在哪一块上。
+                            //
+                            // 判据必须自己给：`ScrollView` 不是 `NSTableView`，
+                            // 监视器沿响应链找不到表格，会误判成「哪儿都不在」而全放行。
+                            // ★ 2026-10-28 起结果在**另一个窗口**里：输入框的 `FocusState`
+                            //   不会因为点了另一个窗口就变 false，所以必须问窗口本身的状态。
+                            resultsActive: resultsActive,
                             move: model.moveResultSelection,
                             submit: { model.dismissSearchHints(); model.openSelectedResult() },
                             reveal: { model.dismissSearchHints(); model.revealSelectedResult() },
                             quickLook: { model.dismissSearchHints(); model.quickLookSelectedResult() },
                             copyPath: { if let row = model.selectedResult { model.copy(row) } },
                             hide: model.hideSearch,
-                            commandMode: model.isCommandModeActive,
-                            commandMove: { model.moveCommandSelection($0) },
-                            commandSubmit: { model.executeSelectedCommand() },
-                            commandCancel: { model.cancelCommandMode() },
-                            commandPick: { model.pickCommand($0) },
                             hasSearchToken: model.hasSearchToken,
                             keywordEmpty: model.keywordIsEmpty,
                             deleteSearchToken: { model.deleteSearchToken() })
             .frame(width: 0, height: 0)
     }
 
-    private var showsHint: Bool { !hasQuery && model.searchHintsVisible }
-
-    private var searchField: some View {
-        SearchFieldView(query: $model.query, focused: $focused,
-                        searching: model.searching || pending, syncing: model.syncing,
-                        submit: model.openSelectedResult,
-                        research: model.changedQuery,
-                        tokens: model.searchTokens,
-                        deleteToken: { model.deleteSearchToken($0) })
-    }
-
-    private var commandPalette: some View {
-        SearchCommandPaletteView(items: model.filteredCommandItems,
-                                 selection: model.commandSelection,
-                                 keyboardNavigationRevision: model.commandKeyboardNavigationRevision,
-                                 activeTargetLabel: model.locationLabel,
-                                 numbers: model.commandNumbers,
-                                 maximumVisible: model.commandMaximumVisible,
-                                 onHover: { model.hoverCommand(at: $0) },
-                                 onPick: { index in
-                                     model.pickCommand(at: index)
-                                     // 点完把焦点还给输入框：选完位置通常还要接着打字，
-                                     // 不还焦点的话用户得再点一次输入框才开始输入。
-                                     focused = true
-                                 })
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            searchField
-            if showsHint { hintStrip }
-            // ★ 命令模式：显示候选面板，不显示结果列表。
-            //
-            // 命令模式下没有真实搜索（`changedQuery` 短路了），所以这里
-            // 也没有结果可显示 —— 两件事必须同时成立，否则会看到
-            // 「上面是命令面板、下面是上一轮的结果」。
-            if model.isCommandModeActive {
-                Divider().padding(.horizontal, 16).opacity(0.45)
-                commandPalette
-            } else if hasQuery {
-                Divider().padding(.horizontal, 16).opacity(0.45)
-                if visibleResults.isEmpty { emptyState.frame(maxHeight: .infinity, alignment: .top) }
-                else {
-                    resultsList
-                }
-                if showsStatus {
-                    SearchStatusBar(message: model.searchFailure ?? model.searchStatusMessage,
-                                    count: model.canUseDisplayedResults ? model.results.count : 0,
-                                    updating: model.searching || pending, warnings: model.searchWarnings,
-                                    configureSources: openSettings)
-                }
-            }
-            // 打开失败不是搜索失败，因此单独一层，不占用结果区的空状态。
-            if let failure = model.openFailure {
-                OpenFailureBanner(failure: failure,
-                                  onRetry: { model.retryOpenCurrentResult() },
-                                  onConnectInFinder: failure.smbURL.map { url in { model.connectInFinder(url) } },
-                                  onDismiss: { model.openFailure = nil })
-            }
-        }
-        .frame(maxWidth: .infinity).frame(height: panelHeight)
-        .background(SearchPanelSizing(height: panelHeight, animate: !reduceMotion).frame(width: 0, height: 0))
-        .background(keyboardScope)
-        .onChange(of: model.query) { _ in
-            if !hasQuery { lastResultsHeight = 0 }
-            model.changedQuery()
-        }
-        .onChange(of: model.results) { results in
-            if !results.isEmpty {
-                lastResultsHeight = CGFloat(min(results.count, SearchLayout.maximumVisibleRows)) * SearchLayout.rowHeight + 44
-            }
-        }
-        .onChange(of: model.scope) { _ in model.changedQuery() }
-        // 没人理它也会自己消失：摆在那儿超过几秒就不是提示，是障碍。
-        .onChange(of: model.searchHintsVisible) { visible in
-            guard visible else { return }
-            Task {
-                try? await Task.sleep(for: .seconds(8))
-                model.dismissSearchHints()
-            }
-        }
-         .onAppear {
-            model.showSearch(); focused = true
-            if !model.results.isEmpty { lastResultsHeight = expandedHeight }
-            if AppEnvironment.isPreview, ProcessInfo.processInfo.environment["FF_UI_SETTINGS"] == "1", !configuredPreviewSettings {
-                configuredPreviewSettings = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openSettings() }
-            }
-        }
-        .onExitCommand { model.hideSearch() }
-        .onReceive(NotificationCenter.default.publisher(for: .showFlashFind2)) { _ in focused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .openFlashFindSettings)) { _ in
-            openSettings()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .closePreviewSettings)) { _ in
-            if AppEnvironment.isPreview { SettingsWindow.shared.close() }
-        }
-        // 设置是独立窗口而不是 sheet：sheet 会把设置挂在搜索浮窗下，
-        // 没有红绿灯、没有独立关闭入口，用户会觉得「关不掉」。
-        .onReceive(NotificationCenter.default.publisher(for: .openFlashFindSettings)) { _ in
-            openSettings()
-        }
-    }
-
-    /// 首次使用的一次性键位提示。
-    ///
-    /// 极轻量：一行小字，没有图标、没有按钮、没有第二页。用户一动手（输入、
-    /// 打开、快速查看）或者等它几秒，自己就没了；之后**不再出现**。
-    /// 做第二套教程只会变成每次打开都挡在结果前面的东西。
-    private var hintStrip: some View {
-        HStack(spacing: 14) {
-            ForEach(SearchHintGuide.lines, id: \.self) { line in
-                Text(line).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 18)
-        .frame(height: hintHeight)
-        .accessibilityIdentifier("search-hint-guide")
+    private var resultsActive: Bool {
+        let focusIsElsewhere = !focused || model.resultsWindowIsKey
+        return focusIsElsewhere && model.canUseDisplayedResults && !model.results.isEmpty
     }
 
     /// 打开独立设置窗口（带红绿灯，可自由切换与关闭）。
@@ -213,6 +157,79 @@ struct SearchView: View {
         settingsPage = Self.previewSettingsPage ?? .search
         NSApp.activate(ignoringOtherApps: true)
         SettingsWindow.shared.show(model: model, page: settingsPage)
+    }
+
+    // MARK: - 预览钩子
+
+    /// 预览构建里「到不了的状态」全部由环境变量造出来。
+    ///
+    /// ★ 为什么必须挂在 onAppear：这些状态在真实使用里要么要点一下、要么要真实搜索，
+    ///   而取证据时常常是锁屏/无人值守（键鼠事件全归 loginwindow）。
+    private func applyPreviewHooks() {
+        #if DEBUG
+        // `FF_UI_HINTS=1`：强制显示首屏键位提示。
+        //
+        // 提示只在「第一次打开」出现，而 `showSearchHintsIfNeeded` 在预览态是直接
+        // 返回的（`!AppEnvironment.isPreview`）——不强制的话，「提示行与搜索框同属
+        // 一块玻璃、高度也要算上它」这件事**永远截不到**，只能靠读代码相信。
+        if AppEnvironment.isPreview,
+           ProcessInfo.processInfo.environment["FF_UI_HINTS"] == "1" {
+            model.searchHintsVisible = true
+        }
+        // `FF_UI_TYPE=n`：预先选中类型条第 n 段（0 = 全部）。
+        // `FF_UI_SIDEBAR=n`：预先选中侧边栏第 n 行（0 = 全部位置）。
+        //
+        // ★ 只改限定状态，**不重搜**：预览态没有真实搜索，
+        // `changedQuery()` 会把 `FF_UI_SAMPLE_RESULTS` 造的样例结果清空，
+        // 截图就只剩一张空状态。这两个钩子只用来验外观。
+        //
+        // 侧边栏要有内容，先得造来源：`FF_UI_SOURCES=N`（自身也带幂等保护，
+        // 没设就什么都不做）。以前它只挂在「打开设置」那条路上，
+        // 于是想截侧边栏还得先把设置窗叫出来。
+        if AppEnvironment.isPreview {
+            model.loadPreviewSavedSourcesIfRequested()
+        }
+        if AppEnvironment.isPreview,
+           let raw = ProcessInfo.processInfo.environment["FF_UI_TYPE"],
+           let index = Int(raw),
+           SearchTypeBar.entries.indices.contains(index) {
+            if let type = SearchTypeBar.entries[index].fileType {
+                model.tokenBar.setFileType(type)
+            } else {
+                model.tokenBar.clear(.fileType)
+            }
+        }
+        if AppEnvironment.isPreview,
+           let raw = ProcessInfo.processInfo.environment["FF_UI_SIDEBAR"],
+           let index = Int(raw) {
+            let entries = model.sidebarEntries
+            if entries.indices.contains(index) {
+                model.tokenBar.setLocation(entries[index].target)
+            }
+        }
+        // `FF_UI_EMPTY_RESULTS=1`：清空结果，只看「没有找到」那套提示
+        // （预览壳的 fixture 来源对任何关键词都回四条假文件，否则这个状态到不了）。
+        // 必须放在上面两个钩子**之后**：它会把「结果属于当前限定」这件事重新认领一次。
+        model.applyPreviewEmptyResultsIfRequested()
+        // `FF_UI_TRUNCATED=1`：造 240 条结果，看上限（200）生效时的状态栏。
+        // 与 `FF_UI_EMPTY_RESULTS` 互斥（都改结果），所以排在其后、谁后谁生效。
+        model.applyPreviewTruncatedResultsIfRequested()
+        // `FF_UI_PIN=1`：程序自己钉一次，用来取「钉住的窗口」的证据。
+        //
+        // ★ 为什么必须有钩子：钉住是一次点击，而锁屏/无人值守时点不了
+        //   （键鼠事件全归 loginwindow）。它同时把「钉住之后搜索框真的空出来」
+        //   这件事一并演出来——两张截图就是一个前后对照。
+        if AppEnvironment.isPreview,
+           ProcessInfo.processInfo.environment["FF_UI_PIN"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { model.pinCurrentResults() }
+        }
+        #endif
+        if AppEnvironment.isPreview, ProcessInfo.processInfo.environment["FF_UI_SETTINGS"] == "1", !configuredPreviewSettings {
+            configuredPreviewSettings = true
+            // `FF_UI_SOURCES=N`：造 N 台已保存的来源，设置页的来源列表与详情才有内容可截。
+            model.loadPreviewSavedSourcesIfRequested()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openSettings() }
+        }
     }
 
     /// 预览构建里可以直接停在某一页：`FF_UI_SETTINGS_PAGE=AI`（取页面名，与
@@ -229,77 +246,4 @@ struct SearchView: View {
         return nil
         #endif
     }
-
-    private var resultsList: some View {
-        ScrollViewReader { proxy in
-            List(visibleResults, selection: $model.selected) { result in
-                SearchResultRow(result: result, isSelected: model.selected == result.id).tag(result.id).id(result.id)
-                    .listRowSeparator(.hidden)
-                    .disabled(!model.canUseDisplayedResults)
-                    .onTapGesture(count: 2) { model.openCurrentResult(result) }
-                    .contextMenu {
-                        // 菜单本身就是「这条结果能做什么」的说明书。
-                        // 打开时检测本机挂载，未挂载则使用网页；复制链接仍保留网页地址。
-                        if result.hasWebOpenTarget {
-                            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
-                            Divider()
-                            Button("复制网页链接", systemImage: "link") { model.copyWebLink(result) }
-                            Button("复制站点内路径", systemImage: "doc.on.doc") { model.copy(result) }
-                        } else {
-                            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
-                            Button("在 Finder 中显示", systemImage: "folder") { model.openCurrentResult(result, reveal: true) }
-                            Button("快速查看", systemImage: "eye") { model.quickLook(result) }
-                            Divider()
-                            Button("复制路径", systemImage: "doc.on.doc") { model.copy(result) }
-                        }
-                        Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
-                    }
-            }
-            .listStyle(.inset).scrollContentBackground(.hidden)
-            .padding(.top, 6)
-            .opacity(model.canUseDisplayedResults || !hasQuery ? 1 : 0.55)
-            .onChange(of: model.selected) { id in
-                if let id, model.canUseDisplayedResults { proxy.scrollTo(id) }
-            }
-        }
-    }
-
-    @ViewBuilder private var emptyState: some View {
-        if !hasQuery {
-            SearchStateView(symbol: "magnifyingglass", title: "搜索文件", detail: "输入名称，搜索这台 Mac 和已连接的 NAS")
-        } else if model.searchFailure != nil, !model.searching, !pending {
-            VStack(alignment: .leading, spacing: 0) {
-                SearchStateView(symbol: "exclamationmark.triangle", title: "搜索暂时不可用",
-                                detail: model.searchFailure ?? "")
-                Button("打开搜索来源设置") { openSettings() }
-                    .padding(.leading, 53).padding(.bottom, 12)
-            }
-        } else if !searchIsEnabled {
-            SearchStateView(symbol: "slider.horizontal.3", title: "搜索来源已关闭",
-                            detail: "在设置里打开「此 Mac」或「NAS」")
-        } else if model.scope == .nas, !model.hasSelectedNASSource {
-            // NAS 不可用时要说清「本地不受影响」，而不是笼统报错。
-            VStack(alignment: .leading, spacing: 0) {
-                SearchStateView(symbol: "externaldrive", title: "NAS 搜索尚未就绪",
-                                detail: model.localEnabled && model.scope == .all
-                                    ? model.nasSearchAvailabilityMessage + " 本机搜索不受影响。"
-                                    : model.nasSearchAvailabilityMessage)
-                Button("打开搜索来源设置") { openSettings() }
-                    .padding(.leading, 53).padding(.bottom, 12)
-            }
-        } else if isBelowNASMinimum {
-            // 1 个字符时不是错误，只是提示继续输入。
-            SearchStateView(symbol: "text.cursor", title: "继续输入以搜索 NAS",
-                            detail: "NAS 搜索至少需要 2 个字符。本机结果照常显示。")
-        } else if model.searching || pending {
-            // NAS 还在跑但已经有本机结果时不算空状态，这里只在真无结果时出现。
-            SearchStateView(symbol: "magnifyingglass", title: "正在搜索", detail: "正在查找匹配的文件与文件夹", loading: true)
-        } else {
-            SearchStateView(symbol: "doc.text.magnifyingglass", title: "没有找到“\(model.query)”",
-                            detail: "试试更短的关键词，或到设置里确认搜索位置")
-        }
-    }
-
-    /// 当前输入是否还不满足 NAS 的最小字符要求。
-    private var isBelowNASMinimum: Bool { !NASQueryPolicy.accepted(model.query) }
 }

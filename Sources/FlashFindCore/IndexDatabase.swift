@@ -115,6 +115,7 @@ public final class IndexDatabase {
         let terms = RelativePath.normalized(query).split(whereSeparator: { $0.isWhitespace }).map(String.init)
         guard !terms.isEmpty else { return [] }
         let long = terms.filter { $0.count >= 3 }
+        let now = Date()
         let deadline = Date().addingTimeInterval(budget)
         let cancellation = ProgressBox { Date() > deadline || Task.isCancelled }
         sqlite3_progress_handler(handle, 1000, { pointer in
@@ -123,7 +124,7 @@ public final class IndexDatabase {
         }, Unmanaged.passUnretained(cancellation).toOpaque())
         defer { sqlite3_progress_handler(handle, 0, nil, nil) }
         let match = long.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: " AND ")
-        var sql = "SELECT relative_path,kind,size,normalized_name,normalized_path FROM files"
+        var sql = "SELECT relative_path,kind,size,normalized_name,normalized_path,mtime FROM files"
         var values: [String] = []
         var predicates: [String] = []
         if !long.isEmpty { predicates.append("id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)"); values = [match] }
@@ -147,15 +148,35 @@ public final class IndexDatabase {
             let name = String(cString: sqlite3_column_text(stmt, 3))
             let normalizedPath = String(cString: sqlite3_column_text(stmt, 4))
             guard terms.allSatisfy({ normalizedPath.contains($0) }) else { continue }
-            let literal = terms.joined(separator: " ")
-            let rank = name == literal ? 0 : name.hasPrefix(literal) ? 1 : terms.allSatisfy({ name.contains($0) }) ? 2 : 3
-            results.append(SearchResult(id: source.id + ":" + path, name: (SMBPath.display(path) as NSString).lastPathComponent,
-                                        relativePath: path, sourceID: source.id, sourceName: source.name,
-                                        kind: String(cString: sqlite3_column_text(stmt, 1)), size: sqlite3_column_int64(stmt, 2), localURL: nil, rank: rank))
+            // ★ 过滤仍是「每个词都是子串」——**不能放宽到模糊**：
+            //   SQL 预筛（FTS MATCH + instr）只保证子串候选，放到 Swift 侧
+            //   做子序列匹配等于要对全表做一次扫描（索引可达数十万行，
+            //   而这条路的预算是 0.15 秒）。模糊在设备搜索与本机文件夹搜索
+            //   里已经生效，这里至少让**分数口径**与它们一致，排序不会打架。
+            let baseName = (SMBPath.display(path) as NSString).lastPathComponent
+            let evaluation = SearchMatch.evaluate(name: name, path: path, query: query)
+            let modified = Self.date(mtimeNanos: String(cString: sqlite3_column_text(stmt, 5)))
+            var row = SearchResult(id: source.id + ":" + path, name: baseName,
+                                   relativePath: path, sourceID: source.id, sourceName: source.name,
+                                   kind: String(cString: sqlite3_column_text(stmt, 1)),
+                                   size: sqlite3_column_int64(stmt, 2), localURL: nil,
+                                   rank: evaluation.grade.legacyRank)
+            row.modifiedDate = modified
+            row.score = SearchRanking.score(match: evaluation.value, modified: modified, now: now)
+            results.append(row)
             if results.count >= limit * 4 { searchWasIncomplete = true; break }
         }
         searchWasIncomplete = searchWasIncomplete || results.count > limit
-        return Array(results.sorted { $0.rank == $1.rank ? $0.relativePath < $1.relativePath : $0.rank < $1.rank }.prefix(limit))
+        return Array(results.sorted(by: SearchResultMerge.precedes).prefix(limit))
+    }
+
+    /// `mtime` 列存的是**纳秒字符串**（与协议里的 `mtime_ns` 同一个域）。
+    ///
+    /// 解析不出来时返回 nil 而不是 1970：`nil` 在 `SearchRanking` 里是
+    /// 「这行没有时间」，1970 会被当成「非常旧」——两件事不能混。
+    static func date(mtimeNanos: String) -> Date? {
+        guard let nanos = Double(mtimeNanos), nanos > 0 else { return nil }
+        return Date(timeIntervalSince1970: nanos / 1_000_000_000)
     }
     public private(set) var searchWasIncomplete = false
 }

@@ -40,8 +40,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         // 标题只写「设置」，页面名由顶部分段控件自己显示——
         // 标题栏再写一遍就是信息重复。
         panel.title = SettingsWindowTitle.text
-        panel.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        panel.titlebarAppearsTransparent = true
+        panel.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        panel.isOpaque = false
+        panel.backgroundColor = .windowBackgroundColor
+        // 预览构建里可以强制外观（`FF_UI_APPEARANCE=dark`），用来截深色的对照图。
+        // 正式运行时这里恒为 nil，窗口跟着系统外观走。
+        panel.appearance = AppEnvironment.previewAppearance
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         // 宽度跟着导航走：去掉 170–230pt 的侧栏列，不需要 880 了。
@@ -116,6 +120,14 @@ final class NASWizardWindow: NSObject, NSWindowDelegate {
         let panel = NSWindow(contentViewController: controller)
         panel.title = "添加搜索来源"
         panel.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        panel.isOpaque = false
+        panel.backgroundColor = .windowBackgroundColor
+        // 与设置窗同一条：预览构建里可以强制外观（`FF_UI_APPEARANCE=light|dark`）。
+        //
+        // 2026-10-27 深夜补上：向导的分组底改成与设置页同一套玻璃之后，
+        // 浅色下那道 0.07 的描边是唯一能看出卡片边界的东西，而系统当时是深色
+        // ⇒ 「跟进后的向导长什么样」根本截不到。正式运行时这里恒为 nil。
+        panel.appearance = AppEnvironment.previewAppearance
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         panel.setContentSize(NSSize(width: 560, height: 620))

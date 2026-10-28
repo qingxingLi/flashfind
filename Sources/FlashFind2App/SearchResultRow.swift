@@ -7,17 +7,40 @@ import FlashFindCore
 ///
 /// 刻意不显示 size、inode、owner、taskid、API 等技术字段——
 /// 用户只需要知道「文件在哪里」。
+///
+/// ## 高亮由外部给（2026-10-27）
+///
+/// 以前这一行自己 `@State hovered` 画一层灰底，选中交给 `List` 画蓝底。
+/// 现在两种底色都换成「一块跟着鼠标滑动的玻璃遮罩」，遮罩是**整张列表共用**
+/// 的一个视图（在 `SearchView` 里），所以「哪一行被指到」必须由外面告诉它，
+/// 否则遮罩滑到第 5 行、第 3 行还自己亮着，看起来像两处同时选中。
 struct SearchResultRow: View {
     let result: SearchResult
     var isSelected = false
     var showsFullPath = true
-    @State private var hovered = false
+    /// 当前表面：玻璃模式下这一行不画任何底色（遮罩画在行下面）。
+    var style: SearchGlassStyle = .legacy
+    /// 指针是否停在这一行。由列表统一维护，见类型注释。
+    var isHovered = false
+    /// 遮罩中心在第几行（可为小数）与它是否在场——交给文字做放大/缩小。
+    ///
+    /// ★ 缩放**只作用在文字块**，不作用整行：整行放大 5.5% 会把行尾的
+    /// 「此 Mac」推出可视区（第一版就是这样，截图上右侧被切掉一截）。
+    /// 官方那套玻璃胶囊里变大的也是图标与标签本身，不是它们的容器。
+    var lensPosition: CGFloat = 0
+    var lensRow: Int = 0
+    var lensActive = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var fileType: UTType { UTType(filenameExtension: (result.name as NSString).pathExtension) ?? .data }
 
     /// 是不是一个已安装的应用（应用搜索的结果行）。
     private var isApp: Bool { result.sourceID == SearchSource.apps.id }
+
+    /// 老方案的选中态：自绘时必须连文字颜色一起改，
+    /// `List` 当年是把底色和字色一起换的（蓝底黑字看不清）。
+    private var legacySelection: Bool { style == .legacy && isSelected }
+    private var legacyHover: Bool { style == .legacy && isHovered && !isSelected }
 
     /// 来源标签。本机显示「此 Mac」，应用显示「应用程序」，NAS 显示来源名，
     /// 不带地址与协议。
@@ -50,13 +73,18 @@ struct SearchResultRow: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(result.name).font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(legacySelection ? Color.white : Color.primary)
                     .lineLimit(1).truncationMode(.middle)
                 if showsFullPath {
-                    Text(pathText).font(.caption).foregroundStyle(.secondary)
+                    Text(pathText).font(.caption)
+                        .foregroundStyle(legacySelection ? Color.white.opacity(0.75) : Color.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
             }
             .layoutPriority(1)
+            // 只有文字跟着遮罩缩放：字变大变小是用户点名要的效果，
+            // 图标与来源标签保持原位（否则行尾标签会被挤出可视区）。
+            .searchLensMagnification(position: lensPosition, row: lensRow, active: lensActive)
             Spacer(minLength: 8)
             // 来源标签靠右，视觉上像 Spotlight 的来源分组。
             HStack(spacing: 4) {
@@ -64,21 +92,28 @@ struct SearchResultRow: View {
                 Text(badge).font(.system(size: 11))
                     .lineLimit(1).truncationMode(.middle)
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(legacySelection ? Color.white.opacity(0.75) : Color.secondary)
             // 给来源保留可读空间，同时限制长 NAS 名称占用的宽度。
             .frame(maxWidth: 140, alignment: .trailing)
             .layoutPriority(2)
             .help("来源：\(badge)")
             .accessibilityLabel("来源 \(badge)")
         }
-        .frame(height: SearchLayout.rowHeight - 8)
+        // 右侧留出与遮罩一样的边距：文字左边缘在缩放锚点上，右边距只在行尾。
+        .padding(.horizontal, 12)
+        .frame(height: SearchLayout.rowHeight)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(hovered && !isSelected ? Color(nsColor: .quaternaryLabelColor) : Color.clear)
+            if legacySelection || legacyHover {
+                // 圆角与内缩都取 Core 的值：模块 20、行内 14。
+                // 行内再写一个数（比如 6/10）就又出现「同一个界面三种圆角」。
+                RoundedRectangle(cornerRadius: SearchModuleLayout.rowLensRadius, style: .continuous)
+                    .fill(legacySelection ? SearchLegacyHighlight.selection : SearchLegacyHighlight.hover)
+                    .padding(.horizontal, SearchModuleLayout.rowLensInset)
+                    .padding(.vertical, 2)
+            }
         }
         .contentShape(Rectangle())
-        .onHover { hovered = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: hovered)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.08), value: legacyHover)
         .help(pathText)
         .accessibilityElement(children: .combine)
     }

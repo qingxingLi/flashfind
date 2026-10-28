@@ -10,6 +10,12 @@ extension Notification.Name {
     static let closePreviewSettings = Notification.Name("closeFlashFindPreviewSettings")
     /// 浮窗已隐藏。控制器据此卸载「点击外部关闭」的事件监视。
     static let flashFindPanelHidden = Notification.Name("flashFindPanelHidden")
+    /// 「把键盘交回搜索框」。
+    ///
+    /// 2026-10-28 结果搬进独立窗口之后才需要它：用户点过结果窗、或点了「钉住」，
+    /// key window 就在结果那一块上；清空会话之后那块窗口会消失，
+    /// 没有人把 key 交还的话，用户接着打字**一个字都进不去**。
+    static let focusFlashFindField = Notification.Name("flashFindFieldFocus")
 }
 
 enum SearchScope: String, CaseIterable, Identifiable {
@@ -113,6 +119,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 预览构建照旧：直接显示搜索浮窗（截图/点验用），不弹引导。
         if AppEnvironment.isPreview {
             searchPanel?.show()
+            // `FF_UI_WIZARD=1`：把「添加搜索来源」向导直接停在「选择搜索位置」那一步。
+            // `FF_UI_WIZARD_PAGE=1|2|3`：直接停在指定的那一页（不造已连接的草稿），
+            // 用来截「第一步只列来源」「连接信息」这两页的对照图。
+            let wizardPage = ProcessInfo.processInfo.environment["FF_UI_WIZARD_PAGE"]
+            if ProcessInfo.processInfo.environment["FF_UI_WIZARD"] == "1" || wizardPage != nil {
+                model.loadPreviewWizardDraftIfRequested()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    NASWizardWindow.shared.show(model: self.model)
+                }
+            }
+            // `FF_UI_SETTINGS=1`：直接开设置窗（配合 `FF_UI_SETTINGS_PAGE=search|ai|...`）。
+            // 设置窗平时只能点菜单进，而**合成点击不许在用户在用机器时发**——
+            // 没有这个钩子，设置页那几张图就只能靠手点，改动前后没法各截一张来比。
+            if ProcessInfo.processInfo.environment["FF_UI_SETTINGS"] == "1" {
+                let raw = ProcessInfo.processInfo.environment["FF_UI_SETTINGS_PAGE"]
+                let pane = raw.flatMap(SettingsPane.init(rawValue:)) ?? .search
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    SettingsWindow.shared.show(model: self.model, page: pane)
+                }
+            }
             if let seconds = ProcessInfo.processInfo.environment["FF_UI_LIFETIME"].flatMap(Double.init) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + min(120, max(5, seconds))) {
                     NotificationCenter.default.post(name: .closePreviewSettings, object: nil)

@@ -145,10 +145,8 @@ extension NASSearchProvider: PathMetadataProviding {
         guard let raw = row["modifiedDate"] as? String else { return nil }
         // 两个来源给的形态不同（6.4b-0 实测）：群晖带小数秒、WebDAV 不一定。
         // 两种都试一遍，认不出来就按「设备没给出时间」返回 nil ——
-        // 不拿 1970 冒充未知。
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return withFraction.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+        // 不拿 1970 冒充未知。解析器与搜索结果行共用一份（`DeviceTimestamp`）。
+        return DeviceTimestamp.parse(raw)
     }
 
     /// 核心错误 kind → 直查结论（§4.11.2）。

@@ -3,7 +3,8 @@ import Foundation
 /// 一台 NAS 一个 Provider。地址、端口、账号、搜索位置全部来自 `config`，
 /// 本类型不含任何写死的主机或共享名。
 @MainActor public final class NASSearchProvider: SearchProvider {
-    public let source: SearchSource
+    /// 对外的来源描述。名字是展示字段，可在会话存活期间变（见 `updateDisplayName(_:)`）。
+    public private(set) var source: SearchSource
     public let bridge: any MyNASBridgeTransport
     public private(set) var ready = false
     public var queryBudgetMs = 60_000
@@ -278,6 +279,25 @@ import Foundation
     public func updateConfig(_ newValue: NASSourceConfig) {
         config = newValue
         locatorSnapshot = Self.makeLocator(sourceID: source.id, config: newValue)
+    }
+
+    /// 用户在设置里给这台 NAS 改名。
+    ///
+    /// 名字只影响展示（结果行的来源徽标、状态文案、动态码弹窗里的称呼），
+    /// **不是连接身份**：会话、搜索位置、钥匙串条目都挂在 `sourceID` 上，
+    /// 而 `sourceID` 由 `id` 派生、与名字无关。所以这里既不 disconnect 也不重登，
+    /// 当前结果也不清空 —— 改个名字把用户已经搜出来的东西清掉是没道理的。
+    ///
+    /// `source` 必须一起换：它是**构造时算出来的**快照，
+    /// 结果行读的 `result.sourceName` 就来自这里。只改 `config` 会让设置页显示新名、
+    /// 结果行还挂着旧名，直到下次重启。
+    public func updateDisplayName(_ name: String) {
+        var updated = config
+        updated.name = name
+        guard updated != config else { return }
+        updateConfig(updated)
+        source = SearchSource(id: updated.sourceID, name: updated.displayName,
+                              type: .nas, displayName: updated.displayName)
     }
 
     /// 协议 endpoint。
@@ -930,7 +950,7 @@ import Foundation
                   host: config.hostName, port: resolvedPort)
     }
 
-    public func result(_ m: [String: Any], query: String = "") -> SearchResult? {
+    public func result(_ m: [String: Any], query: String = "", now: Date = Date()) -> SearchResult? {
         guard let path = m["path"] as? String, locatorSnapshot.contains(path: path),
               let name = m["name"] as? String, let id = m["id"] as? String,
               m["sourceID"] as? String == source.id else { return nil }
@@ -941,13 +961,22 @@ import Foundation
                                sourceName: source.displayName,
                                kind: m["fileType"] as? String == "folder" ? "directory" : "file",
                                size: (m["size"] as? NSNumber)?.int64Value, localURL: nil)
-        row.rank = SearchResultRanker.rank(name: name, path: path, query: query)
         row.fileType = m["fileType"] as? String ?? "file"
         row.sourceType = .nas; row.isOnline = true
+        // ★ 时间戳走 `DeviceTimestamp`，**不许**在这里新建 `ISO8601DateFormatter`：
+        //   这个函数是**一行一次**调用的，而且整段跑在主线程上。每行新建一个
+        //   formatter 实测要 261 ms / 2000 行（见 `DeviceTimestamp` 里的表），
+        //   表现就是「搜到的东西一多，界面先卡半秒」。
         if let date = m["modifiedDate"] as? String {
-            let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            row.modifiedDate = f.date(from: date) ?? ISO8601DateFormatter().date(from: date)
+            row.modifiedDate = DeviceTimestamp.parse(date)
         }
+        // ★ rank 与综合分**一起**算，且必须在 `modifiedDate` 之后：
+        //   同一份 `SearchMatch` 结果既给档位又给分值，两处各算一遍的话
+        //   （旧写法是 rank 一个函数、时间一个字段）会出现「排序用的分数
+        //   和界面上标的档位不是同一个口径」。归一化也只做一次。
+        let evaluation = SearchMatch.evaluate(name: name, path: path, query: query)
+        row.rank = evaluation.grade.legacyRank
+        row.score = SearchRanking.score(match: evaluation.value, modified: row.modifiedDate, now: now)
         // openTarget 来自 Dart 侧复用的 SMBLocation，其 host/share 必须与本来源配置一致，
         // 否则视为不可信，不写入结果。
         if let target = m["openTarget"] as? [String: Any], target["kind"] as? String == "smbLocation",
@@ -1167,6 +1196,12 @@ public struct NASLocator: Sendable {
     /// 这条路径所属的授权根（带前导斜杠）。都不属于时返回 nil。
     public func owningRoot(path: String) -> String? {
         for prefix in scopePrefixes {
+            // `"/"` = 整个可见空间（只有「根下上千个目录」的品牌会这么授权，
+            // 见 OpenListAdapter.shareRoots）。认它就直接返回。
+            // **不能**走下面的拆段比对：`"/"` 拆出来是 ["", ""]，
+            // 当前缀永远匹配不上 `/Book/x`（第二段是 "Book" 不是 ""），
+            // 于是「整根授权」会表现为「每条结果都不在授权范围」——搜索全空、文件全打不开。
+            if prefix == "/" { return "/" }
             let root = String(prefix.dropLast())
             let a = root.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             let b = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
@@ -1177,6 +1212,9 @@ public struct NASLocator: Sendable {
     /// 逻辑根对应的 SMB 共享名。DSM 的共享名就是根去掉前导斜杠，
     /// 不需要维护映射表——这也是为什么结果里要用「所属根」推导共享名。
     public func owningShare(root: String) -> String? {
+        // 整根授权没有对应的共享名：它不是某一个共享，而是「全部」。
+        // 返回 "" 会让调用方拿到一个空的 `smb://主机//…` 目标。
+        if root == "/" { return nil }
         let share = String(root.dropFirst())
         return shares.contains(share) ? share : nil
     }

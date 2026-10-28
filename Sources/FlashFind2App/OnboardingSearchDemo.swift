@@ -30,7 +30,9 @@ final class OnboardingSearchDemoWindow: NSObject, NSWindowDelegate, WKScriptMess
         configuration.userContentController.add(self, name: "onboarding")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         self.webView = webView
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 620),
+        // 演示里有五章（输入 / 预览 / 筛选 / 钉住 / 继续搜索），
+        // 结果区要放下类型条 + 五到九行结果 + 状态栏，620 高会出滚动条。
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 700),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "闪寻 · 搜索演示"
         window.isReleasedWhenClosed = false

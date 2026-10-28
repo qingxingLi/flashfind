@@ -75,7 +75,11 @@ public enum LocalFolderSearch {
         let manager = FileManager.default
         let deadline = ProcessInfo.processInfo.systemUptime + timeBudget
         var results: [SearchResult] = [], warnings: [String] = [], visited = 0, identities = Set<String>()
-        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey, .volumeIsLocalKey, .volumeURLKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey,
+                                      .volumeIsLocalKey, .volumeURLKey, .contentModificationDateKey]
+        // ★ 一次遍历用同一个 `now`：否则同一批结果的时间新近度会随着
+        //   扫描进度缓慢漂移，排序里出现「早扫到的略占便宜」这种莫名现象。
+        let now = Date()
         for chosen in folders {
             try Task.checkCancellation()
             let root = chosen.standardizedFileURL
@@ -87,9 +91,16 @@ public enum LocalFolderSearch {
             guard canonicalRoot != "/", canonicalRoot != "/System/Volumes/Data",
                   metadata.volume?.resolvingSymlinksInPath().standardizedFileURL.path != canonicalRoot else { throw FlashFindError.message("不能扫描文件系统或整卷根目录，请选择具体文件夹") }
             let rootName = RelativePath.normalized(root.lastPathComponent)
-            if terms.allSatisfy({ rootName.contains($0) }), parsed.matches(rootName), identities.insert(root.path).inserted {
-                results.append(SearchResult(id: "local:" + root.path, name: root.lastPathComponent, relativePath: root.path,
-                    sourceID: nil, sourceName: "本机·已选文件夹", kind: "directory", size: 0, localURL: root))
+            // ★ 命中判定走 `SearchMatch`：原来这里是「每个词都得是名字的子串」，
+            //   输入 `bsr` 就找不到 `best_seller_report.xlsx`。模糊之后
+            //   子序列与容错也算命中，与 NAS 那条路同一个口径。
+            let rootEvaluation = SearchMatch.evaluate(name: root.lastPathComponent, path: root.path, query: text)
+            if (terms.isEmpty || rootEvaluation.grade != .none), parsed.matches(rootName), identities.insert(root.path).inserted {
+                var row = SearchResult(id: "local:" + root.path, name: root.lastPathComponent, relativePath: root.path,
+                    sourceID: nil, sourceName: "本机·已选文件夹", kind: "directory", size: 0, localURL: root)
+                row.rank = rootEvaluation.grade.legacyRank
+                row.score = SearchRanking.score(match: rootEvaluation.value, modified: metadata.contentModificationDate, now: now)
+                results.append(row)
                 if results.count >= limit {
                     warnings.append("已选文件夹搜索达到结果上限，结果可能不完整")
                     return LocalFolderSearchReport(results: results, warnings: warnings, visitedCount: visited)
@@ -105,7 +116,7 @@ public enum LocalFolderSearch {
                 try Task.checkCancellation()
                 if visited >= maximumEntries || ProcessInfo.processInfo.systemUptime >= deadline || results.count >= limit {
                     warnings.append("已选文件夹搜索达到时间或数量上限，结果可能不完整，请缩小目录范围")
-                    return LocalFolderSearchReport(results: results.sorted { $0.name == $1.name ? $0.id < $1.id : $0.name < $1.name }, warnings: warnings, visitedCount: visited)
+                    return LocalFolderSearchReport(results: results.sorted(by: SearchResultMerge.precedes), warnings: warnings, visitedCount: visited)
                 }
                 visited += 1
                 do {
@@ -118,16 +129,21 @@ public enum LocalFolderSearch {
                     }
                     if attributes.isDirectory == true, attributes.volumeIsLocal != true { enumerator.skipDescendants(); continue }
                     let name = RelativePath.normalized(value.lastPathComponent)
-                    guard terms.allSatisfy({ name.contains($0) }), parsed.matches(name), identities.insert(value.path).inserted else { continue }
-                    let rank = name == terms.joined(separator: " ") ? 0 : name.hasPrefix(terms.joined(separator: " ")) ? 1 : 2
-                    results.append(SearchResult(id: "local:" + value.path, name: value.lastPathComponent, relativePath: value.path,
+                    let evaluation = SearchMatch.evaluate(name: value.lastPathComponent, path: value.path, query: text)
+                    guard (terms.isEmpty || evaluation.grade != .none), parsed.matches(name),
+                          identities.insert(value.path).inserted else { continue }
+                    var row = SearchResult(id: "local:" + value.path, name: value.lastPathComponent, relativePath: value.path,
                         sourceID: nil, sourceName: "本机·已选文件夹", kind: attributes.isDirectory == true ? "directory" : "file",
-                        size: Int64(attributes.fileSize ?? 0), localURL: value, rank: rank))
+                        size: Int64(attributes.fileSize ?? 0), localURL: value,
+                        rank: evaluation.grade.legacyRank)
+                    row.modifiedDate = attributes.contentModificationDate
+                    row.score = SearchRanking.score(match: evaluation.value, modified: attributes.contentModificationDate, now: now)
+                    results.append(row)
                 } catch {
                     if warnings.count < 8 { warnings.append("部分条目无法读取：" + value.lastPathComponent) }
                 }
             }
         }
-        return LocalFolderSearchReport(results: results.sorted { $0.rank == $1.rank ? $0.id < $1.id : $0.rank < $1.rank }, warnings: warnings, visitedCount: visited)
+        return LocalFolderSearchReport(results: results.sorted(by: SearchResultMerge.precedes), warnings: warnings, visitedCount: visited)
     }
 }

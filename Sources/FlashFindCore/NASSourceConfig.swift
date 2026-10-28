@@ -439,12 +439,23 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
     /// `source_trust.dart` 的 SourceEndpoint 都是 `^[a-zA-Z0-9_-]{1,64}$`）。
     /// 之前这里多放了一个 `.`，Swift 认为 `nas.office` 合法、Dart 直接 ProtocolViolation——
     /// 契约不一致表现为「客户端看着没问题，一发请求就失败」，极难定位。
-    public var sourceID: String {
-        let direct = String(id.prefix(48))
+    public var sourceID: String { Self.protocolIdentifier(for: id) }
+
+    /// 把任意 id 换算成**协议口径**的 sourceID。
+    ///
+    /// ★ 抽成静态函数是因为它现在有两个消费者：这里下发请求用，
+    ///   `SearchResultFilter` 做「这条结果属于哪个位置」的比对时也要用。
+    ///   两处各写一遍，只要其中一处漏了 `nas_` 前缀，界面表现就是
+    ///   **某个共享下的结果永远筛不出来**——而搜索本身完全正常，极难定位。
+    ///
+    /// ★ 这个函数**幂等**：对已经合法的 id（含 `nas_xxx`）再算一次原样返回。
+    ///   所以调用方不必先判断「这是原始 id 还是协议 id」，两侧都过一遍即可。
+    public static func protocolIdentifier(for rawID: String) -> String {
+        let direct = String(rawID.prefix(48))
         let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
         if !direct.isEmpty, direct.allSatisfy({ allowed.contains($0) }) { return direct }
         // 非法字符一律替换成 `-`，并加 `nas_` 前缀避免与 Dart 侧的裸标识混淆。
-        let cleaned = id.map { ch -> Character in
+        let cleaned = rawID.map { ch -> Character in
             (ch.isLetter && ch.isASCII) || ch.isNumber || ch == "_" || ch == "-" ? ch : "-" }
         return "nas_" + String(cleaned.prefix(48))
     }
@@ -454,6 +465,23 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
     }
     /// 主机名（不含端口），用于 SMB 挂载匹配与 openTarget。
     public var hostName: String { EndpointProbe.host(of: host) ?? "" }
+
+    /// 两份配置是不是**同一条连接**（只看连接参数，不看名字）。
+    ///
+    /// `NASConnectionManager.rebuild` 原本拿 `existing.config == source` 决定「复用还是重建」。
+    /// 整份 `==` 把 `name` 也算进去了，于是**改个名字就会被判成换了设备**：
+    /// 旧 Provider 被 disconnect、换成一个从未登录的空白实例——
+    /// 用户看到的就是「改完名字 NAS 掉线了，还要重新输密码」。
+    ///
+    /// 写法是把 `name` 抹平再整体比较（而不是逐字段列举）：
+    /// 以后往 `NASSourceConfig` 加连接相关字段时，这里自动跟上，不会漏。
+    public func hasSameConnection(as other: NASSourceConfig) -> Bool {
+        var mine = self
+        var theirs = other
+        mine.name = ""
+        theirs.name = ""
+        return mine == theirs
+    }
 
     /// 端口字段本身是否填了有效值。
     public var hasPort: Bool { (1...65535).contains(port) }

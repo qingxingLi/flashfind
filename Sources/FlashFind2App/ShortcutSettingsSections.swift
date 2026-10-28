@@ -15,7 +15,7 @@ struct ShortcutSettingRow: View {
     }
 
     var body: some View {
-        LabeledContent("打开闪寻") {
+        SettingsLabeledRow("打开闪寻") {
             Button {
                 if model.isRecordingShortcut { model.cancelShortcutRecording() }
                 else { model.beginShortcutRecording() }

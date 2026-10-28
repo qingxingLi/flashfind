@@ -153,9 +153,20 @@ public extension MyNASBridgeTransport {
                         }
                         continue
                     }
+                    // ★ 解码必须留在这个后台循环里，**不许**挪进主线程那个 Task。
+                    //
+                    // 一条批消息可以带 2000 条结果：实测 761 KB，`JSONSerialization`
+                    // 解一次 6 ms。串流期间一秒能来十几条 —— 放主线程就是
+                    // 「结果一多界面就卡」的另一半（前一半是逐行解析时间戳，
+                    // 见 `DeviceTimestamp`）。
+                    //
+                    // 解出来的是纯值（字典 / 数组 / 字符串），交给 MainActor 不会
+                    // 共享可变状态；顺序也没变：每条消息仍然各排一个 Task，
+                    // 先切出来的先入队。
+                    let decoded = try? JSONSerialization.jsonObject(with: line)
                     Task { @MainActor [weak self] in
                         guard let self, self.stillCurrent(generation) else { return }
-                        self.received(line)
+                        self.received(decoded)
                     }
                 }
                 // 缓冲区一直等不到换行符，说明核心在胡乱输出。
@@ -269,11 +280,15 @@ public extension MyNASBridgeTransport {
         terminateHelper()
     }
 
-    private func received(_ line: Data) {
+    /// 处理一行核心输出。`object` 已经由读循环在后台解好（见那里的说明）。
+    ///
+    /// 参数是 `Any?` 而不是 `Data`：解码失败也要能报成「通道已损坏」，
+    /// 而不是静默跳过 —— 那一行若是某个请求的终止事件，这个请求就永远等不到头。
+    private func received(_ object: Any?) {
         // 核心的每一行都是 `{'protocolVersion':1,'coreRevision':n,'requestID':…,'sourceID':…,
         // 'queryID':…,'event':…}`（见 `bin/harness.dart` 的 `send`）。
         // 因此「不是 JSON」或「缺信封字段」都不是可以跳过的一行，而是通道已损坏。
-        guard let object = try? JSONSerialization.jsonObject(with:line) else {
+        guard let object else {
             protocolCorruption("核心输出的一行不是合法 JSON")
             return
         }

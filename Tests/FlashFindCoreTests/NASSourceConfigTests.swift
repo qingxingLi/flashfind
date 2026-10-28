@@ -223,6 +223,32 @@ final class NASSourceConfigTests: XCTestCase {
         XCTAssertEqual(provider.locatorSnapshot.scopePrefixes, ["/工程部/"], "换范围后后台核验必须跟着换")
     }
 
+    /// ★ `"/"` = 整个可见空间。
+    ///
+    /// 存在理由：OpenList 那种根下挂着上千个文件夹的站点（实测 1724 个），
+    /// 适配器只给这一个位置——逐个列既列不完也勾不完，勾上 N 个则一次搜索
+    /// 要发 2N 个请求（3448 次）。这里锁住的是**整根授权真的能覆盖每条结果**：
+    /// 旧实现把 `"/"` 拆成 ["", ""] 当前缀，任何路径都匹配不上，
+    /// 表现为「搜索全空、文件全打不开」，而不是报错——最难查的那种。
+    func testWholeRootScopeCoversEveryPath() throws {
+        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.88", scope: "/"), port: 5001)
+        let locator = provider.locatorSnapshot
+        XCTAssertEqual(locator.scopePrefixes, ["/"], "整根授权的前缀就是 /")
+        XCTAssertTrue(locator.contains(path: "/AIR/x.rar"))
+        XCTAssertTrue(locator.contains(path: "/a/b/c/d.txt"), "任意深度都算在整根之下")
+        XCTAssertEqual(locator.owningRoot(path: "/AIR/x.rar"), "/")
+        XCTAssertNil(locator.owningShare(root: "/"), "整根不是某一个 SMB 共享，不该给出空共享名")
+    }
+
+    /// 整根授权不等于「放开一切」：别的来源的结果仍然不能被它认领。
+    func testWholeRootScopeStillRejectsForeignRows() throws {
+        let provider = NASSearchProvider(bridge: NoopBridge(), config: fixture(host: "192.0.2.88", scope: "/"), port: 5001)
+        let row = SearchResult(id: "x", name: "a.txt", relativePath: "/AIR/a.txt",
+                               sourceID: "another-source", sourceName: "另一台",
+                               kind: "file", size: nil, localURL: nil)
+        XCTAssertThrowsError(try provider.resolve(row, in: [], snapshot: provider.locatorSnapshot))
+    }
+
     // MARK: 持久化
 
     func testConfigRoundTripsThroughJSON() throws {

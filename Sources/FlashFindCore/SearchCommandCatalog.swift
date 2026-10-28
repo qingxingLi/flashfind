@@ -37,98 +37,17 @@ public enum SearchTarget: Hashable, Sendable {
     }
 }
 
-/// 命令面板有**两种**，由开头的斜杠决定。
+/// 「快捷方式」的两个来源：位置与文件类型。
 ///
-/// ★ 为什么反斜杠是位置：Windows 的 cmd 里输入路径用 `\`（`\\192.0.2.1\共享`），
-/// 用户手指已经在键盘上，顺着肌肉记忆敲 `\` 要的是「去哪儿」；
-/// 而 `/` 在命令行里是「参数开关」（`dir /s`），要的是「按什么条件筛」。
-/// 两种斜杠各管一件事，位置与类型因此可以叠加。
-/// ★ 带 `String` 原始值不是为了显示，是为了**落盘**：用户的排序与快捷键
-/// 要按面板种类分开存（`SearchQuickPickSettings`），存储键用 `rawValue`。
-/// 顺带 `CaseIterable` 让「两类都要处理」的代码不必手写两遍枚举。
+/// ★ 2026-10-28 用户把「输入命令」这套整段取消了（`\` / `/` 不再唤起面板），
+///   这个枚举**只剩下一个用途**：设置页里「位置顺序」这份配置按种类分开存
+///   （`SearchQuickPickSettings` 的存储键仍用 `rawValue`，老用户的排序不会失效）。
+///   面板已经不在了，别再按它去解析输入框。
 public enum SearchCommandKind: String, Hashable, Sendable, CaseIterable {
-    /// `\` —— 选搜索位置（此 Mac / 各 NAS 的各搜索根）。
+    /// 搜索位置（此 Mac / 各 NAS 的各搜索根）。
     case location
-    /// `/` —— 选文件类型（pdf / word / 照片 …）。
+    /// 文件类型（pdf / word / 照片 …）。
     case fileType
-}
-
-/// 搜索框是不是在「命令模式」。
-///
-/// 斜杠是**指令前缀**，不是普通字符：输入它就进入命令面板，
-/// 面板里选一项之后，那次搜索带上这个限定。
-public enum SearchCommandMode: Hashable, Sendable {
-    /// 不是命令模式：这是一个普通的关键词。
-    case off
-    /// 命令模式。
-    ///
-    /// - `kind`: 是位置面板还是类型面板。
-    /// - `filter`: 用来筛命令面板候选的词。
-    /// - `keyword`: 用户真正想搜的关键词。
-    ///
-    /// ★ 后两者分开，是因为「限定什么」与「搜什么」是两个问题：
-    /// `\照片 报告` = 在「照片」这个位置里搜「报告」。
-    /// 合成一坨文本会让面板没法筛、也没法把这个语义传下去。
-    case command(kind: SearchCommandKind, filter: String, keyword: String)
-
-    /// 命令模式的种类（非命令模式为 nil）。
-    public var kind: SearchCommandKind? {
-        if case .command(let kind, _, _) = self { return kind }
-        return nil
-    }
-    /// 筛选词（非命令模式为空串）。
-    public var filter: String {
-        if case .command(_, let filter, _) = self { return filter }
-        return ""
-    }
-    /// 关键词（非命令模式为空串）。
-    public var keyword: String {
-        if case .command(_, _, let keyword) = self { return keyword }
-        return ""
-    }
-}
-
-/// 命令模式的解析。
-///
-/// 判定放在 Core 是因为它有**语义**：什么算命令模式、哪一段是筛选词、
-/// 哪一段是关键词——这些都得能被断言，不能只写在界面里。
-public enum SearchCommandParser {
-    /// 位置面板的前缀。
-    public static let locationPrefix = "\\"
-    /// 类型面板的前缀。
-    public static let fileTypePrefix = "/"
-
-    /// 解析搜索框里的文本。
-    ///
-    /// - 文本不以斜杠开头 ⇒ `.off`（普通关键词）。
-    /// - 斜杠之后到**第一个空白**之间是筛选词；空白之后全部是关键词。
-    /// - 只有斜杠 ⇒ 筛选词与关键词都为空：面板列出全部候选。
-    public static func parse(_ text: String) -> SearchCommandMode {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let kind: SearchCommandKind
-        let rest: String
-        if trimmed.hasPrefix(locationPrefix) {
-            kind = .location
-            rest = String(trimmed.dropFirst(locationPrefix.count))
-        } else if trimmed.hasPrefix(fileTypePrefix) {
-            kind = .fileType
-            rest = String(trimmed.dropFirst(fileTypePrefix.count))
-        } else {
-            return .off
-        }
-        if let boundary = rest.firstIndex(where: { $0.isWhitespace }) {
-            let filter = String(rest[rest.startIndex..<boundary]).trimmingCharacters(in: .whitespaces)
-            let keyword = String(rest[rest.index(after: boundary)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return .command(kind: kind, filter: filter, keyword: keyword)
-        }
-        return .command(kind: kind, filter: rest.trimmingCharacters(in: .whitespaces), keyword: "")
-    }
-
-    /// 这段文本是不是命令模式。
-    public static func isCommand(_ text: String) -> Bool {
-        if case .command = parse(text) { return true }
-        return false
-    }
 }
 
 /// 文件类型清单（`/` 面板的候选）。
@@ -244,6 +163,14 @@ public enum SearchCommandCatalog {
     /// 候选列表里「打开设置」这一条的命令 ID。
     public static let settingsItemID = "command:openSettings"
 
+    /// 某个来源下某个搜索根的候选 id。
+    ///
+    /// ★ 拼 id 只许有这一处：侧边栏要把「当前位置限定」反查成「该高亮哪一行」，
+    /// 两处各拼一遍的话，中间改一个分隔符就会出现「位置生效了、侧边栏没有高亮」。
+    public static func locationItemID(sourceID: String, root: String) -> String {
+        "target:\(sourceID):\(root)"
+    }
+
     /// 面板一次画得下多少行候选。
     ///
     /// ★ 这个数由编号规则反推出来，不能随便定：数字键 1–9 给前九条候选，
@@ -291,7 +218,7 @@ public enum SearchCommandCatalog {
             }
             for source in sources {
                 for root in source.roots {
-                    out.append(SearchCommandItem(id: "target:\(source.sourceID):\(root)",
+                    out.append(SearchCommandItem(id: locationItemID(sourceID: source.sourceID, root: root),
                                                   title: SearchTargetLabel.rootName(root),
                                                   subtitle: source.locationSubtitle,
                                                   action: .search(.sourceRoot(sourceID: source.sourceID, root: root))))

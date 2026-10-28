@@ -160,7 +160,7 @@ class Scope {
     if (cleaned.isEmpty) throw const CoreError('ScopeDenied');
     for (final path in cleaned) {
       validate(path);
-      if (path == '/' || path.startsWith('/volume1/')) throw const CoreError('ScopeDenied');
+      if (path.startsWith('/volume1/')) throw const CoreError('ScopeDenied');
     }
     return cleaned;
   }
@@ -168,6 +168,17 @@ class Scope {
   String get root => (roots.toList()..sort()).first;
   bool get isSingle => roots.length == 1;
   static void validate(String path) {
+    // ★ `'/'` 是**合法坐标**，但「能不能把它当搜索位置」不由这里决定，由授权根决定
+    //   （见 `owningRoot`）：`Scope.multi(['/'])` 表示「整个可见空间」，
+    //   而 `Scope.multi(['/a'])` 下请求 `'/'` 仍会被 `owningRoot == null` 拒掉。
+    //
+    //   为什么必须特判：按下面的规则拆段，`'/'` 拆成 `['', '']`、`skip(1)` 得到 `['']`，
+    //   正好命中「空段」⇒ 被判成 UnsafeLogicalPath。于是**根下有上千个目录的品牌
+    //   永远没法把根当位置**——OpenList 公网站点正是这种形态（实测根下 1724 个文件夹，
+    //   逐个当位置 = 3448 次请求，一次搜索要几分钟且界面列不出来）。
+    //   而 `parent='/'` + `scope=0` 实测一次就覆盖全库（含三级子目录），
+    //   所以「整根一个位置」必须走得通。
+    if (path == '/') return;
     if (!path.startsWith('/') || path.contains('\u0000') || path.split('/').skip(1).any((s)=>s.isEmpty || s=='.' || s=='..') || RegExp(r'%(?:2e|2f|00)', caseSensitive:false).hasMatch(path)) throw const CoreError('UnsafeLogicalPath');
   }
   /// 落在**任一**已授权根之下即允许。不能简单拼字符串前缀：
@@ -177,6 +188,11 @@ class Scope {
   String? owningRoot(String path) {
     validate(path);
     for (final root in roots) {
+      // `'/'` 是所有绝对路径的根，认它就直接返回。
+      // **不能**走下面的拆段比对：`'/'` 拆出来是 `['', '']`，拿它当前缀
+      // 永远匹配不上 `/Book/x`（第二段是 'Book' 不是 ''）——那样「整根授权」
+      // 会表现为「每条结果都不在授权范围内」，搜索全空、文件全打不开。
+      if (root == '/') return '/';
       final a = root.split('/'), b = path.split('/');
       if (b.length >= a.length && List.generate(a.length, (i) => a[i] == b[i]).every((x) => x)) return root;
     }
@@ -208,7 +224,10 @@ class Scope {
     final allowed = <String>{};
     for (final path in wanted) {
       validate(path);
-      if (path == '/' || path.startsWith('/volume1/')) throw const CoreError('ScopeDenied');
+      if (path.startsWith('/volume1/')) throw const CoreError('ScopeDenied');
+      // `'/'` 同样走 `owningRoot` 判定：只有原授权范围里本来就含 `'/'`
+      // （即这台设备把「整个可见空间」作为一个位置授权过）才放行。
+      // 群晖那种按共享授权的来源，roots 里永远没有 `'/'`，请求它照样被拒。
       if (owningRoot(path) == null) throw const CoreError('ScopeDenied');
       allowed.add(path);
     }

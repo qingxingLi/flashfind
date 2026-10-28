@@ -11,20 +11,30 @@ import FlashFindCore
 ///    问题（搜哪些地方），分成两页只会让用户在「调整搜索」和「管理 NAS」
 ///    之间来回跳；「AI」独立成页（1.1.2 唯一的新增主功能，藏在「高级」里
 ///    与产品定位冲突，§14.3.1）。四页撑不起一条常驻侧栏，所以导航是顶部横向
-///    分段控件；
+///    玻璃分段控件（`SettingsPanePicker`）；
 /// 2. **来源列表只显示名称 / 状态 / 位置 / 启用**，点整行进详情页，
 ///    只有出问题时才出现一个按钮；
-/// 3. **视觉走系统原生**：`Form` + `.formStyle(.grouped)`，不再自绘卡片；
+/// 3. **表面走 `SettingsCard`**（2026-10-27 用户定稿）：浅色**纯白底 +
+///    玻璃遮罩卡**，深色沿用毛玻璃底 + 带层次的材质卡；
 /// 4. **页脚只在有问题时出现**：本机那一段的说明
 ///    只在「没选文件夹 / 系统索引关着」时说，「Spotlight 已启用」这类正常态
 ///    不再占一行；「网络存储」下面那句解释「附近设备」会自动查找的话也删了——
 ///    点进向导第一屏就摆着「附近的设备」。
+///
+/// ★ 为什么不再用 `Form` + `.formStyle(.grouped)`：分组表单的卡片底色与
+///   投影是系统画的，改不动。用户要的是「去掉那片灰白阴影、换成玻璃遮罩」，
+///   唯一的办法是自己画卡片（`SettingsCard` / `SettingsCardSurface`）。
+///   代价是行内边距与分隔线要显式写，规则收在 `settingsRow()` 与
+///   `SettingsRowDivider` 里，四个页面共用一套。
 ///
 /// 判定逻辑尽量不在这一层：来源行的呈现来自 `NASSourceRowModel`，
 /// 页面集合来自 `SettingsPane`，诊断汇总来自 `ConnectionDiagnostics`。
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var pane: SettingsPane
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 图标底色要分深浅：10% 的强调色压在深色玻璃上几乎等于没有（截图上只剩一点色偏）。
+    @Environment(\.colorScheme) private var colorScheme
     /// 搜索页当前打开的来源详情。`nil` 表示停在列表。
     @State private var detailSourceID: String?
 
@@ -38,47 +48,53 @@ struct SettingsView: View {
             panePicker
             content
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(SettingsBackdrop())
         .frame(minWidth: 520, idealWidth: 640, minHeight: 520, idealHeight: 620)
-        .onChange(of: pane) { _ in detailSourceID = nil }
+        .onChange(of: pane) { _ in
+            detailSourceID = nil
+        }
         .onAppear {
             model.refreshLaunchAtLogin()
             // 本机搜索的提示只在打开设置时才有意义，检查也就在这时候做。
             // 少了这一句，「Spotlight 索引被关掉」这类必须让用户知道的提醒
             // 永远不会出现，本机那一段会变成一行等不到结果的「正在检查本机搜索状态」。
             model.refreshLocalSearchAvailability()
-        }
-    }
-
-    /// 四个页面共用顶部原生分段控件；限宽居中，避免随窗口拉伸。
-    /// 分段控件是 macOS 原生控件
-    ///（`NSSegmentedControl`），Tab 聚焦 + 方向键与 VoiceOver 天然可用。
-    private var panePicker: some View {
-        Picker("设置页面", selection: $pane) {
-            ForEach(SettingsPane.allCases) { item in
-                Text(item.rawValue)
-                    .tag(item)
-                    // 每一段都挂标识：键盘导航与 VoiceOver 靠它定位。
-                    .accessibilityIdentifier("settings-nav-" + item.rawValue)
+            // `FF_UI_SOURCE_DETAIL=1`：预览截图直接进第一台来源的详情。
+            // 没有它，这一屏只能靠手点，改动前后各截一张的对比就做不成。
+            #if DEBUG
+            if AppEnvironment.isPreview,
+               ProcessInfo.processInfo.environment["FF_UI_SOURCE_DETAIL"] == "1",
+               let first = model.nasSources.first {
+                detailSourceID = first.id
             }
+            #endif
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityIdentifier("settings-pane-picker")
-        .frame(maxWidth: SettingsLayout.navigationMaxWidth)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider().opacity(0.35) }
     }
 
-    /// 内容区：限宽并居中，窗口拉宽时表单不再无限横向拉伸。
+    /// 四个页面共用顶部玻璃分段控件；宽度跟内容走，不被窗口拉宽。
+    /// 选中块会在四段之间滑过去（见 `SettingsPanePicker`）。
+    private var panePicker: some View {
+        SettingsPanePicker(selection: $pane)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(.clear)
+            .overlay(alignment: .bottom) { Divider().opacity(0.35) }
+    }
+
+    /// 内容区：限宽并居中，窗口拉宽时卡片不再无限横向拉伸。
     private var content: some View {
-        detail
-            .scrollContentBackground(.hidden)
-            .frame(maxWidth: SettingsLayout.contentMaxWidth)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 22) { detail }
+                .padding(.horizontal, 24)
+                .padding(.top, 18)
+                .padding(.bottom, 26)
+                .frame(maxWidth: SettingsLayout.contentMaxWidth)
+                .frame(maxWidth: .infinity)
+        }
+        .transition(.opacity)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: pane)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: detailSourceID)
     }
 
     /// 打开来源向导的独立窗口。
@@ -89,19 +105,18 @@ struct SettingsView: View {
 
     // MARK: - 字号阶梯
 
-    /// 分段标题：「启动」「快捷键」「外观」「权限」「关于」。
-    ///
-    /// 字号走 Core 的 `SettingsTypography`。标题只靠字重区分看不出来，
-    /// 所以这里显式给大一档的字号加半粗，不再依赖系统默认那套
-    /// 几乎看不出区别的排版。
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text).font(.system(size: SettingsTypography.sectionHeader, weight: .semibold))
-    }
-
     /// 分段页脚（辅助说明）：比正文小一档，且不抢注意力。
     private func sectionFooter(_ text: String) -> some View {
         Text(text).font(.system(size: SettingsTypography.caption))
             .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 2)
+    }
+
+    /// 一行提示文字（反馈，不是备注）：比正文小一档。
+    private func noteText(_ text: String, tint: Color = .secondary) -> some View {
+        Text(text).font(.system(size: SettingsTypography.caption))
+            .foregroundStyle(tint)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -123,25 +138,22 @@ struct SettingsView: View {
     // MARK: - 通用
 
     private var generalForm: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 22) {
             // 正式界面不摆禁用的假开关。「登录时启动」真接了系统；
             // 「启动后驻留菜单栏」是应用固有行为（LSUIElement），不需要开关。
-            Section {
-                Toggle("登录时启动闪寻", isOn: Binding(get: { model.launchAtLogin },
-                                                    set: { model.setLaunchAtLogin($0) }))
+            SettingsCard("启动") {
+                SettingsSwitchRow("登录时启动闪寻", isOn: Binding(get: { model.launchAtLogin },
+                                                              set: { model.setLaunchAtLogin($0) }))
+                    .settingsRow()
                     .accessibilityIdentifier("launch-at-login")
                 if let message = model.launchAtLoginMessage {
-                    Text(message).font(.system(size: SettingsTypography.caption)).foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsRowDivider()
+                    noteText(message, tint: .orange).settingsRow()
                 }
-            } header: {
-                sectionHeader("启动")
             }
 
-            Section {
-                ShortcutSettingRow(model: model)
-            } header: {
-                sectionHeader("快捷键")
+            SettingsCard("快捷键") {
+                ShortcutSettingRow(model: model).settingsRow()
             }
 
             // 外观三选一，选了立即生效（`AppearanceController.set` 里直接应用）。
@@ -149,8 +161,8 @@ struct SettingsView: View {
             // 排版参考 macOS 系统设置「外观与语言」页：
             // 左标签「外观」+ 右侧分段选择器（跟随系统 | 浅色 | 深色）一行排布，
             // 不是竖排单选组——三段竖着摆太占地方，也跟系统里同一功能的样子对不上。
-            Section {
-                LabeledContent("外观") {
+            SettingsCard("外观") {
+                SettingsLabeledRow("外观") {
                     Picker("外观", selection: appearanceBinding) {
                         ForEach(AppearanceChoice.allCases) { choice in
                             Text(choice.title).tag(choice)
@@ -158,14 +170,16 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    // 分段控件默认会被拉满整行（行里它是最宽的东西），
+                    // 与左标签之间留出一大片空白——按内容取自然宽度就对了。
+                    .fixedSize()
                     .accessibilityIdentifier("appearance-choice")
                 }
-            } header: {
-                sectionHeader("外观")
+                .settingsRow()
             }
 
-            Section {
-                LabeledContent("完全磁盘访问") {
+            SettingsCard("权限") {
+                SettingsLabeledRow("完全磁盘访问") {
                     HStack(spacing: 8) {
                         Text(FullDiskAccess.isGranted ? "已授权" : "未授权")
                             .foregroundStyle(FullDiskAccess.isGranted ? .secondary : .primary)
@@ -174,20 +188,38 @@ struct SettingsView: View {
                         }
                     }
                 }
-            } header: {
-                sectionHeader("权限")
+                .settingsRow()
             }
 
             // 版本号落在「通用」末尾：用户要报问题时会先来这里找，
             // 不必再去状态栏菜单翻一次「关于」面板。值来自 Core 的
             // `AppVersion`，与「关于」面板同源，不会出现两个说法。
-            Section {
-                LabeledContent("版本") { Text(AppVersion.current) }
-            } header: {
-                sectionHeader("关于")
+            SettingsCard("关于") {
+                SettingsLabeledRow("版本") {
+                    HStack(spacing: 10) {
+                        Text(AppVersion.current).foregroundStyle(.secondary)
+                        Button(UpdateCheckText.button(checking: model.updateChecking)) {
+                            model.checkForUpdates()
+                        }
+                        .disabled(model.updateChecking)
+                        .accessibilityIdentifier("check-for-updates")
+                    }
+                }
+                .settingsRow()
+                if model.updateChecking {
+                    SettingsRowDivider()
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        noteText("正在读取 GitHub 上的最新发布…")
+                        Spacer(minLength: 0)
+                    }
+                    .settingsRow()
+                } else if let outcome = model.updateOutcome {
+                    SettingsRowDivider()
+                    updateResultRow(outcome).settingsRow()
+                }
             }
         }
-        .formStyle(.grouped)
     }
 
     // MARK: - 搜索
@@ -205,8 +237,13 @@ struct SettingsView: View {
     /// 「NAS 输入规则：至少输入 2 个字符」——前三项与来源列表重复，
     /// 最后一项是内部策略（搜索窗里会提示「再输入 1 个字符以搜索网络存储」）。
     private var searchForm: some View {
-        Form {
-            Section {
+        VStack(alignment: .leading, spacing: 22) {
+            // 只有**这样设置会搜不到东西**时才说话（没选文件夹、系统索引关着）。
+            // 正常态的「已启用 Spotlight」「仅搜索已选的 N 个文件夹」不再占这一行：
+            // 上面刚列出来的东西，用户已经亲眼看到了。
+            SettingsCard("本地搜索范围",
+                         footer: model.localSearchAvailabilityMessage.isEmpty
+                            ? nil : model.localSearchAvailabilityMessage) {
                 Picker("本地搜索范围", selection: localScopeBinding) {
                     ForEach(LocalScopeChoice.allCases) { choice in
                         Text(choice.title).tag(choice)
@@ -214,10 +251,14 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
+                // 单选组自己排三行、行距很紧；给上下多留一点，三条选项才不黏在一起。
+                .padding(.vertical, 3)
+                .settingsRow()
                 .accessibilityIdentifier("local-search-scope")
 
                 if localScope == .selectedFolders {
                     ForEach(model.localFolders, id: \.path) { folder in
+                        SettingsRowDivider()
                         HStack {
                             Image(systemName: "folder").foregroundStyle(.secondary)
                             Text(folder.path).lineLimit(1).truncationMode(.middle)
@@ -228,99 +269,57 @@ struct SettingsView: View {
                             .buttonStyle(.borderless)
                             .help("从搜索范围里移除")
                         }
+                        .settingsRow()
                     }
+                    SettingsRowDivider()
                     Button("添加文件夹…") { model.addLocalFolder() }
+                        .settingsRow()
                         .accessibilityIdentifier("local-add-folder")
-                }
-            } header: {
-                sectionHeader("本地搜索范围")
-            } footer: {
-                // 只有**这样设置会搜不到东西**时才说话（没选文件夹、系统索引关着）。
-                // 正常态的「已启用 Spotlight」「仅搜索已选的 N 个文件夹」不再占这一行：
-                // 上面刚列出来的东西，用户已经亲眼看到了。
-                if !model.localSearchAvailabilityMessage.isEmpty {
-                    sectionFooter(model.localSearchAvailabilityMessage)
                 }
             }
 
-            Section {
+            SettingsCard("网络存储") {
                 if model.nasSources.isEmpty {
                     Text("还没有添加网络存储。")
                         .foregroundStyle(.secondary)
+                        .settingsRow()
                 }
                 ForEach(model.nasSources) { source in
                     if let row = model.sourceRow(source.id) {
+                        if source.id != model.nasSources.first?.id { SettingsRowDivider() }
                         sourceRowView(source, row)
                     }
                 }
+                SettingsRowDivider()
                 Button {
                     model.addSource(); openWizard()
                 } label: {
                     Label("添加搜索来源…", systemImage: "plus")
                 }
+                .settingsRow()
                 .accessibilityIdentifier("add-search-source")
-            } header: {
-                sectionHeader("网络存储")
             }
 
             // 总开关被关掉是**异常状态**：下面有来源、却一台都不会被搜索。
             // 按「异常时才出现操作」的原则，只在关着的时候给一个入口。
             // （正常使用时开关由添加来源自动打开，用户不需要看见它。）
             if !model.enabled && !model.nasSources.isEmpty {
-                Section {
-                    Label {
+                SettingsCard("网络存储搜索") {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("NAS 搜索已关闭，下面这些来源不会被搜索。")
+                            Text("已关闭，下面这些来源不会被搜索。")
                             Button("打开 NAS 搜索") { model.enabled = true; model.toggleNetwork() }
                         }
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
+                    .settingsRow()
                 }
             }
-
-            // ── 命令快捷键（位置 / 文件类型 左右并排）──
-            //
-            // `\` 与 `/` 面板都是「手指在键盘上，按数字就走」的入口，所以
-            // 顺序与数字键必须能调：常用位置排在前面、常用类型排在前面，
-            // 才谈得上肌肉记忆。两栏的行都由 Core 算出（`SearchQuickPickRow`），
-            // 这里只把动作接给模型 —— 顺序与编号规则不写在界面里。
-            //
-            // ★ 并排而不是上下两段：两者是「同一个面板的两个页签」，
-            // 并排放才能一眼确认「2 是此 Mac、2 是 word」会不会撞车。
-            QuickPickSettingsSection(columns: [
-                QuickPickColumn(
-                    kind: .location,
-                    title: "搜索位置",
-                    rows: model.quickPickRows(.location),
-                    canReset: model.canResetQuickPick(.location),
-                    onMove: { model.moveQuickPick(.location, from: $0, to: $1) },
-                    onDelete: { model.deleteQuickPick(.location, id: $0) },
-                    onReplace: { model.replaceQuickPick(.location, id: $0, with: $1) },
-                    replacements: { model.quickPickReplacements(.location, id: $0) },
-                    onReset: { model.resetQuickPick(.location) }
-                ),
-                QuickPickColumn(
-                    kind: .fileType,
-                    title: "文件类型",
-                    rows: model.quickPickRows(.fileType),
-                    canReset: model.canResetQuickPick(.fileType),
-                    onMove: { model.moveQuickPick(.fileType, from: $0, to: $1) },
-                    onDelete: { model.deleteQuickPick(.fileType, id: $0) },
-                    onReplace: { model.replaceQuickPick(.fileType, id: $0, with: $1) },
-                    replacements: { model.quickPickReplacements(.fileType, id: $0) },
-                    onReset: { model.resetQuickPick(.fileType) }
-                ),
-            ])
 
             if !model.status.isEmpty {
-                Section {
-                    Text(model.status).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                noteText(model.status).padding(.horizontal, 2)
             }
         }
-        .formStyle(.grouped)
     }
 
     /// 三种选择与 `localEnabled` / `localSearchMode` 的映射住在 Core
@@ -353,9 +352,9 @@ struct SettingsView: View {
     /// 那一页，与 macOS 系统设置里点进某个具体项目的体感一致。
     @ViewBuilder private var searchPane: some View {
         if let id = detailSourceID, let source = model.nasSources.first(where: { $0.id == id }) {
-            sourceDetail(source)
+            sourceDetail(source).transition(.opacity)
         } else {
-            searchForm
+            searchForm.transition(.opacity)
         }
     }
 
@@ -410,14 +409,13 @@ struct SettingsView: View {
                 .help("参与搜索")
                 .accessibilityIdentifier("source-enabled-" + source.id)
         }
-        .padding(.vertical, 5)
+        .settingsRow()
     }
 
     /// 来源详情：名称 / 状态 / 搜索位置 / 账号 / 连接 / 高级 / 移除。
     private func sourceDetail(_ source: NASSourceConfig) -> some View {
-        let status = model.sourceStatus(source.id)
-        return Form {
-            Section {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 12) {
                 Button { detailSourceID = nil } label: {
                     Label("搜索", systemImage: "chevron.left")
                 }
@@ -425,72 +423,56 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("source-detail-back")
 
-                HStack(spacing: 12) {
-                    Image(systemName: source.vendor.symbol)
-                        .font(.system(size: 26)).foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(source.displayName)
-                            .font(.system(size: SettingsTypography.pageTitle, weight: .semibold))
-                        Text(model.sourceRow(source.id)?.detail ?? "")
-                            .font(.system(size: SettingsTypography.body)).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                    // 这里不能加 `.fixedSize()`：macOS 15 的 grouped `Form` 里，
-                    // 带标签的 Toggle 一旦双向固定尺寸，所在 Section 的行高计算
-                    // 会爆炸（每行被撑到几十倍高，整张卡片拉开一大片空白）。
-                    // NSSwitch 本身宽度固定，不需要它；开关的语义说明靠这行标签与
-                    // accessibilityIdentifier 兜底。列表页（sourceRowView）从来没加过。
-                    Toggle("参与搜索", isOn: Binding(get: { source.enabled },
-                                                   set: { model.setSourceEnabled(source.id, $0) }))
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                }
-                .padding(.vertical, 4)
-
-                if !status.message.isEmpty {
-                    Text(status.message).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                // 身份、名字、状态回答的是同一件事——「这是一台什么设备」——
+                // 所以放进同一张卡。拆成两张，名字那一行会孤零零飘在白底上。
+                SettingsCard {
+                    identity(source)
                 }
             }
 
-            Section {
+            SettingsCard("搜索位置") {
                 if source.scopes.isEmpty {
-                    Text("还没有选择搜索位置，这台 NAS 现在搜不到文件。")
+                    Label("还没有选择搜索位置，这台 NAS 现在搜不到文件。", systemImage: "exclamationmark.circle")
                         .foregroundStyle(.orange)
+                        .settingsRow()
                 } else {
-                    ForEach(source.scopes, id: \.self) { scope in
-                        Text(NASSourceRowModel.scopeDisplayName(scope))
+                    ForEach(Array(source.scopes.enumerated()), id: \.element) { index, scope in
+                        if index > 0 { SettingsRowDivider() }
+                        Label(NASSourceRowModel.scopeDisplayName(scope), systemImage: "folder")
+                            .settingsRow()
                     }
                 }
-                Button("修改搜索位置…") { model.editSource(source.id); openWizard() }
-            } header: {
-                sectionHeader("搜索位置")
+                SettingsRowDivider()
+                Button { model.editSource(source.id); openWizard() } label: {
+                    Label("修改搜索位置…", systemImage: "slider.horizontal.3")
+                }
+                .settingsRow()
             }
 
-            Section {
-                LabeledContent("账号") { Text(source.username.isEmpty ? "未填写" : source.username) }
+            SettingsCard("账号") {
+                SettingsLabeledRow("账号") { Text(source.username.isEmpty ? "未填写" : source.username) }
+                    .settingsRow()
+                SettingsRowDivider()
                 Button("重新登录…") { model.reconnectSource(source.id) }
+                    .settingsRow()
                     .accessibilityIdentifier("source-relogin")
-            } header: {
-                sectionHeader("账号")
             }
 
-            Section {
-                LabeledContent("地址") { Text(source.host.isEmpty ? "未填写" : source.host) }
-            } header: {
-                sectionHeader("连接")
+            SettingsCard("连接") {
+                SettingsLabeledRow("地址") { Text(source.host.isEmpty ? "未填写" : source.host) }
+                    .settingsRow()
             }
 
             // 协议 / 端口 / 证书这类实现细节默认折叠——普通用户不需要读到它们。
-            Section {
+            SettingsCard("高级") {
                 DisclosureGroup("协议与证书") {
                     VStack(alignment: .leading, spacing: 6) {
-                        LabeledContent("协议") { Text(source.vendor.title) }
-                        LabeledContent("端口") {
+                        SettingsLabeledRow("协议") { Text(source.vendor.title) }
+                        SettingsLabeledRow("端口") {
                             Text(source.effectivePort > 0 ? "\(source.effectivePort)" : "未检测")
                         }
                         if !source.certificateSHA256.isEmpty {
-                            LabeledContent("证书") {
+                            SettingsLabeledRow("证书") {
                                 Text(String(source.certificateSHA256.prefix(16)) + "…")
                                     .font(.system(.caption, design: .monospaced))
                             }
@@ -504,17 +486,75 @@ struct SettingsView: View {
                     }
                     .font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary).padding(.top, 4)
                 }
+                .settingsRow()
             }
 
-            Section {
-                Button("移除此搜索来源…", role: .destructive) {
-                    model.removeSource(source.id)
-                    detailSourceID = nil
-                }
-                .accessibilityIdentifier("source-detail-remove")
+            // 移除不是一个「设置项」，所以不放进卡片里：它不该看起来和上面那些行一样。
+            Button("移除此搜索来源…", role: .destructive) {
+                model.removeSource(source.id)
+                detailSourceID = nil
             }
+            .padding(.horizontal, 2)
+            .accessibilityIdentifier("source-detail-remove")
         }
-        .formStyle(.grouped)
+    }
+
+    /// 详情页顶部那块：图标 + 名称 + 参与搜索开关，下面接名称输入与状态。
+    @ViewBuilder private func identity(_ source: NASSourceConfig) -> some View {
+        let status = model.sourceStatus(source.id)
+        HStack(spacing: 12) {
+            Image(systemName: source.vendor.symbol)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 44, height: 44)
+                .background(Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.12),
+                            in: RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(source.displayName)
+                    .font(.system(size: SettingsTypography.pageTitle, weight: .semibold))
+                    .lineLimit(1).truncationMode(.middle).help(source.displayName)
+                Text(model.sourceRow(source.id)?.detail ?? "")
+                    .font(.system(size: SettingsTypography.body)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Toggle("参与搜索", isOn: Binding(get: { source.enabled },
+                                           set: { model.setSourceEnabled(source.id, $0) }))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .settingsRow()
+
+        SettingsRowDivider()
+
+        // 「连上以后就没地方改名字」是用户报的障：名称只在添加向导里出现过一次。
+        // 这一行就是那个缺口的补丁——名字是这台设备的属性，详情页理应有。
+        //
+        // ★ 逐键落盘，**不设「保存」按钮**：改名不是一次要确认的提交，
+        //   多一个按钮等于多一个「改了没生效」的疑点。代价只是写一次偏好设置，
+        //   因为名字不参与连接身份（见 `NASSourceWizardController.renameSource`）。
+        // ★ `get` 里**现取**模型，不用闭包捕获的 `source`：后者是这次 body 求值时的
+        //   值拷贝，写入后要等整页重算才更新，中间那一帧会把用户刚敲的字符盖回去。
+        // ★ 用 `TextField(text:prompt:)` 而不是 `TextField("标题", text:)`：
+        //   后者把标题当**标签**渲染，会变成框外右侧的第二个标签
+        //   （截图里就是「名称 [ ] 默认：群晖 Synology」三截）。
+        //   走 prompt 才是框内的灰字占位——留空时它正好显示默认名，
+        //   用户不用被告知「留空会用默认名」就能看见结果。
+        SettingsLabeledRow("名称") {
+            TextField(text: Binding(
+                get: { model.nasSources.first(where: { $0.id == source.id })?.name ?? "" },
+                set: { model.renameSource(source.id, to: $0) }),
+                      prompt: Text(source.vendor.title)) { EmptyView() }
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.leading)
+                .frame(width: 220)
+                .accessibilityIdentifier("source-detail-name")
+        }
+        .settingsRow()
+
+        if !status.message.isEmpty {
+            SettingsRowDivider()
+            noteText(status.message).settingsRow()
+        }
     }
 
     // MARK: - AI
@@ -539,60 +579,55 @@ struct SettingsView: View {
     private var aiForm: some View {
         let history = model.aiHistorySummary
         let integration = model.aiIntegrationPrompt
-        return Form {
-            Section {
-                Toggle("允许 AI 使用闪寻",
-                       isOn: Binding(get: { model.aiAccess.draft.isEnabled },
-                                     set: { model.aiAccess.setEnabled($0) }))
+        return VStack(alignment: .leading, spacing: 22) {
+            SettingsCard("AI 访问") {
+                SettingsSwitchRow("允许 AI 使用闪寻",
+                                  isOn: Binding(get: { model.aiAccess.draft.isEnabled },
+                                                set: { model.aiAccess.setEnabled($0) }))
+                    .settingsRow()
                     .accessibilityIdentifier("ai-access-enabled")
-            } header: {
-                sectionHeader("AI 访问")
             }
 
             // 关着的时候不摆一排灰掉的勾选框：那既点不动，又像是在暗示
             // 「你已经授权了这些」。关着就只留上面那句说明。
             if model.aiAccess.draft.isEnabled {
-                Section {
-                    ForEach(model.aiAccessCandidates) { candidate in
-                        Toggle(candidate.name,
-                               isOn: Binding(get: { model.aiAccess.draft.allowedSources.contains(candidate.id) },
-                                             set: { model.aiAccess.setSource(candidate.id, allowed: $0) }))
+                SettingsCard("允许 AI 搜索的位置") {
+                    ForEach(Array(model.aiAccessCandidates.enumerated()), id: \.element.id) { index, candidate in
+                        if index > 0 { SettingsRowDivider() }
+                        SettingsSwitchRow(candidate.name,
+                                          isOn: Binding(get: { model.aiAccess.draft.allowedSources.contains(candidate.id) },
+                                                        set: { model.aiAccess.setSource(candidate.id, allowed: $0) }))
+                            .settingsRow()
                             .accessibilityIdentifier("ai-access-source-\(candidate.id)")
                     }
-                    if model.aiAccess.draft.allowedSources.isEmpty {
-                        Text("至少选择一个位置才能保存。")
-                            .font(.system(size: SettingsTypography.caption))
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    HStack(spacing: 10) {
-                        Button("保存") {
-                            model.aiAccess.save(existing: model.aiAccessExistingSourceIDs)
+                    SettingsRowDivider()
+                    VStack(alignment: .leading, spacing: 8) {
+                        if model.aiAccess.draft.allowedSources.isEmpty {
+                            noteText("至少选择一个位置才能保存。", tint: .orange)
                         }
-                        .disabled(!model.aiAccess.canSave)
-                        .accessibilityIdentifier("ai-access-save")
-                        Button("撤销修改") { model.aiAccess.discard() }
-                            .disabled(!model.aiAccess.isDirty)
-                            .accessibilityIdentifier("ai-access-revert")
-                        if model.aiAccess.isDirty {
-                            Text("未保存")
-                                .font(.system(size: SettingsTypography.caption))
-                                .foregroundStyle(.secondary)
+                        HStack(spacing: 10) {
+                            Button("保存") {
+                                model.aiAccess.save(existing: model.aiAccessExistingSourceIDs)
+                            }
+                            .disabled(!model.aiAccess.canSave)
+                            .accessibilityIdentifier("ai-access-save")
+                            Button("撤销修改") { model.aiAccess.discard() }
+                                .disabled(!model.aiAccess.isDirty)
+                                .accessibilityIdentifier("ai-access-revert")
+                            if model.aiAccess.isDirty {
+                                noteText("未保存")
+                            }
+                        }
+                        if let message = model.aiAccess.message {
+                            noteText(message, tint: .orange)
                         }
                     }
-                    if let message = model.aiAccess.message {
-                        Text(message)
-                            .font(.system(size: SettingsTypography.caption))
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } header: {
-                    sectionHeader("允许 AI 搜索的位置")
+                    .settingsRow()
                 }
             }
 
-            Section {
-                LabeledContent("状态") {
+            SettingsCard("MCP Helper") {
+                SettingsLabeledRow("状态") {
                     HStack(spacing: 6) {
                         Circle()
                             .fill(model.mcpHelperStatus.isHealthy ? Color.green : Color.secondary)
@@ -600,17 +635,14 @@ struct SettingsView: View {
                         Text(model.mcpHelperStatus.title)
                     }
                 }
+                .settingsRow()
                 .accessibilityIdentifier("ai-helper-status")
                 // 健康时不写解释：那一行「正常运行」已经说完了。
                 // 只有真的没在跑才需要第二行说明发生了什么。
                 if !model.mcpHelperStatus.isHealthy {
-                    Text(model.mcpHelperStatus.detail)
-                        .font(.system(size: SettingsTypography.caption))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsRowDivider()
+                    noteText(model.mcpHelperStatus.detail, tint: .orange).settingsRow()
                 }
-            } header: {
-                sectionHeader("MCP Helper")
             }
 
             // 「怎么接」——这一段是 AI 页里唯一能直接解决用户问题的东西。
@@ -622,7 +654,7 @@ struct SettingsView: View {
             // ★ 正文、按钮、折叠说明全部来自 Core（`MCPIntegrationText`），
             //   这里不写任何字面量：一段要给人复制的话，最怕两处各写一份。
             if model.isAIAccessGranted {
-                Section {
+                SettingsCard(MCPIntegrationText.title) {
                     Text(integration.text)
                         // ★ 用 `body` 而不是 `caption`：这一段是本页**要用户照做**的内容，
                         //   不是备注。用 11pt 会让整页看起来「重点在别处」。
@@ -634,55 +666,51 @@ struct SettingsView: View {
                         .background(Color(nsColor: .textBackgroundColor))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .accessibilityIdentifier("ai-prompt-text")
+                        .settingsRow()
 
+                    SettingsRowDivider()
                     HStack(spacing: 10) {
                         Button(MCPIntegrationText.copyButton) { copyPrompt(integration.text) }
                             .accessibilityIdentifier("ai-prompt-copy")
                         if promptCopied {
-                            Text(MCPIntegrationText.copied)
-                                .font(.system(size: SettingsTypography.caption))
-                                .foregroundStyle(.secondary)
+                            noteText(MCPIntegrationText.copied)
                         }
+                        Spacer(minLength: 0)
                     }
-                } header: {
-                    sectionHeader(MCPIntegrationText.title)
+                    .settingsRow()
                 }
             } else if model.aiAccess.draft.isEnabled {
-                Section {
-                    Text(MCPIntegrationText.saveFirst)
-                        .font(.system(size: SettingsTypography.caption))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("ai-prompt-save-first")
-                }
+                Text(MCPIntegrationText.saveFirst)
+                    .font(.system(size: SettingsTypography.caption))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+                    .accessibilityIdentifier("ai-prompt-save-first")
             }
 
-            Section {
-                LabeledContent("记录") { Text(history.title) }
+            SettingsCard("AI 历史") {
+                SettingsLabeledRow("记录") { Text(history.title) }
+                    .settingsRow()
                     .accessibilityIdentifier("ai-history-title")
                 // 正常态不写「每次成功找到都会记一条，目前 N 条」这类说明。
                 // 只有历史库打不开时才必须说话——那时 recent 会返回空，
                 // 用户看到的「查不到」需要一句解释。
                 if history.isUnavailable {
-                    Text(history.detail)
-                        .font(.system(size: SettingsTypography.caption))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
+                    SettingsRowDivider()
+                    noteText(history.detail, tint: .orange).settingsRow()
                 }
-                Button(AIHistoryText.clearButton) { confirmingHistoryClear = true }
-                    .disabled(!history.canClear)
-                    .accessibilityIdentifier("ai-history-clear")
-                if let historyMessage {
-                    Text(historyMessage)
-                        .font(.system(size: SettingsTypography.caption))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                SettingsRowDivider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(AIHistoryText.clearButton) { confirmingHistoryClear = true }
+                        .disabled(!history.canClear)
+                        .accessibilityIdentifier("ai-history-clear")
+                    if let historyMessage {
+                        noteText(historyMessage)
+                    }
                 }
-            } header: {
-                sectionHeader("AI 历史")
+                .settingsRow()
             }
         }
-        .formStyle(.grouped)
         .alert(AIHistoryText.clearTitle, isPresented: $confirmingHistoryClear) {
             Button("清空", role: .destructive) { clearHistory() }
             Button("取消", role: .cancel) {}
@@ -715,17 +743,21 @@ struct SettingsView: View {
     @State private var diagnosticsShown = false
 
     private var advancedForm: some View {
-        Form {
-            Section {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsCard("诊断") {
                 Button("运行连接诊断…") {
                     model.runConnectionDiagnostics()
                     diagnosticsShown = true
                 }
+                .settingsRow()
                 .accessibilityIdentifier("run-diagnostics")
+                SettingsRowDivider()
                 Button("导出诊断报告…") { model.exportDiagnostics() }
+                    .settingsRow()
 
                 if diagnosticsShown {
                     ForEach(model.nasSources) { source in
+                        SettingsRowDivider()
                         VStack(alignment: .leading, spacing: 4) {
                             Text(source.displayName)
                                 .font(.system(size: SettingsTypography.body, weight: .medium))
@@ -743,28 +775,24 @@ struct SettingsView: View {
                                 }
                             }
                         }
-                        .padding(.vertical, 2)
+                        .settingsRow()
                     }
                 }
-            } header: {
-                sectionHeader("诊断")
             }
 
             // 连接生命周期不交给用户手动管：「重连所有 NAS」「刷新已挂载的 SMB 共享」
             // 这类按钮已收进「运行连接诊断」。
-            Section {
+            SettingsCard("缓存") {
                 Button("清除搜索缓存…") { model.status = "本版搜索不落地缓存，无需清理" }
-            } header: {
-                sectionHeader("缓存")
+                    .settingsRow()
             }
 
-            Section {
-                Toggle("显示实验性搜索来源",
-                       isOn: Binding(get: { model.showExperimentalSources },
-                                     set: { model.setShowExperimentalSources($0) }))
+            SettingsCard("实验性功能") {
+                SettingsSwitchRow("显示实验性搜索来源",
+                                  isOn: Binding(get: { model.showExperimentalSources },
+                                                set: { model.setShowExperimentalSources($0) }))
+                    .settingsRow()
                     .accessibilityIdentifier("experimental-sources")
-            } header: {
-                sectionHeader("实验性功能")
             }
 
             // AI 访问已搬到独立的「AI」页（Phase 9-lite，2026-10-22）：
@@ -772,38 +800,7 @@ struct SettingsView: View {
             // ★ 这里**不要**再放一份入口。两处入口必然分叉——一处改了另一处没改，
             //   用户看到的就是「设置里有两个 AI 开关，说的话还不一样」。
 
-            // 检查更新放在高级页末尾：它不改任何设置，只是「看看有没有新版」。
-            //
-            // 只判断、不自动装：更新包没有 Developer ID 签名与公证，自动替换 App
-            // 这一步在不签名的前提下要么必然失败、要么得关掉验签。所以这里只把
-            // 用户送到发版页，下载与拖动由他自己来，出问题也看得见。
-            Section {
-                LabeledContent("当前版本") {
-                    HStack(spacing: 10) {
-                        Text(AppVersion.current)
-                        Button(UpdateCheckText.button(checking: model.updateChecking)) {
-                            model.checkForUpdates()
-                        }
-                        .disabled(model.updateChecking)
-                        .accessibilityIdentifier("check-for-updates")
-                    }
-                }
-                if model.updateChecking {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("正在读取 GitHub 上的最新发布…")
-                            .font(.system(size: SettingsTypography.caption))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 2)
-                } else if let outcome = model.updateOutcome {
-                    updateResultRow(outcome)
-                }
-            } header: {
-                sectionHeader("更新")
-            }
         }
-        .formStyle(.grouped)
     }
 
     /// 检查结果一行：图标 + 一句话 +（需要时）一个按钮。
@@ -820,7 +817,6 @@ struct SettingsView: View {
                     .controlSize(.small)
             }
         }
-        .padding(.vertical, 2)
     }
 
     private func updateSymbol(_ outcome: UpdateCheck.Outcome) -> String {
@@ -843,12 +839,9 @@ struct SettingsView: View {
 }
 
 private enum SettingsLayout {
-    /// 顶部四段导航的最大宽度。
-    static let navigationMaxWidth: CGFloat = 440
-
     /// 内容区最大宽度。
     ///
-    /// 表单行被拉到 800pt 宽时，标签与控件之间会空出一大片，
+    /// 卡片被拉到 800pt 宽时，标签与控件之间会空出一大片，
     /// 跟系统设置的观感就对不上了。
     static let contentMaxWidth: CGFloat = 560
 }

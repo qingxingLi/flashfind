@@ -26,8 +26,21 @@ extension AppModel {
         guard updateProfile(id, { $0.bindings[source.id] = binding }) else { return }
         updateCompatibility(); invalidate(); changedQuery(); status = "已绑定 " + source.name
     }
+    /// 当前列表里这一行还能不能操作（还在这批结果里、来源与权限也没变）。
     func currentResult(_ result: SearchResult) -> SearchResult? {
-        guard canUseDisplayedResults, let row = results.first(where: { $0.id == result.id }) else { return nil }
+        guard canUseDisplayedResults, results.contains(where: { $0.id == result.id }) else { return nil }
+        return actionableRow(result)
+    }
+
+    /// 钉在桌面上的那一批里的行。
+    ///
+    /// ★ 与 `currentResult` 只差**一条**：不要求它此刻还在 `results` 里。
+    ///   钉住的意义就是「搜索框去搜下一组，这一批留着」，所以「不在当前结果里」
+    ///   是**常态**，不是失效。但来源开关、权限版本、连接状态这些照旧要核——
+    ///   钉住的结果也可能因为断开 NAS 而打不开，那时该说「搜索或权限已变化」。
+    func pinnedResult(_ result: SearchResult) -> SearchResult? { actionableRow(result) }
+
+    private func actionableRow(_ row: SearchResult) -> SearchResult? {
         if let id = row.connectionID {
             guard enabled, let profile = nasConnections.first(where: { $0.id == id }), profile.enabled,
                   profile.cacheProfile == row.accountProfile, let runtime = runtimes[id], !runtime.blocked,
@@ -91,6 +104,18 @@ extension AppModel {
     func quickLook(_ result: SearchResult) { resultActions.quickLook(result) }
     func copyName(_ result: SearchResult) { resultActions.copyName(result) }
     func open(_ result: SearchResult, reveal: Bool = false) { resultActions.open(result, reveal: reveal) }
+
+    // 钉住的窗口用的是**快照**里的行：那一批已经不在 `results` 里了，
+    // 所以解析要走 `pinnedResult`（只核来源与权限，不核「还在不在结果里」）。
+    private var pinnedResolver: (SearchResult) -> SearchResult? {
+        { [weak self] result in self?.pinnedResult(result) }
+    }
+    func openPinned(_ result: SearchResult, reveal: Bool = false) {
+        resultActions.open(result, reveal: reveal, resolve: pinnedResolver)
+    }
+    func quickLookPinned(_ result: SearchResult) { resultActions.quickLook(result, resolve: pinnedResolver) }
+    func copyPinned(_ result: SearchResult) { resultActions.copyPath(result, resolve: pinnedResolver) }
+    func copyPinnedWebLink(_ result: SearchResult) { resultActions.copyWebLink(result, resolve: pinnedResolver) }
     /// 用户主动要求时才请访达发起 SMB 连接；实现在 controller 里，那里有完整说明。
     func connectInFinder(_ smbURL: String) { resultActions.connectInFinder(smbURL) }
     /// 用户在提示条上点「重试」。

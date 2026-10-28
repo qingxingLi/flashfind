@@ -129,6 +129,39 @@ import XCTest
                        "核心按 sourceID 存会话；交接时发 disconnect 会清掉刚建好的会话")
     }
 
+    /// 只改名字：同一条会话必须留着，且名字要立刻生效。
+    ///
+    /// 用户报的是「连上以后没地方改名字」，补上入口之后真正容易踩的是这一步：
+    /// `rebuild` 拿整份 `config == source` 判复用，名字也在里面，于是**改个名字就被
+    /// 当成换了设备** —— disconnect、换一个从未登录的实例，界面立刻显示未连接。
+    /// 所以这里同时盯三件事：实例还是那个、`ready` 没掉、`provider.source` 换了新名。
+    func testRenameKeepsSessionAndUpdatesDisplayName() async throws {
+        let bridge = HandoffBridge()
+        let manager = makeManager(bridge)
+        XCTAssertTrue(manager.ensureBridge(resourceDirectory: try makeResourceDirectory()))
+
+        let source = config(id: "AAAA")
+        manager.rebuild(configs: [source], queryBudgetMs: 60_000, mountService: nil)
+        let loggedIn = try await connectWithNewInstance(manager: manager, config: source)
+        XCTAssertTrue(loggedIn.ready)
+
+        var renamed = source
+        renamed.name = "客厅 NAS"
+        bridge.commands.removeAll()
+        manager.rebuild(configs: [renamed], queryBudgetMs: 60_000, mountService: nil)
+
+        XCTAssertTrue(manager.provider(for: source.id) === loggedIn,
+                      "只改名字却换了实例：等于改个名就掉线，用户还得重新输密码")
+        XCTAssertTrue(manager.provider(for: source.id)?.ready == true,
+                      "改名把 ready 压掉了，设置页会显示未连接")
+        XCTAssertEqual(manager.provider(for: source.id)?.config.name, "客厅 NAS",
+                       "实例持有的配置没有跟着改名，重启前一直显示旧名")
+        XCTAssertEqual(manager.provider(for: source.id)?.source.name, "客厅 NAS",
+                       "结果行的来源徽标读 provider.source，它是构造时的快照，必须一起换")
+        XCTAssertFalse(bridge.commands.contains("disconnect"),
+                       "改名不许向核心发 disconnect：那会把正在用的会话清掉")
+    }
+
     /// 配置真的变了（换主机）才允许换实例 —— 否则旧密码会被发去新地址。
     func testChangedEndpointReplacesProvider() async throws {
         let bridge = HandoffBridge()

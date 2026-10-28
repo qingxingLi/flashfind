@@ -2,11 +2,9 @@ import XCTest
 @testable import FlashFindCore
 
 final class SearchResultNavigationTests: XCTestCase {
-    private func space(_ navigation: SearchResultNavigation, composing: Bool = false,
-                       commandMode: Bool = false) -> SearchKeyRoute {
+    private func space(_ navigation: SearchResultNavigation, composing: Bool = false) -> SearchKeyRoute {
         SearchKeyRouter.route(SearchKeyContext(keyCode: 49, hasCommand: false, hasOtherModifier: false,
-            inSearchField: !navigation.isActive, inResults: navigation.isActive, isComposing: composing,
-            inCommandMode: commandMode))
+            inSearchField: !navigation.isActive, inResults: navigation.isActive, isComposing: composing))
     }
 
     func testTypingSpacesThenNavigatingResultsPreviewsWithoutChangingQuery() {
@@ -30,12 +28,13 @@ final class SearchResultNavigationTests: XCTestCase {
         XCTAssertEqual(space(navigation), .passThrough)
     }
 
-    func testCompositionAndCommandsStillOwnTheirSpaces() {
+    func testCompositionStillOwnsSpaceAndOtherRoutesResetNavigation() {
         var navigation = SearchResultNavigation()
         navigation.record(.move(1), hasResult: true)
         XCTAssertEqual(space(navigation, composing: true), .passThrough)
-        XCTAssertEqual(space(navigation, commandMode: true), .passThrough)
-        navigation.record(.commandSubmit, hasResult: true)
+        // 不是「移动」的任何路由都要把导航状态清掉：否则下次按空格还是预览，
+        // 而用户以为自己已经在打字了。
+        navigation.record(.hide, hasResult: true)
         XCTAssertFalse(navigation.isActive)
     }
 }

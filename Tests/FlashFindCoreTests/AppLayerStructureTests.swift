@@ -22,6 +22,15 @@ final class AppLayerStructureTests: XCTestCase {
                           encoding: .utf8)
     }
 
+    /// 读 Core 源码。用于「App 层必须调用 Core 的某条规则」这类断言——
+    /// 需要同时看两边，才能证明规则真的在 Core 里而不是在 App 里另写了一份。
+    private func coreSource(_ name: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent("Sources/FlashFindCore/\(name)"),
+                          encoding: .utf8)
+    }
+
     private func codeOnly(_ source: String) -> String {
         source.split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
@@ -216,12 +225,34 @@ final class AppLayerStructureTests: XCTestCase {
     /// 真机 bug：浮窗高度是算出来的（`panelHeight`），原来没算提示条，
     /// 于是它被压成一条只露出「无法打开文件」和两个按钮的窄边，正文整段被切掉；
     /// 更糟的是查询清空后提示条还挂在面板上，对着空列表喊「无法打开文件」。
+    ///
+    /// ★ 2026-10-27 改口：搜索窗拆成两个模块后，高度分成了
+    /// `contentModuleHeight`（第二块的内容 = 结果 + 提示条 + 命令面板）与
+    /// `panelHeight`（＝搜索框 + 空白 + 第二块）。原来那条「`panelHeight` 里必须出现
+    /// `openFailureBannerHeight`」会被这次拆分判红——提示条现在算在第一层里。
+    /// 改成锁**两层各缺一不可**：第二块要含提示条，窗口要把第二块整块加上。
     func testOpenFailureBannerOwnsItsHeightAndLeavesWithTheQuery() throws {
-        let view = codeOnly(try appSource("SearchView.swift"))
-        let panel = try XCTUnwrap(braceBlock(after: "private var panelHeight", in: view),
-                                  "找不到 panelHeight")
-        XCTAssertTrue(panel.contains("openFailureBannerHeight"),
-                      "浮窗高度必须算上提示条，否则提示条撑不开、被切成窄边")
+        // ★ 2026-10-28 改口：结果那一块搬进**独立窗口**（`SearchResultsPanel.swift`），
+        //   高度不再由页面做「搜索框 + 空白 + 结果」的加法，而是每块窗口各算各的。
+        //   原来锁的「panelHeight 里要把第二块整块加上」这条已经没有对象了；
+        //   换成锁**同两件事的新落点**：结果窗口的高度里要含提示条，
+        //   两块窗口之间的那道空白仍由 `moduleGap` 决定（现在是**窗口之间**的距离）。
+        let resultsPage = codeOnly(try appSource("SearchResultsPanel.swift"))
+        let content = try XCTUnwrap(braceBlock(after: "private var contentModuleHeight", in: resultsPage),
+                                    "找不到 contentModuleHeight")
+        XCTAssertTrue(content.contains("openFailureBannerHeight"),
+                      "结果模块的高度必须算上提示条，否则提示条撑不开、被切成窄边")
+
+        let sizing = try XCTUnwrap(braceBlock(after: "private var expandedHeight", in: resultsPage),
+                                   "找不到 expandedHeight")
+        XCTAssertFalse(sizing.contains("openFailureBannerHeight"),
+                       "提示条高度不能在两处各加一遍，否则列表与提示条之间会多出一条空白")
+
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        let place = try XCTUnwrap(braceBlock(after: "private func placeResultsBelowField()", in: controller),
+                                  "找不到 placeResultsBelowField")
+        XCTAssertTrue(place.contains("SearchModuleLayout.moduleGap"),
+                      "两块窗口之间那道空白仍由 Core 的 moduleGap 决定（现在是窗口间距）")
 
         let banner = try XCTUnwrap(
             braceBlock(after: "struct OpenFailureBanner", in: codeOnly(try appSource("SearchStateView.swift"))),
@@ -796,22 +827,38 @@ final class AppLayerStructureTests: XCTestCase {
     /// 2. 缩放必须过 Core 的 `BrandGlyphMetrics`——等比换算只有一处，
     ///    免得「状态栏改了、搜索框没跟着改」再来一次。
     ///
-    /// ★ 断言切在 `HStack(spacing: 14)` 的花括号块里：整份文件 `contains` 会被
+    /// ★ 断言切在输入行 `row` 的花括号块里：整份文件 `contains` 会被
     /// 别处的同名调用满足（本项目在 build 12 / build 13 已经栽过两次）。
+    ///
+    /// ★ 2026-10-27 改口两处：① 搜索窗按模块拆文件，输入行搬到
+    /// `SearchFieldModule.swift`；② 切块锚点由 `HStack(spacing: 14)` 换成
+    /// `row` 属性——键位提示那一行用的是同一个 spacing，且出现在前面，
+    /// `braceBlock` 会先把它切走（那样这条断言查的是提示行，必红）。
     func testSearchFieldShowsBrandGlyphNotSystemMagnifier() throws {
-        let field = codeOnly(try appSource("SearchFieldView.swift"))
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
         XCTAssertFalse(field.contains("Image(systemName: \"magnifyingglass\")"),
                        "搜索框前导图标不许再用系统放大镜，要用自家图标")
 
-        guard let row = braceBlock(after: "HStack(spacing: 14)", in: field) else {
-            return XCTFail("搜索框的行容器 HStack(spacing: 14) 必须存在")
+        let row = try body(of: "row", in: field)
+        guard !row.isEmpty else {
+            return XCTFail("搜索框模块必须有输入行：`private var row: some View`")
         }
         XCTAssertTrue(row.contains("StatusIcon.searchFieldGlyph()"),
                       "前导图标必须取品牌字形：\(row)")
         XCTAssertTrue(row.contains("foregroundStyle(.secondary)"),
                       "品牌字形要压到系统搜索框同档灰度，不许用原色黑")
-        XCTAssertTrue(row.contains("accessibilityHidden(true)"),
-                      "装饰性图标对读屏隐藏， TextField 自己有 label")
+        // ★ 2026-10-27 改口：这枚图标从「装饰」变成了**入口**。
+        //
+        // 用户要求「搜索框的闪寻图标设计成可以点击的，点击后进入设置界面」。
+        // 所以它不能再标 `accessibilityHidden(true)`——装饰对读屏隐藏是对的，
+        // 入口按钮必须能被读出来。这里改成锁三件事：是个真按钮、接的是
+        // `openSettings`、名字能被读屏拿到（图标按钮没有文字）。
+        XCTAssertTrue(row.contains("Button(action: openSettings)"),
+                      "闪寻图标必须是个真按钮，接注入的 openSettings：\(row)")
+        XCTAssertTrue(row.contains(".help(") && row.contains(".accessibilityLabel("),
+                      "图标按钮要同时有悬停名字与读屏名字")
+        XCTAssertFalse(row.contains("accessibilityHidden(true)"),
+                       "它现在是入口，不许再对读屏隐藏")
 
         // 换算只允许存在一处（Core），App 层不许自己算 NSSize。
         let app = codeOnly(try appSource("FlashFind2App.swift"))
@@ -870,12 +917,16 @@ final class AppLayerStructureTests: XCTestCase {
     /// 所以要有一个一键重来的入口——但要防的正是本项目最典型的假状态：
     /// **只有定义、没有调用点**（按钮画在那儿，点了什么都不发生）。
     ///
-    /// 断言全部切到 `HStack(spacing: 14)` 花括号块内：那个块里同时住着
+    /// 断言全部切到输入行 `row` 的花括号块内：那个块里同时住着
     /// 品牌字形、清除按钮和更多菜单，整函数 `contains` 会被别的控件满足。
+    ///
+    /// ★ 2026-10-27 改口：文件拆成 `SearchFieldModule.swift`，切块锚点由
+    /// `HStack(spacing: 14)` 换成 `row`（键位提示行用同一个 spacing，会先被切走）。
     func testSearchFieldResearchButtonIsWiredForReal() throws {
-        let field = codeOnly(try appSource("SearchFieldView.swift"))
-        guard let row = braceBlock(after: "HStack(spacing: 14)", in: field) else {
-            return XCTFail("搜索框的行容器 HStack(spacing: 14) 必须存在")
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        let row = try body(of: "row", in: field)
+        guard !row.isEmpty else {
+            return XCTFail("搜索框模块必须有输入行：`private var row: some View`")
         }
         XCTAssertTrue(row.contains("Button(action: research)"),
                       "重新搜索必须是个真按钮，且动作接到注入的 research：\(row)")
@@ -929,6 +980,51 @@ final class AppLayerStructureTests: XCTestCase {
                        "选类型不该再直接铺全部品牌")
         XCTAssertFalse(wizard.contains("supportBadge"),
                        "选项上不该再挂「已验证 / 已接入 · 未验证」这类状态标签")
+    }
+
+    /// ★ 这是一条**三步**的向导，而且步数只能由 Core 出。
+    ///
+    /// 2026-10-28 用户报障：「点击连接后选择搜索位置就结束了，所以这是一个三步的动作，
+    /// 不是你顶部写的四步」。原来的四步是这么数出来的：选来源（第 1 步）→
+    /// 手填地址（第 2 步）→ 连接信息 → 选搜索位置，而其中两步同在一屏上。
+    ///
+    /// 现在「选来源」与「填连接信息」分成两页，页数 = 三步，页码文案走
+    /// `SourceWizardFlow.subtitle(for:)`；视图里再写死一遍就会被这条抓到。
+    func testWizardIsThreePagesAndCountComesFromCore() throws {
+        let wizard = codeOnly(try appSource("NASSourceWizardView.swift"))
+
+        XCTAssertTrue(wizard.contains("SourceWizardFlow.subtitle(for: page)"),
+                      "「第 N 步，共 M 步」必须由 Core 出，视图不许自己拼")
+        for stale in ["共 4 步", "共4步", "共四步"] {
+            XCTAssertFalse(wizard.contains(stale),
+                           "视图里又出现了写死的步数：\(stale)")
+        }
+        XCTAssertTrue(wizard.contains("SourceWizardFlow.enteringPage"),
+                      "打开时落在哪一页要问 Core（新建 / 编辑 / 已连接三种）")
+
+        // 三个页面各有一块，不许再把它们上下堆在同一屏。
+        for name in ["sourcePage", "connectionPage", "scopePage"] {
+            XCTAssertTrue(wizard.contains("var \(name)"),
+                          "缺了 \(name)：向导又回到「一屏堆完」了")
+        }
+
+        // 第 1 步（来源页）里只能有来源入口，不许再挂连接信息。
+        let sourcePage = try XCTUnwrap(braceBlock(after: "var sourcePage", in: wizard),
+                                       "取不到 sourcePage 的块，本条断言失去意义")
+        XCTAssertTrue(sourcePage.contains("typeEntrySection"),
+                      "第 1 步要列出来源")
+        XCTAssertFalse(sourcePage.contains("connectionSection"),
+                       "第 1 步不许再把连接信息挂在下面——那正是「四步」的来源")
+
+        // 点一张来源卡就翻页：这是「翻页」而不是「同屏展开」的判据。
+        let vendorEntry = try XCTUnwrap(braceBlock(after: "func vendorEntry", in: wizard),
+                                        "取不到 vendorEntry 的块")
+        XCTAssertTrue(vendorEntry.contains("go(to: .connection)"),
+                      "选中来源后必须翻到连接信息那一页")
+
+        // 连上之后自动翻到选位置：否则按了「连接」界面看起来毫无变化。
+        XCTAssertTrue(wizard.contains(".onChange(of: model.draftConnected)"),
+                      "连接成功要自动翻页")
     }
 
     /// ★ 连接信息下面不再挂「去浏览器看地址栏」这类说明。
@@ -1004,8 +1100,15 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(wizard.contains("model.draftStatus"),
                       "状态文案仍要显示出来")
 
-        // 两个字段标签按界面要求改了名。
-        XCTAssertTrue(wizard.contains("\"IP/域名\""), "地址栏的标签应为「IP/域名」")
+        // 字段标签**按来源不同**（OpenList 是「站点地址」、群晖是「IP / 域名」），
+        // 所以它不能写死在视图里 —— 2026-10-28 起由 Core 的
+        // `SourceConnectionLabels` 出，视图只负责按当前来源取一份。
+        XCTAssertTrue(wizard.contains("SourceConnectionLabels.forVendor(model.draftSource.vendor)"),
+                      "字段标签必须跟着来源走，不能在视图里写死一套")
+        XCTAssertTrue(wizard.contains("labels.addressLabel"),
+                      "地址栏的标签要取自 Core 那一份")
+        XCTAssertTrue(try coreSource("SourceWizardFlow.swift").contains("\"IP/域名\""),
+                      "群晖那一套标签仍应是「IP/域名」")
         XCTAssertTrue(wizard.contains("\"记住密码\""), "勾选框应为「记住密码」")
     }
 
@@ -1018,11 +1121,20 @@ final class AppLayerStructureTests: XCTestCase {
     }
 
     func testEmptyStateDoesNotSayNASOnly() throws {
-        let view = codeOnly(try appSource("SearchView.swift"))
+        // ★ 2026-10-27：空状态随结果模块搬到 `SearchResultsModule.swift`。
+        let view = codeOnly(try appSource("SearchResultsModule.swift"))
         XCTAssertFalse(view.contains("确认 NAS 的搜索位置"),
                        "空状态提示不该把搜索位置说成只有 NAS 才需要确认")
-        XCTAssertTrue(view.contains("试试更短的关键词"),
-                      "空状态提示要保留「换短关键词」这条可操作建议")
+        // ★★ 同日再改口：文案搬进 Core 了（`SearchEmptyHint`）。
+        //
+        // 原因不是「搬个家」：位置一换，说的就不是同一句话——侧边栏选了
+        // 「公司 nas」时，用户要知道**是这个位置里没有**，还得有「换回全部」
+        // 这条出路。两句话必须能被断言，所以它们在 Core（`SearchSidebarTests`
+        // 逐句锁着），App 层只负责把它们摆上来。
+        XCTAssertTrue(view.contains("SearchEmptyHint.title("),
+                      "标题必须来自 Core，不许在视图里再拼一遍")
+        XCTAssertTrue(view.contains("SearchEmptyHint.detail("),
+                      "正文必须来自 Core —— 它要跟着「当前位置」变")
     }
 
     /// ★ 协议选择**不许再做成开关**。
@@ -1137,21 +1249,475 @@ final class AppLayerStructureTests: XCTestCase {
 
     // MARK: - UI 简化
 
-    /// ★ 设置界面走系统原生的分组表单，一级导航只由 Core 的三页驱动。
+    /// ★ 设置界面的表面走**自绘卡片**，一级导航只由 Core 的四页驱动。
     ///
-    /// 每段自绘的大圆角白卡（`FFSettingsSection`）行高接近 100pt，
-    /// 整体像 NAS 管理器。改用 `Form` + `.formStyle(.grouped)`：行高、分隔线、
-    /// 背景材质都由系统给，天然贴近 macOS。
-    func testSettingsUsesNativeGroupedFormAndThreePanes() throws {
+    /// 2026-10-27 用户改口（上一版正好相反）：浅色不要再是「大片灰白阴影」，
+    /// 要**纯白底**，原来卡片投影的位置换成一个**玻璃遮罩**；深色维持原样。
+    /// 分组表单（`Form` + `.formStyle(.grouped)`）的卡片底色与投影是系统画的，
+    /// 改不动，所以表单整体换成 `SettingsCard`（表面策略在 Core 的
+    /// `SettingsSurface`，浅色/深色两套各由断言钉住）。
+    ///
+    /// 这条同时守住「不许倒退」：`Form` 一旦回来，说明有人又去用系统那套投影了。
+    func testSettingsUsesGlassCardsInsteadOfGroupedForm() throws {
         let settings = codeOnly(try appSource("SettingsView.swift"))
-        XCTAssertTrue(settings.contains(".formStyle(.grouped)"),
-                      "设置页必须用系统分组表单，别再自绘卡片")
-        XCTAssertTrue(settings.contains("SettingsPane.allCases"),
-                      "一级导航的页面集合必须来自 Core 的 SettingsPane")
+        XCTAssertTrue(settings.contains("SettingsCard("),
+                      "设置页的分组要用 SettingsCard（纯白底上的玻璃遮罩）")
+        XCTAssertFalse(settings.contains(".formStyle(.grouped)"),
+                       "分组表单的卡片投影正是这次要去掉的东西，不许退回 Form")
         XCTAssertFalse(settings.contains("FFSettingsSection"),
-                       "设置页不该再用自绘卡片段落")
+                       "设置页不该再用向导那套 FFSettingsSection")
         XCTAssertFalse(settings.contains("NASSourceCard"),
                        "每台 NAS 一张大卡片的写法已撤下")
+
+        // 卡片表面必须在 App 层**只有一处**：四个页面各写一份配色，
+        // 就会出现「通用页是白的、搜索页还是灰的」这种半拉子改动。
+        let chrome = codeOnly(try appSource("SettingsChrome.swift"))
+        XCTAssertTrue(chrome.contains("SettingsCardSurface"),
+                      "卡片表面要收在 SettingsChrome 里")
+        XCTAssertTrue(chrome.contains("SettingsSurface.style(isDark:"),
+                      "浅色/深色两套表面必须问 Core 要，不许在视图里拍脑袋")
+        XCTAssertEqual(settings.components(separatedBy: "SettingsCardSurface()").count - 1, 0,
+                       "设置页只许用 SettingsCard，不要自己拼表面")
+    }
+
+    /// ★ 设置页卡片与搜索模块**同一套玻璃**（2026-10-27 深夜：「设置页 UI 界面跟着搜索这一块走」）。
+    ///
+    /// 守三件事，缺一件用户就会看出来：
+    /// ① 材质同一句 `glassEffect(.regular)`；
+    /// ② 圆角取 `style.cardRadius`（Core 里引用的是 `SearchModuleLayout.moduleRadius`，
+    ///    视图里不许再出现 `cornerRadius: 12` 这种拍脑袋的数字）；
+    /// ③ **`clipShape` 必须在** —— 玻璃自带一圈外阴影，白天正是因为那个灰边
+    ///    才换成材质的；裁掉之后高卡右缘才是纯白（采样 255）。
+    func testSettingsCardUsesTheSameGlassAsTheSearchModules() throws {
+        let chrome = codeOnly(try appSource("SettingsChrome.swift"))
+        guard let surface = braceBlock(after: "struct SettingsCardSurface", in: chrome) else {
+            return XCTFail("缺少 SettingsCardSurface")
+        }
+        XCTAssertTrue(surface.contains("glassEffect(.regular"),
+                      "浅色卡片要用与搜索模块同一套 Liquid Glass")
+        XCTAssertTrue(surface.contains("clipShape"),
+                      "★ 玻璃自带的外阴影必须裁掉，否则卡片边缘发灰")
+        XCTAssertTrue(surface.contains("style.cardRadius"), "圆角取策略里的值，不在视图里另写")
+        XCTAssertFalse(surface.contains("cornerRadius: 12"), "圆角不许在视图里拍脑袋")
+        XCTAssertTrue(chrome.contains("SearchGlass.isAvailable && !reduceTransparency"),
+                      "「降低透明度」打开时不铺真玻璃（与搜索区同一条规矩）")
+    }
+
+    /// ★ 向导的分组底与设置页卡片**同一套形状**：同一圆角、同一句玻璃、同一道描边。
+    ///
+    /// 2026-10-27 深夜用户定「向导一起跟随」。之前向导是 12 圆角、无描边，
+    /// 而设置页是另一套 —— 两个窗口并排看根本不是一套东西。
+    func testWizardSectionFollowsTheSettingsCardShape() throws {
+        let components = codeOnly(try appSource("FFComponents.swift"))
+        guard let section = braceBlock(after: "struct FFSettingsSection", in: components) else {
+            return XCTFail("缺少 FFSettingsSection")
+        }
+        XCTAssertTrue(section.contains("SearchModuleLayout.moduleRadius"),
+                      "向导卡片圆角要跟搜索模块同值（不许再写 12）")
+        XCTAssertTrue(section.contains("glassEffect(.regular"),
+                      "向导卡片与设置页同一句玻璃")
+        XCTAssertTrue(section.contains("clipShape"), "同样要裁掉玻璃自带的外阴影")
+        XCTAssertTrue(section.contains("reduceTransparency"),
+                      "降低透明度时不铺真玻璃")
+        XCTAssertFalse(section.contains("cornerRadius: 12"), "12 圆角已撤掉")
+    }
+
+    /// ★ 搜索框与搜索结果现在是**两块独立窗口**，各自一块完整的玻璃面。
+    ///
+    /// 2026-10-27 用户要求模块化：「搜索框一个文件，搜索结果一个文件，
+    /// 设置一个文件，这样以后可以单独修改某一个而不会影响其他」。
+    /// 2026-10-28 再进一步：「钉住前后的搜索框和搜索结果都应该可以单独移动」——
+    /// 同一窗口里的两块永远一起动，所以两块各自成了 `NSPanel`。
+    ///
+    /// 这条守的是**边界**而不是长相：页面里一旦出现列表/遮罩/表面，就说明
+    /// 「单改一块不影响另一块」已经不成立了。
+    func testSearchFieldAndResultsLiveInTwoSeparateWindows() throws {
+        let page = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(page.contains("SearchFieldModule("), "搜索框那一块要装搜索框模块")
+        XCTAssertFalse(page.contains("SearchResultsModule("),
+                       "★ 结果已经搬进自己的窗口；页面里再排一块就等于又绑回同一个窗口")
+        XCTAssertFalse(page.contains("LazyVStack"), "结果列表属于结果模块，不许写回页面")
+        XCTAssertFalse(page.contains("SearchGlassLens"), "遮罩属于结果模块")
+        XCTAssertFalse(page.contains("searchModuleSurface"),
+                       "模块表面由模块自己画；页面再画一层就又是「一块大玻璃」")
+
+        let resultsPage = codeOnly(try appSource("SearchResultsPanel.swift"))
+        XCTAssertTrue(resultsPage.contains("SearchResultsModule("), "结果那一块要装结果模块")
+        XCTAssertFalse(resultsPage.contains("SearchFieldModule("),
+                       "两块窗口各住各的模块，不许互相装")
+
+        // 两块窗口各自能拖、各自没有表面、各自上沿固定。
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        let resultsController = codeOnly(try appSource("SearchResultsPanel.swift"))
+        for source in [controller, resultsController] {
+            XCTAssertTrue(source.contains("isMovableByWindowBackground = true"),
+                          "两块窗口都要能单独拖（用户：「都应该可以单独移动」）")
+            XCTAssertTrue(source.contains("hasShadow = false"),
+                          "透明窗口的阴影按窗口矩形画，会把圆角糊成方的")
+        }
+        XCTAssertTrue(controller.contains("SearchWindowRegistry"),
+                      "★ 键盘监视器要知道「两块窗口都算搜索区」，否则点过结果之后键盘就死了")
+        XCTAssertTrue(controller.contains("register(field: panel, results: results.panel)"),
+                      "两块窗口是**两个实例**：登记表里必须是两个不同的 panel")
+
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        XCTAssertTrue(field.contains(".searchModuleSurface("), "搜索框自己就是一块完整玻璃面")
+        XCTAssertFalse(field.contains("SearchGlassLens()"),
+                       "★ 不许再在搜索框里套第二层胶囊——那正是「四周还有遮罩」的来源")
+
+        let results = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertTrue(results.contains(".searchModuleSurface("), "结果区是一块独立的模块")
+
+        // 圆角只有一处出处：两个模块都不许自己传 radius。
+        XCTAssertFalse(field.contains("cornerRadius:"), "搜索框不许自己定圆角")
+        XCTAssertFalse(results.contains("cornerRadius:"), "结果模块不许自己定圆角")
+        XCTAssertTrue(codeOnly(try appSource("SearchGlassChrome.swift")).contains("SearchModuleLayout.moduleRadius"),
+                      "模块圆角取自 Core")
+    }
+
+    /// ★★ 点外面收窗：豁免名单只能收**看得见**的窗口（2026-10-28 报障）。
+    ///
+    /// 报障原话：「搜索结果钉住后,关闭搜索结果,搜索框不再点击任意位置关闭」。
+    /// `orderOut` **不清 frame**：结果窗一收起来，那块 680×470 的矩形仍然停在
+    /// 搜索框正下方（钉住窗关掉之后同理），于是「看起来是空桌面」的地方被一个
+    /// 看不见的窗口豁免掉了，用户点哪儿都不收窗。
+    ///
+    /// 判定本身已搬进 Core（`SearchClickOutsideTests` 覆盖），这里守的是
+    /// **接线**：App 层必须把「可见」筛对，并且不许再自己判某一块窗口的 frame。
+    func testClickOutsideIgnoresHiddenWindowsAndDelegatesToCore() throws {
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        let body = try XCTUnwrap(braceBlock(after: "private func dismissIfClickOutside", in: controller),
+                                 "找不到 dismissIfClickOutside")
+        XCTAssertTrue(body.contains("SearchClickOutside.shouldDismiss("),
+                      "判定必须走 Core：App 层再拼一套，两边迟早不一致")
+        XCTAssertTrue(body.contains("$0.isVisible"),
+                      "★ 豁免名单必须逐窗判 isVisible：隐藏窗口的 frame 留在原地不动")
+        XCTAssertTrue(body.contains("$0.canBecomeKey"),
+                      "菜单/提示这类辅助窗口弹出时也「可见」，不许被当成自家窗口")
+        XCTAssertFalse(body.contains("results.panel.frame"),
+                       "★ 结果窗的 frame 不许单独豁免——它收起来之后 frame 不变，"
+                       + "正是这条报障的根因")
+    }
+
+    /// ★★ 结果区的**尺寸与边框**（2026-10-28 用户报障后的两条硬约束）。
+    ///
+    /// 报障原话：
+    /// 1. 「搜索结果的区域大小固定，否则切换的时候侧边栏大小频繁跳动，影响筛选」；
+    /// 2. 「目前动态玻璃效果如果屏幕是纯白背景时显示效果不好……建议增强一下边框的显示效果」。
+    ///
+    /// 两条都是「改回去也能编译、只是变丑」的那种退化，所以各钉一条结构闸：
+    /// 高度只能取 Core 的固定值（且不许再出现结果条数），描边必须画在
+    /// `clipShape` 之后（画在背景里会被白底吃掉，正是报障的形态）。
+    func testResultsPanelIsFixedSizeAndModuleSurfaceCarriesAnEdge() throws {
+        let page = codeOnly(try appSource("SearchResultsPanel.swift"))
+        let expanded = try XCTUnwrap(braceBlock(after: "private var expandedHeight", in: page),
+                                     "找不到 expandedHeight")
+        XCTAssertTrue(expanded.contains("SearchModuleLayout.resultsListHeight"),
+                      "结果区高度只能取 Core 的固定值")
+        XCTAssertFalse(expanded.contains("results.count"),
+                       "★ 高度不许再随结果条数变——那正是切换时侧边栏跳动的原因")
+        XCTAssertFalse(expanded.contains("maximumVisibleRows"),
+                       "连「min(条数, 最多几行)」也不需要了：一屏固定就是这么多行")
+        XCTAssertFalse(page.contains("lastResultsHeight"),
+                       "为「搜索中别缩回去」留的那份高度缓存已经没用了；留着高度又变回变量")
+
+        let layout = codeOnly(try appSource("NativeMaterialView.swift"))
+        XCTAssertTrue(layout.contains("maximumVisibleRows = SearchModuleLayout.resultsVisibleRows"),
+                      "App 侧的「一屏几行」必须引用 Core 的同名常量，不许各存一个数")
+
+        // 描边：必须在 clipShape **之后**，且深浅色都问 Core。
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        guard let surfaceStart = chrome.range(of: "struct SearchModuleSurface") else {
+            return XCTFail("找不到 SearchModuleSurface")
+        }
+        let surface = String(chrome[surfaceStart.lowerBound...])
+        guard let clip = surface.range(of: ".clipShape(shape)"),
+              let edge = surface.range(of: "overlay { edge(shape) }") else {
+            return XCTFail("模块表面必须 clipShape 之后再画描边")
+        }
+        XCTAssertLessThan(clip.lowerBound, edge.lowerBound,
+                          "★ 描边要画在裁剪**之后**：画在背景里会被圆角剪掉，白底上等于没画")
+        XCTAssertTrue(surface.contains("SearchGlassEdge.outer(dark: isDark)"),
+                      "外描边必须按深浅外观取 Core 的值（白底上得是深色线）")
+        XCTAssertTrue(surface.contains("allowsHitTesting(false)"),
+                      "描边是表面的一部分，参与命中测试就又拖不动窗口了")
+        XCTAssertTrue(chrome.contains("init(glassStroke stroke: SearchGlassEdge.Stroke)"),
+                      "Core 的描边取值要有唯一的颜色换算入口")
+    }
+
+    /// ★ 类型条**搬进结果模块顶部**，右边多一枚「钉住」（2026-10-28 用户改口）。
+    ///
+    /// 用户原话：「把文件类型和搜索结果模块放在一起，搜索结果顶部文件类型，
+    /// 侧边文件位置」。上一版它长在搜索框模块下方（用户自己 2026-10-27 定的
+    /// 「此功能为搜索框模块的功能」），这一版整块搬到结果模块。
+    ///
+    /// 锁四件事：**位置**（结果模块第一行，不是搜索框里）、**清单来自 Core**、
+    /// **高度算进结果模块**（少算就会被模块底边裁掉）、**搜索框里不许再留一份**。
+    func testTypeBarLivesAtTheTopOfTheResultsModule() throws {
+        let toolbar = codeOnly(try appSource("SearchResultsToolbar.swift"))
+        XCTAssertTrue(toolbar.contains("SearchTypeBar.entries"),
+                      "★ 类型清单只能来自 Core（`SearchTypeBar`）：各写一份就会「条上有压缩包、别处没有」")
+        XCTAssertTrue(toolbar.contains("SearchTypeBar.selectedID("),
+                      "选中的是哪一段也由 Core 判定")
+        XCTAssertTrue(toolbar.contains("selectType("), "点某一段要回调出去")
+        XCTAssertTrue(toolbar.contains("canPin"), "工具条右侧还有「钉住」")
+
+        let results = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertTrue(results.contains("SearchResultsToolbar("),
+                      "★ 类型条必须长在结果模块里（用户：「搜索结果顶部文件类型」）")
+        let body = try XCTUnwrap(braceBlock(after: "var body: some View {", in: results))
+        guard let toolbarCall = body.range(of: "SearchResultsToolbar(") else {
+            return XCTFail("结果模块的 body 里没有工具条")
+        }
+        guard let sidebarCall = body.range(of: "SearchResultsSidebar(") else {
+            return XCTFail("结果模块的 body 里没有侧边栏")
+        }
+        XCTAssertLessThan(toolbarCall.lowerBound, sidebarCall.lowerBound,
+                          "类型条在**顶部**：它必须排在「侧边栏 + 结果」那一行之前")
+
+        // 搜索框模块里不许再留一份（两处各画一条，改一处就会对不上）。
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        XCTAssertFalse(field.contains("SearchTypeBar"),
+                       "★ 类型条已经从搜索框模块搬走，不许留副本")
+        XCTAssertFalse(field.contains("SearchModuleLayout.typeBarHeight"),
+                       "高度也随之搬走：搜索框模块只剩输入行")
+
+        // 页面算窗口高度时必须把类型条那一截算进**结果模块**。
+        // ★ 2026-10-28：结果搬进独立窗口后，「算高度」这件事跟着搬到
+        //   `SearchResultsPanel.swift`（`contentModuleHeight`）。
+        let page = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(page.contains("SearchFieldModule.height("),
+                      "页面必须调用模块的高度算法，不许各写一份")
+        let resultsPage = codeOnly(try appSource("SearchResultsPanel.swift"))
+        let content = try XCTUnwrap(braceBlock(after: "private var contentModuleHeight", in: resultsPage))
+        XCTAssertTrue(content.contains("SearchModuleLayout.typeBarHeight"),
+                      "★ 类型条高度必须算进结果模块，否则它会被模块底边裁掉一半")
+
+        // 品牌图标仍是入口（这条没变，一起守着）。
+        XCTAssertTrue(field.contains("Button(action: openSettings)"),
+                      "品牌图标必须接 openSettings")
+        XCTAssertTrue(field.contains("let openSettings: () -> Void"),
+                      "打开设置由外部注入：视图不许自己去抓 SettingsWindow")
+        XCTAssertFalse(field.contains("accessibilityHidden(true)"),
+                       "图标是入口，不许对读屏隐藏")
+    }
+
+    /// ★★ 「钉在桌面上」：结果模块能变成一块独立的置顶窗口，⌘W 关掉。
+    ///
+    /// 用户原话（2026-10-28）：「搜索结果默认第一次打开是在搜索框下方，
+    /// 但是可以拖动到任意位置并钉在桌面上，保留此次搜索结果，
+    /// 此时打开搜索框可以继续进行下一组的搜索……关闭时可以用 command+w 的方式关闭，
+    /// 非钉住状态下，和搜索框关闭的逻辑一样」。
+    ///
+    /// 这里锁的是**四件会静默失效的事**：
+    /// 1. 窗口层级必须是 `.floating`（不置顶的话「钉住」等于没钉）；
+    /// 2. `.canJoinAllSpaces`（切桌面就找不到 = 没钉住）；
+    /// 3. ⌘W 有真正的处理器（无标题栏窗口 `performClose` 只会响一声）；
+    /// 4. 快照是**抄下来的行**（盯着 `model.results` 的话，下一组搜索一来内容就变了）。
+    func testPinnedResultsWindowStaysOnTopAndClosesWithCommandW() throws {
+        let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
+        XCTAssertTrue(pinned.contains("panel.level = .floating"),
+                      "钉住必须置顶：用户切到别的 App 之后还要看得见")
+        XCTAssertTrue(pinned.contains(".canJoinAllSpaces"),
+                      "切 Space 时也要跟着，否则「钉住」只在当前桌面成立")
+        XCTAssertTrue(pinned.contains("isMovableByWindowBackground = true"),
+                      "钉住的窗口要能拖（用户：「并且拖动」）")
+        XCTAssertTrue(pinned.contains("charactersIgnoringModifiers?.lowercased() == \"w\""),
+                      "⌘W 必须真的被处理：无标题栏窗口的 performClose 只会响一声")
+        XCTAssertTrue(pinned.contains("close(id)"), "⌘W 要关掉当前那块窗口本身")
+        // ★ 2026-10-28 改口：行的来源从 `ForEach(snapshot.rows)` 变成
+        //   「筛完之后的那一批」（`snapshot.rows(fileType:location:)`），
+        //   但「内容来自快照、不是 model.results」这条不许松。
+        XCTAssertTrue(pinned.contains("snapshot.rows(fileType: fileType, location: location)"),
+                      "窗口内容是**快照**的行（再按两个限定就地筛），不许直接绑 model.results")
+        XCTAssertFalse(pinned.contains("model.results"),
+                       "★ 盯着 model.results 的话，下一组搜索一来这块窗口里的内容就跟着变了")
+
+        // ★ 钉住之后筛选仍要保留，而且能改（2026-10-28 用户追加）。
+        XCTAssertTrue(pinned.contains("SearchResultsToolbar("),
+                      "钉住的窗口顶部要有类型条")
+        XCTAssertTrue(pinned.contains("SearchResultsSidebar("),
+                      "钉住的窗口左侧要有位置侧边栏")
+        XCTAssertTrue(pinned.contains("initialValue: snapshot.fileType"),
+                      "初始选中项 = 钉住那一刻的类型限定，否则一开出来就被重置成「全部」")
+        XCTAssertTrue(pinned.contains("initialValue: snapshot.location"),
+                      "位置同理")
+        // ★★ 2026-10-28 改口（用户报障：「钉住后位置会随机跳一下」「切换时侧边栏跳动」）：
+        //   高度不再是「筛完几行就是几行」——那样窗口会在上屏后被 SwiftUI 再改一次尺寸，
+        //   改尺寸时上沿固定，看起来就是跳。现在高度在开窗时算一次、传进来，之后不动。
+        XCTAssertTrue(pinned.contains("let height: CGFloat"),
+                      "窗口高度由开窗时算一次传进来，视图不许再自己按行数算")
+        XCTAssertFalse(pinned.contains("SearchPanelSizing"),
+                       "★ 钉住窗里不许再有尺寸同步：上屏后改尺寸就是「跳一下」的来源")
+        XCTAssertTrue(pinned.contains("snapshot.rows(fileType: snapshot.fileType"),
+                      "开窗高度要按**首屏真的会显示的那批行**算（先筛再量），否则第一帧就会缩一次")
+
+        // 快照本身在 Core：条数与高度都由同一份数据算。
+        let core = codeOnly(try coreSource("PinnedResults.swift"))
+        XCTAssertTrue(core.contains("public let rows: [SearchResult]"),
+                      "快照要把行抄下来（不是下标、不是引用）")
+        XCTAssertTrue(core.contains("windowHeight(rowCount: Int, rowHeight: CGFloat)"),
+                      "窗口高度必须由快照行数算出来：算不出来就会被切掉最后一行")
+        XCTAssertTrue(core.contains("public let fileType: SearchFileTypeCatalog.FileType?"),
+                      "快照要记住类型限定，否则窗口一开出来就把它抹掉了")
+        XCTAssertTrue(core.contains("public let location: SearchTarget"),
+                      "位置限定同理")
+
+        // 钉住动作：先取快照、再清空搜索会话。
+        // ★ 2026-10-28 起它在 AppModel 里（结果那一块窗口也能触发钉住）。
+        let modelCode = try appModelCode()
+        let pin = try XCTUnwrap(braceBlock(after: "func pinCurrentResults()", in: modelCode))
+        let snapshot = try XCTUnwrap(pin.range(of: "currentPinnedResults()"))
+        let clear = try XCTUnwrap(pin.range(of: "clearSearchSession()"))
+        XCTAssertLessThan(snapshot.lowerBound, clear.lowerBound,
+                          "★ 顺序不能反：先取快照再清空，否则钉出来是一块 0 项的玻璃")
+        XCTAssertTrue(pin.contains("focusFlashFindField"),
+                      "★ 钉完要把键盘交回搜索框：用户是在结果窗里点的图钉，那块窗口马上消失")
+
+        // 钉住的行不在当前结果里了，打开动作必须走快照解析这条路。
+        XCTAssertTrue(modelCode.contains("func openPinned("),
+                      "钉住的行要能打开：解析入口必须是快照版（不要求还在 results 里）")
+    }
+
+    /// ★ 「继续搜索」：200 条只是第一批，状态栏要给一条继续的路。
+    ///
+    /// 用户 2026-10-28：「限制 200 结果后，如对结果不满意，可以选择继续搜索」。
+    ///
+    /// ★ 关键判据是**按钮只在池子里还有东西时出现**：一直显示的话，
+    /// 点到最后一批之后按钮还在，点了没反应——这正是本项目最怕的假状态。
+    func testStatusBarOffersContinueSearchOnlyWhileCandidatesRemain() throws {
+        let bar = codeOnly(try appSource("SearchStateView.swift"))
+        XCTAssertTrue(bar.contains("SearchResultLimit.continueTitle"),
+                      "按钮文案取自 Core，界面不许另写一句")
+        let button = try XCTUnwrap(braceBlock(after: "if canShowMore, let showMore", in: bar))
+        XCTAssertTrue(button.contains("Button(action: showMore)"),
+                      "★ 没有点击动作的按钮等于没做")
+
+        let results = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertTrue(results.contains("model.canShowMoreResults"),
+                      "按钮的可见性必须问模型（池子里还有没有），不许写死 true")
+        XCTAssertTrue(results.contains("model.showMoreResults()"),
+                      "点击要接到模型上那条「再放一批」")
+
+        // 上限与步长都只有 Core 一处出处。
+        let core = codeOnly(try coreSource("SearchResultLimit.swift"))
+        XCTAssertTrue(core.contains("public static let step = perSearch"),
+                      "步长与首批同值，且只在这一处出现")
+        XCTAssertFalse(results.contains("200"),
+                       "界面不许再写死 200：调大调小只改 Core")
+    }
+
+    /// ★★ 模块表面**不许吞掉窗口拖动**（2026-10-28 报障：「闪寻搜索框不能拖动了」）。
+    ///
+    /// 成因：`NSPanel.isMovableByWindowBackground` 会不会真的拖，取决于光标下面
+    /// 那个视图是否允许「窗口背景拖动」。模块化之后两块模块各自铺满整窗，
+    /// 表面是一块 `shape.fill` —— 在 SwiftUI 看来那是**内容**，
+    /// 于是整块面板从「空白可拖」变成「实心不可拖」，一个可抓的位置都不剩。
+    ///
+    /// 修法必须写死在这里：表面**不参与命中测试**。只加回 `shape.fill` 而不带
+    /// 这一句，拖动会再次静默失效（编译过、截图也看不出）。
+    func testModuleSurfaceDoesNotSwallowWindowDrag() throws {
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        let surface = try XCTUnwrap(braceBlock(after: "struct SearchModuleSurface", in: chrome))
+        XCTAssertTrue(surface.contains(".allowsHitTesting(false)"),
+                      "★ 表面必须 allowHitTesting(false)，否则整块面板拖不动")
+        // ★ 必须落在 `.background {` **之后**、`clipShape` **之前**：
+        //   放到 clipShape 后面只是改了内容的命中测试，表面照样把窗口背景吞掉。
+        let background = try XCTUnwrap(surface.range(of: ".background {"))
+        let clip = try XCTUnwrap(surface.range(of: ".clipShape("))
+        let hit = try XCTUnwrap(surface.range(of: ".allowsHitTesting(false)"))
+        XCTAssertLessThan(background.lowerBound, hit.lowerBound,
+                          "命中测试要让在表面（background）上")
+        XCTAssertLessThan(hit.lowerBound, clip.lowerBound,
+                          "★ 表面在 clipShape 之前就铺好了：这一句必须在两者之间")
+
+        let panel = codeOnly(try appSource("SearchPanelController.swift"))
+        XCTAssertTrue(panel.contains("isMovableByWindowBackground = true"),
+                      "面板本身仍要声明「可以拖背景」，两条缺一不可")
+    }
+
+    /// ★ 结果模块里多了一列侧边栏，换位置要有**页面切换动画**（2026-10-27 晚）。
+    ///
+    /// 用户原话：「新增侧边栏功能 从侧边栏可以选择搜索位置 默认是全部 依次往下排列
+    /// 做成抽屉式的感觉 点击切换有页面切换动画 切换后显示该位置的文件 ……
+    /// 侧边栏不要突出搜索框左右宽度 宽度保持一致」。
+    ///
+    /// 四件事在这里锁住：**在结果模块里**、**吃同一份位置候选**、**宽度不撑窗口**、
+    /// **换页真有 transition + 动画**（只有 `.id()` 没有 `transition` 的话，那次切换
+    /// 看起来就是列表原地刷新——这正是「看着像没动画」的典型写法）。
+    func testResultsModuleHasASidebarWithAnimatedPageSwitch() throws {
+        let results = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertTrue(results.contains("SearchResultsSidebar("),
+                      "侧边栏要挂在结果模块里（模块 = 一列侧边栏 + 结果页）")
+        XCTAssertTrue(results.contains("model.sidebarEntries"),
+                      "★ 侧边栏必须吃 AppModel 那份位置候选（与 `\\` 面板同源），不许自己列一遍")
+        XCTAssertTrue(results.contains(".transition(pageTransition)"),
+                      "★ 只有 `.id()` 不叫页面切换：没有 transition 就是原地刷新")
+        XCTAssertTrue(results.contains("pageID"),
+                      "页标识要有一个明确的来源（当前位置），不许另立一份 @State")
+
+        // 侧边栏宽度来自 Core，并且不许把窗口撑宽（它是 HStack 的一列）。
+        let sidebarCode = codeOnly(try appSource("SearchResultsSidebar.swift"))
+        XCTAssertTrue(results.contains("SearchModuleLayout.sidebarWidth") ||
+                      sidebarCode.contains("SearchModuleLayout.sidebarWidth"),
+                      "侧边栏宽度取自 Core（与模块圆角同一个出处）")
+
+        let sidebar = sidebarCode
+        XCTAssertFalse(sidebar.contains("\"全部位置\""),
+                       "侧边栏不许自己写死「全部位置」那一行：条目全部来自 SearchSidebar.entries")
+        XCTAssertTrue(sidebar.contains("matchedGeometryEffect"),
+                      "选中底要会滑动（抽屉感就靠这一口气：瞬移看起来像两个列表）")
+        XCTAssertTrue(sidebar.contains("select("),
+                      "点一行要回调出去，由 AppModel 统一换算成位置限定")
+    }
+
+    /// ★ 搜索结果区用**跟随鼠标的玻璃遮罩**，不是系统的选中蓝 / 悬停灰。
+    ///
+    /// 2026-10-27 用户要求：「搜索结果和搜索框保持一致，均为动态玻璃效果；
+    /// 可以跟随鼠标和移动选择当前的目标，设置一个更加透明的玻璃遮罩替换当前的
+    /// 灰色背景和蓝色背景；遮罩移动时能够在边缘位置明显看到字体逐渐放大和缩小的效果；
+    /// 根据 mac 15 以下系统保持原方案不变。」
+    ///
+    /// 结构上必须成立的三件事，少一件效果就没了：
+    /// 1. 结果列表**不是 `List`**——`List` 的选中底色是系统画的，改不成玻璃，
+    ///    也拿不到「遮罩滑到哪」的时机；
+    /// 2. 遮罩是列表里**一个**共用视图（`SearchGlassLens`），不是每行自己画一层；
+    /// 3. 缩放走 Core 的 `SearchLens` 曲线（`searchLensMagnification`），
+    ///    不许在视图里写 `scaleEffect(1.05)`——那样「边缘变小」这一档永远没有。
+    func testSearchResultsUseASlidingGlassLensInsteadOfListSelection() throws {
+        let results = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertFalse(results.contains("List(visibleResults, selection:"),
+                       "★ 结果列表不许再用 List：系统选中蓝与「改不成玻璃」是同一条根因")
+        XCTAssertTrue(results.contains("LazyVStack"),
+                      "结果区改用 LazyVStack（行高固定，第 N 行 = N × 行高）")
+        XCTAssertTrue(results.contains("SearchGlassLens()"),
+                      "遮罩必须是那一块共用的玻璃")
+        XCTAssertTrue(results.contains("lensPosition:"),
+                      "列表要把遮罩位置传给每一行（缩放由行内的文字块算）")
+
+        let page = codeOnly(try appSource("SearchView.swift"))
+        XCTAssertTrue(page.contains("SearchGlass.style(reduceTransparency:"),
+                      "玻璃 / 老方案的判定只能问 Core")
+        XCTAssertTrue(page.contains("@Environment(\\.accessibilityReduceTransparency)"),
+                      "★ 辅助功能「降低透明度」必须参与判定，否则玻璃会绕过无障碍设置")
+
+        // 行把「离遮罩多远」接过去，缩放只作用在文字块上（整行放大 5.5% 会把行尾标签顶出可视区）。
+        let row = codeOnly(try appSource("SearchResultRow.swift"))
+        XCTAssertTrue(row.contains("lensPosition"), "行要知道遮罩在哪，才能算自己的缩放")
+        XCTAssertTrue(row.contains("searchLensMagnification("),
+                      "缩放挂在文字块上，不是整行")
+
+        // 老方案的两片底色必须是系统常量：自绘之后若写成死颜色，
+        // 浅色/深色两套外观与「选中时字转白」都会跟系统对不上。
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        XCTAssertTrue(chrome.contains(".selectedContentBackgroundColor"),
+                      "老方案的选中蓝要用系统色")
+        XCTAssertTrue(chrome.contains(".quaternaryLabelColor"),
+                      "老方案的悬停灰要用系统色")
+        XCTAssertTrue(chrome.contains("#available(macOS 26.0, *)"),
+                      "玻璃调用必须有运行期门")
+        XCTAssertTrue(chrome.contains("#if compiler(>=6.2)"),
+                      "玻璃调用必须有编译期门（旧工具链要编得过）")
     }
 
     /// ★ 「搜索来源」并入「搜索」后，视图里不许再有它的一级页面分支。
@@ -1171,34 +1737,48 @@ final class AppLayerStructureTests: XCTestCase {
                       "搜索页需要承载「列表 / 来源详情」两种形态")
     }
 
-    /// ★ 三页的导航是顶部原生分段控件，不再是一条常驻侧栏。
+    /// ★ 一级导航是顶部**玻璃分段控件**：间距拉开、选中块会滑过去。
     ///
-    /// 三页配一条 `NavigationSplitView` 侧栏：窗口拉高时左栏留下大片空白，
-    /// 还白占 170–230pt 的宽度。这里锁的是**新形态**：
-    /// 页面集合仍唯一来自 Core（不写死在视图里）、每一段仍挂无障碍标识
-    ///（键盘与 VoiceOver 靠它定位）、侧栏那一套（selection / 侧栏样式 /
-    /// 列宽 / `tag`）全部撤干净。
-    func testTopLevelNavigationUsesANativeSegmentedControl() throws {
+    /// 2026-10-27 用户要求：「间距拉开，切换页面出现动态玻璃的切换效果」。
+    /// 系统 `Picker(.segmented)` 给不了滑动的选中块（换页就是硬切），
+    /// 所以导航自绘成 `SettingsPanePicker`。锁住的是四条底线：
+    /// 1. 页面集合仍唯一来自 Core（`SettingsPane.allCases`，不许写死四个字符串）；
+    /// 2. 每一段仍挂 `settings-nav-` 标识，键盘与 VoiceOver 靠它定位；
+    /// 3. 选中块靠 `matchedGeometryEffect` **滑**过去，并且服从「减少动态效果」；
+    /// 4. 旧的侧栏那一套（split view / 侧栏样式 / 列宽 / `List(selection:)`）不许回来。
+    func testTopLevelNavigationIsASlidingGlassPicker() throws {
         let settings = codeOnly(try appSource("SettingsView.swift"))
-        XCTAssertTrue(settings.contains("Picker(\"设置页面\", selection: $pane)"),
-                      "一级导航要是一个带标签的 Picker（标签供 VoiceOver 读出用途）")
-        XCTAssertTrue(settings.contains("ForEach(SettingsPane.allCases) { item in"),
-                      "三页必须由 Core 的 SettingsPane 遍历出来，不许在视图里另写一份")
-        XCTAssertTrue(settings.contains("settings-nav-"),
-                      "每一段都要挂 settings-nav- 标识，键盘导航与 VoiceOver 靠它定位")
+        XCTAssertTrue(settings.contains("SettingsPanePicker(selection: $pane)"),
+                      "一级导航要用 SettingsPanePicker（玻璃分段控件）")
         for gone in ["NavigationSplitView", ".listStyle(.sidebar)",
                      "navigationSplitViewColumnWidth", "List(selection: $pane)"] {
             XCTAssertFalse(settings.contains(gone),
                            "侧栏的 \(gone) 已随导航收敛撤掉")
         }
 
-        guard let picker = braceBlock(after: "private var panePicker: some View", in: settings) else {
-            return XCTFail("缺少一级导航的 panePicker")
+        let chrome = codeOnly(try appSource("SettingsChrome.swift"))
+        guard let picker = braceBlock(after: "struct SettingsPanePicker", in: chrome) else {
+            return XCTFail("缺少一级导航的 SettingsPanePicker")
         }
-        XCTAssertTrue(picker.contains(".pickerStyle(.segmented)"),
-                      "一级导航要用系统分段控件，不要自绘一排按钮")
+        XCTAssertTrue(picker.contains("ForEach(SettingsPane.allCases) { item in"),
+                      "四页必须由 Core 的 SettingsPane 遍历出来，不许在视图里另写一份")
+        XCTAssertTrue(picker.contains("settings-nav-"),
+                      "每一段都要挂 settings-nav- 标识，键盘导航与 VoiceOver 靠它定位")
+        XCTAssertTrue(picker.contains(".accessibilityLabel(\"设置页面\")"),
+                      "控件的用途对 VoiceOver 要说得出来（原来靠 Picker 的标签）")
+        XCTAssertTrue(picker.contains(".accessibilityAddTraits(isSelected ? [.isSelected] : [])"),
+                      "选中态要作为无障碍状态播报，不能只靠颜色")
+        XCTAssertTrue(picker.contains("matchedGeometryEffect"),
+                      "★ 选中块要**滑**过去：同一块玻璃在四段之间移动，这才是「动态玻璃」")
+        XCTAssertTrue(picker.contains("glassEffect"),
+                      "选中块要是玻璃，不是一块白底方块")
+        XCTAssertTrue(picker.contains("accessibilityReduceMotion"),
+                      "「减少动态效果」打开时不许还滑：这一档系统设置里也是直接落位")
         XCTAssertFalse(picker.contains("Image(systemName:"),
-                       "三页的页名自带解释，分段上不必再摆图标")
+                      "四页的页名自带解释，分段上不必再摆图标")
+        // 「间距拉开」：段本身要有左右留白，否则还是系统控件那种挤在一起的样子。
+        XCTAssertTrue(picker.contains(".padding(.horizontal, 26)"),
+                      "段与段之间要拉开：每一段自己带 26pt 左右留白")
     }
 
     /// ★ 宽度跟着导航一起收窄：内容区限宽居中，窗口不再为侧栏留位置。
@@ -1248,8 +1828,8 @@ final class AppLayerStructureTests: XCTestCase {
                       "搜索页要列出已有来源")
         XCTAssertTrue(settings.contains("add-search-source"),
                       "「添加搜索来源」入口要跟着一起进来")
-        // 标题文字改走 `sectionHeader(...)`（字号阶梯），分段本身没变。
-        XCTAssertTrue(settings.contains("sectionHeader(\"网络存储\")"),
+        // 标题文字由 `SettingsCard` 统一给出（字号来自 Core 的字号阶梯），分段本身没变。
+        XCTAssertTrue(settings.contains("SettingsCard(\"网络存储\")"),
                       "来源列表在搜索页里用一个「网络存储」分段")
         // 原「搜索来源」页开头那行「此 Mac」与上面的「本地搜索范围」是同一件事，
         // 合并后必须去掉，否则摆两遍只会让人怀疑它们不一致。
@@ -1499,41 +2079,54 @@ final class AppLayerStructureTests: XCTestCase {
 
     // MARK: - `/` 命令面板与位置限定
 
-    /// ★ 命令模式下**不得**发起真实搜索。
+    /// ★★ 「输入命令」整套删掉之后的守卫（2026-10-28 用户报障）。
     ///
-    /// 那时的文本是「指令」不是关键词。把它当关键词发给设备，
-    /// 设备会去搜一个叫「照片」的东西 —— 白白占一次设备侧检索，
-    /// 而且用户看到的结果完全莫名其妙。
+    /// 用户原话：「输入命令的功能取消了 但是下拉框还在」。实际发生的是：
+    /// 蓝色标签删掉了，但 `\` / `/` 仍然会解析成命令模式、仍然会弹面板——
+    /// 界面上于是只剩一个**没有来由**的下拉框。
     ///
-    /// 这条判在 App 层（`changedQuery` 里短路），所以只能靠源码结构断言。
-    func testCommandModeShortCircuitsRealSearch() throws {
+    /// 这条是**反向守卫**：断言「整套东西都不在了」，因为把任何一处加回来，
+    /// 用户看到的下拉框就会再出现一次，而别的断言全都还是绿的。
+    /// 判据是**文件与符号都不存在**，不是「某处没调用」——
+    /// 后者太容易靠改一个 if 就绕过去。
+    func testCommandInputAndItsPaletteAreGoneEntirely() throws {
+        // 1. 面板视图文件必须已经删掉。
+        let pkgRoot = URL(fileURLWithPath: (#filePath as NSString).deletingLastPathComponent)
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let appDir = pkgRoot.appendingPathComponent("Sources/FlashFind2App")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: appDir.appendingPathComponent("SearchCommandPaletteView.swift").path),
+                       "命令面板视图必须删掉，否则它还会被某处引用回来")
+
+        // 2. App 层不许再有命令模式的状态、判定或视图调用。
+        for file in ["AppModel+SearchCommand.swift", "AppModel+SearchView.swift",
+                     "SearchView.swift", "SearchResultsModule.swift", "SearchKeyboardScope.swift"] {
+            guard let code = try? codeOnly(appSource(file)) else { continue }
+            for forbidden in ["SearchCommandPaletteView", "isCommandModeActive",
+                              "SearchCommandParser", "commandSelection",
+                              "commandKeyboardNavigationRevision"] {
+                XCTAssertFalse(code.contains(forbidden),
+                               "\(file) 里还留着命令模式的痕迹：\(forbidden)")
+            }
+        }
+
+        // 3. Core 侧：解析器与键盘路由的命令分支也一并删掉。
+        let catalog = codeOnly(try coreSource("SearchCommandCatalog.swift"))
+        XCTAssertFalse(catalog.contains("SearchCommandParser"),
+                       "命令前缀的解析器必须删掉：留着它就随时能被重新接上界面")
+        let router = codeOnly(try coreSource("SearchKeyRouter.swift"))
+        XCTAssertFalse(router.contains("inCommandMode"),
+                       "键盘路由不许再有命令模式这个上下文")
+        XCTAssertFalse(router.contains(".commandSubmit"),
+                       "键盘路由不许再有「执行命令」这条分支")
+
+        // 4. `changedQuery` 不再为命令模式短路：输入就是关键词。
         let code = try appModelCode()
         guard let body = braceBlock(after: "func changedQuery()", in: code) else {
             return XCTFail("找不到 changedQuery")
         }
-        XCTAssertTrue(body.contains("isCommandModeActive"),
-                      "命令模式必须在 changedQuery 里被识别并短路")
-        // ★ 短路必须**真的会发生**：`if isCommandModeActive && false` 这种
-        // 「写了但永远不成立」的写法，contains 查不出来 —— 上一轮的反向变异
-        // 正是这么溜过去的。所以这里要求 if 的条件里没有 `&& false` 之类的
-        // 短路掉整个判定的写法。
-        guard let shortCircuit = body.range(of: "isCommandModeActive") else {
-            return XCTFail("changedQuery 里没有命令模式判定")
-        }
-        let condition = String(body[shortCircuit.lowerBound...])
-        XCTAssertFalse(condition.contains("&& false"),
-                       "命令模式的判定被短路掉了（写法如 `&& false`）")
-        XCTAssertFalse(condition.contains("|| true"),
-                       "命令模式的判定被短路掉了（写法如 `|| true`）")
-        // 短路必须发生在**调用搜索之前**：短路点之后不该再出现
-        // searchDebounced 之前的搜索调用。
-        let after = String(body[shortCircuit.upperBound...])
-        guard let search = after.range(of: "searchDebounced") else {
-            return XCTFail("changedQuery 里没有搜索调用")
-        }
-        let between = String(after[..<search.lowerBound])
-        XCTAssertTrue(between.contains("return"),
-                      "命令模式的 return 必须发生在 searchDebounced 之前")
+        XCTAssertFalse(body.contains("isCommandModeActive"),
+                       "输入 `/` 或 `\\` 现在就是普通关键词，不许再短路搜索")
     }
 
     /// ★ 位置限定必须真的进到请求计划里，并一路带到协调器。
@@ -1559,145 +2152,31 @@ final class AppLayerStructureTests: XCTestCase {
                       "下发的一定是拼好的文本，不能是输入框原文")
     }
 
-    /// 命令面板的候选必须来自 Core 的目录，不许在 App 层自己拼。
-    func testCommandCandidatesComeFromCoreCatalog() throws {
-        let code = try appSource("AppModel+SearchCommand.swift")
-        XCTAssertTrue(code.contains("SearchCommandCatalog.items"),
-                      "候选列表必须由 Core 的命令目录构建")
-        XCTAssertTrue(code.contains("SearchCommandCatalog.filter"),
-                      "筛选必须由 Core 的命令目录做")
-        XCTAssertTrue(code.contains("SearchCommandParser.parse"),
-                      "命令模式判定必须用 Core 的解析器")
-        // App 层不许自己写「哪些位置可选」的判定。
-        XCTAssertFalse(code.contains("provider?.ready == true") && code.contains("roots: config.scopes.filter"),
-                       "App 层不许自己筛位置")
-    }
-
-    /// ★ 新 UI 不写提示备注：命令面板里不许出现解释性文字。
-    func testCommandPaletteCarriesNoExplanatoryText() throws {
-        // ★ 判的是**界面上的文字**，所以注释必须先剥掉 ——
-        // 否则「多写一句……就是噪音」这种注释里的字会被当成界面文案，
-        // 断言就成了一直红的假红。
-        let code = codeOnly(try appSource("SearchCommandPaletteView.swift"))
-        // 「没有匹配的位置」是**状态**（筛不出候选），不是说明文字，允许。
-        for forbidden in ["更快", "减少", "检索时间", "点击", "选择位置后", "快捷键", "↑", "↓"] {
-            XCTAssertFalse(code.contains(forbidden),
-                           "命令面板不许出现解释性文字：\(forbidden)")
+    /// ★ 输入行里**不许再有**那排蓝色限定标签（2026-10-27 用户决定删掉）。
+    ///
+    /// 历史：这排标签是 `\` / `/` 命令设下的限定的可视化（1.1.16 起，用户当时
+    /// 要求「用蓝色字体更小一号把选择的内容放置在最前边」，摆在关键词后面
+    /// 会被看成关键词的一部分）。到这一版，位置有了左侧边栏、类型有了下方
+    /// 类型条 —— 同一件事的第三个入口，还白占输入框宽度，用户遂定「可以删除」。
+    ///
+    /// ★ 这是**反向守卫**：断言「不出现」比断言「出现」更需要守住 ——
+    /// 有人把标签加回来时，界面上会多出第三份重复的限定展示（卡片、侧边栏、
+    /// 类型条已经各有一份），而其它断言全都还是绿的。
+    /// 限定的**状态**仍在（`tokenBar`），只是不再在输入行里画出来。
+    func testSearchFieldCarriesNoTokenChips() throws {
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        for forbidden in ["tokenStrip", "deleteToken", "Color.accentColor", "SearchTokenBar"] {
+            XCTAssertFalse(field.contains(forbidden),
+                           "搜索框不许再画蓝色限定标签：\(forbidden)")
         }
-    }
+        // 输入行里只剩「图标 + 输入框 + 清除 + 重搜」，限定不再是其中一员。
+        let rowCode = try body(of: "row", in: field)
+        XCTAssertFalse(rowCode.contains("tokens"), "输入行不许再接收限定列表")
+        XCTAssertTrue(rowCode.contains("TextField("), "输入行本体必须还在")
 
-    /// ★ 已选定的限定必须显示在搜索框里，而且是**关键词前面**的蓝色小字。
-    ///
-    /// 用户的要求原话：「用蓝色字体更小一号把选择的内容放置在最前边」。
-    /// 摆在关键词后面会被看成关键词的一部分。
-    func testSearchFieldShowsTokensBeforeKeyword() throws {
-        let field = codeOnly(try appSource("SearchFieldView.swift"))
-        XCTAssertTrue(field.contains("tokens"), "搜索框必须显示已选定的限定")
-        XCTAssertTrue(field.contains("deleteToken"), "限定必须能删掉")
-        XCTAssertTrue(field.contains("Color.accentColor"), "限定要用强调色（蓝）与关键词区分")
-        // ★ 顺序：token 必须在 TextField 之前，**且要在 body 内部比**。
-        //
-        // ⚠️ 别在整份源码里找第一个 `tokenStrip`：属性定义也在源码里，
-        // 它写在 body 之前，于是「token 在前」永远成立 —— 断言成了恒真的聋子
-        // （变异试过：真把 token 挪到输入框后面，这条照样全绿）。
-        guard let body = braceBlock(after: "var body", in: field),
-              let tokenRange = body.range(of: "tokenStrip"),
-              let fieldRange = body.range(of: "TextField(") else {
-            return XCTFail("搜索框 body 里找不到限定条或输入框")
-        }
-        XCTAssertTrue(tokenRange.lowerBound < fieldRange.lowerBound,
-                      "限定必须放在输入框（关键词）前面")
-        // 字号要比正文（22）小一号。
-        XCTAssertTrue(field.contains("size: 15"), "限定的字号要比关键词小")
-    }
-
-    /// ★ 两个面板都必须画满十条（数字 1–9 + 0），而且**不许把多出来的候选截断**。
-    ///
-    /// 数字能按到哪，就得显示到哪：按 7 / 8 / 9 / 0 选中的必须是屏幕上那一条。
-    /// 2026-10-26 真实报障：OpenList 勾了 A0001–A0004 四个文件夹，`\` 面板
-    /// 只画出第一行 —— 行数上限写死 6，`prefix(maximumVisible)` 把剩下的裁掉了。
-    func testCommandPaletteDrawsEveryNumberedRow() throws {
-        let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
-        let limit = try XCTUnwrap(braceBlock(after: "var commandMaximumVisible:", in: model))
-        XCTAssertTrue(limit.contains("SearchCommandCatalog.maximumVisibleRows"),
-                      "行数上限必须来自 Core（1–9 加 0 推出来的十条），不许在 App 层另写一个数")
-        XCTAssertFalse(limit.contains("? 10 : 6"),
-                       "位置面板不许再压到六条：那会让数字 7/8/9 指向屏幕外的位置")
-
-        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
-        XCTAssertFalse(palette.contains("prefix(maximumVisible)"),
-                       "候选不许按行数上限截断：被裁掉的搜索根既看不见也点不到")
-        XCTAssertTrue(palette.contains("ScrollView(.vertical"),
-                      "超过一屏要能滚动，而不是只画前十行")
-        XCTAssertTrue(palette.contains("proxy.scrollTo("),
-                      "上下键翻到屏幕外的候选时，必须把它滚进可视区")
-        XCTAssertTrue(palette.contains(".frame(height: CGFloat(maximumVisible) * rowHeight)"),
-                      "滚动区的固定高度必须与浮窗高度用同一个上限，否则面板被切掉一截")
-    }
-
-    func testCommandPaletteHoverDoesNotRequestScrolling() throws {
-        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
-        XCTAssertFalse(palette.contains(".onChange(of: selection)"),
-                       "滚轮会改变指针下的高亮项，监听高亮自动居中会把滚动拉回去")
-        XCTAssertTrue(palette.contains(".onChange(of: keyboardNavigationRevision)"))
-
-        let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
-        let keyboard = try XCTUnwrap(braceBlock(after: "func moveCommandSelection(", in: model))
-        let hover = try XCTUnwrap(braceBlock(after: "func hoverCommand(", in: model))
-        XCTAssertTrue(keyboard.contains("commandKeyboardNavigationRevision &+= 1"))
-        XCTAssertFalse(hover.contains("commandKeyboardNavigationRevision"),
-                       "悬停只更新高亮，不能发送自动定位请求")
-        let view = codeOnly(try appSource("SearchView.swift"))
-        XCTAssertTrue(view.contains("keyboardNavigationRevision: model.commandKeyboardNavigationRevision"))
-    }
-
-    /// ★ 面板的行必须能用**鼠标点**（2026-10-27 用户要求：不只有按键一条路）。
-    ///
-    /// 面板不是 `List`／`NSTableView`，没有原生点击行为 —— 不显式挂
-    /// `onTapGesture`，习惯用鼠标的用户在这个面板里一条都选不了。
-    /// 悬停也要选中：点之前得先看清会点中哪一条。
-    func testCommandPaletteRowsCanBePickedWithTheMouse() throws {
-        let palette = codeOnly(try appSource("SearchCommandPaletteView.swift"))
-        XCTAssertTrue(palette.contains(".onTapGesture { onPick(index) }"),
-                      "★ 没有点击手势，这个面板对鼠标用户就是死的")
-        XCTAssertTrue(palette.contains(".onHover { inside in"),
-                      "鼠标移上来要选中（高亮），否则点之前不知道会点中谁")
-        XCTAssertTrue(palette.contains("let onPick: (Int) -> Void"))
-        XCTAssertTrue(palette.contains("let onHover: (Int) -> Void"))
-
-        let view = codeOnly(try appSource("SearchView.swift"))
-        XCTAssertTrue(view.contains("onPick: { index in"), "面板的点击必须接到模型")
-        XCTAssertTrue(view.contains("model.pickCommand(at: index)"),
-                      "★ 点击与数字键要走同一条执行路径：各写一份迟早只改一边")
-        XCTAssertTrue(view.contains("model.hoverCommand(at: $0)"),
-                      "悬停也要接到模型：选中状态只有一份")
-        // ★ 判在 `commandPalette` 的块里：整份文件还有两处 `focused = true`
-        //   （显示面板、收到通知），拿全文查的话「点完不还焦点」这条断言是聋的。
-        let paletteCall = try body(of: "commandPalette", in: view)
-        XCTAssertTrue(paletteCall.contains("focused = true"),
-                      "点完要把焦点还给输入框，否则选完位置还得再点一次才能接着打字")
-    }
-
-    /// ★ 浮窗高度必须按面板**实际显示的行数**算，不能写死 6。
-    ///
-    /// 两者一旦不同步，面板就会被浮窗底边切掉一截。
-    func testPaletteHeightUsesSameRowLimit() throws {
-        let code = codeOnly(try appSource("SearchView.swift"))
-        XCTAssertTrue(code.contains("model.commandMaximumVisible"),
-                      "浮窗高度与面板显示行数必须共用同一个上限")
-        XCTAssertFalse(code.contains("filteredCommandItems.count, 6"),
-                       "行数上限不许写死，否则与面板实际行数脱节")
-    }
-
-    func testCommandPaletteDoesNotReserveHiddenResultSpaceOrShowSearchProgress() throws {
-        let source = codeOnly(try appSource("SearchView.swift"))
-        let results = try XCTUnwrap(braceBlock(after: "private var expandedHeight:", in: source))
-        XCTAssertTrue(results.contains("guard hasQuery, !model.isCommandModeActive else { return 0 }"),
-                      "命令菜单显示时没有结果区，不能再加空结果或上一轮结果的高度")
-        let pending = try XCTUnwrap(braceBlock(after: "private var pending:", in: source))
-        XCTAssertTrue(pending.contains("!model.isCommandModeActive"), "命令模式并没有发起真实搜索")
-        let palette = try XCTUnwrap(braceBlock(after: "private var commandPaletteHeight:", in: source))
-        XCTAssertTrue(palette.contains("max(1,"), "无匹配选项也会渲染一行，必须为该行留出高度")
+        // 只删视图、把参数留成没人用的死参数，同样是残留。
+        XCTAssertFalse(field.contains("let tokens:"), "不许留下没人用的 tokens 参数")
+        XCTAssertFalse(field.contains("let deleteToken:"), "不许留下没人用的 deleteToken 参数")
     }
 
     func testPermissionReturnRestoresPresentedPreferencesWithoutRebuildingDraft() throws {
@@ -1735,33 +2214,29 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(code.contains("tokenBar.clear("), "删除必须走 Core 的 clear")
     }
 
-    /// ★ **点标签**与**删除键**必须是两条规则，不能共用一条。
+    /// ★ 标签没了，但**删除键撤限定**那条要留着（用户只让删标签，没让改键）。
     ///
-    /// 共用（1.1.16 的实际写法：每枚标签都接同一个 `deleteToken`）有两个后果：
-    /// ① 输入框里还有关键词时，点击被「关键词非空」这条删除键的前提挡住 ⇒ 点了没反应；
-    /// ② 位置与类型都在时，点位置删掉的却是最近设的那个（类型）。
-    func testTappingATokenClearsThatTokenNotTheBackspaceRule() throws {
-        let field = codeOnly(try appSource("SearchFieldView.swift"))
-        XCTAssertTrue(field.contains("deleteToken(token.slot)"),
-                      "点一枚限定必须删**被点的那一枚**（把槽位传下去），"
-                      + "不能调用无参的删除键动作")
-        // 无参的 `deleteToken()` 一旦还在，说明点击仍是「删最近设的那个」。
-        XCTAssertFalse(field.contains("Button(action: deleteToken)"),
-                       "点击不许直接接删除键动作")
+    /// 1.1.16 起有两条删限定的路径：点标签（删被点的那一枚）与删除键（LIFO）。
+    /// 标签删掉之后点击那条整体消失，只剩删除键 —— 它的判定必须在 Core
+    /// （`keywordEmpty` 不成立时不许抢键，否则输入框删不动字），
+    /// App 层不许自己写「删哪个」。
+    func testTokenChipClicksAreGoneButBackspaceStillUndoesOneLimit() throws {
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        XCTAssertFalse(field.contains("deleteToken"), "点击删限定随标签一起去掉了")
 
         let model = codeOnly(try appSource("AppModel+SearchCommand.swift"))
-        XCTAssertTrue(model.contains("func deleteSearchToken(_ slot: SearchTokenBar.Slot)"),
-                      "App 层要有「按槽位删」的入口")
+        XCTAssertFalse(model.contains("var searchTokens"), "视图不再需要限定列表，模型也不许留")
+        XCTAssertFalse(model.contains("func deleteSearchToken(_ slot:"),
+                       "按槽位删的入口已经没人调了，留着就是死代码")
         XCTAssertTrue(model.contains("slotToRemoveOnBackspace"),
-                      "删除键仍要走 Core 的 LIFO 判定（关键词非空时不抢键）")
+                      "删除键仍要走 Core 的判定（关键词非空时不抢键）")
+        XCTAssertTrue(model.contains("func deleteSearchToken()"),
+                      "删除键这条入口要留着")
 
         let view = codeOnly(try appSource("SearchView.swift"))
-        XCTAssertTrue(view.contains("tokens: model.searchTokens"),
-                      "搜索框必须拿到带槽位的限定，而不是一串字符串")
-        XCTAssertTrue(view.contains("deleteToken: { model.deleteSearchToken($0) }"),
-                      "点击必须把槽位交给 App 层")
+        XCTAssertFalse(view.contains("model.searchTokens"), "视图不许再读限定列表")
         XCTAssertTrue(view.contains("deleteSearchToken: { model.deleteSearchToken() }"),
-                      "键盘删除键仍走无参那条（保留「有关键词时只删文字」的行为）")
+                      "键盘删除键仍接到无参那条")
     }
 
     // MARK: - 收尾边界（取消 / 重新编辑 / 提交 的真实调用顺序）
@@ -2138,8 +2613,10 @@ final class AppLayerStructureTests: XCTestCase {
         }
         XCTAssertTrue(general.contains("AppVersion.current"),
                       "「通用」页要显示版本号")
-        XCTAssertTrue(general.contains("LabeledContent(\"版本\")"),
-                      "版本号按系统表单行呈现，不自绘")
+        // 2026-10-27 起分组表单换成自绘卡片（纯白底 + 玻璃遮罩），
+        // 行组件从 `LabeledContent` 变成 `SettingsLabeledRow`：布局还是「左标签右值」。
+        XCTAssertTrue(general.contains("SettingsLabeledRow(\"版本\")"),
+                      "版本号按「左标签右值」的一行呈现，不自绘")
     }
 
     /// ★ 版本号只能有一个出处，且界面只写版本号、不写构建号。
@@ -2170,26 +2647,26 @@ final class AppLayerStructureTests: XCTestCase {
     /// 改一处漏一处，最后表现成「明明发了新版却说已是最新」。所以这里既要求
     /// **调起来**（按钮接的是 `checkForUpdates`），也要求**不重复实现**
     /// （没有地址、没有 URLSession、没有版本比较）。
-    func testAdvancedPaneChecksForUpdatesThroughCore() throws {
+    func testGeneralPaneChecksForUpdatesThroughCore() throws {
         let settings = codeOnly(try appSource("SettingsView.swift"))
-        guard let advanced = braceBlock(after: "private var advancedForm: some View", in: settings) else {
-            return XCTFail("缺少高级页")
+        guard let general = braceBlock(after: "private var generalForm: some View", in: settings) else {
+            return XCTFail("缺少通用页")
         }
-        XCTAssertTrue(advanced.contains("sectionHeader(\"更新\")"),
-                      "高级页要有「更新」这一节")
-        XCTAssertTrue(advanced.contains("AppVersion.current"),
+        XCTAssertTrue(general.contains("SettingsCard(\"关于\")"),
+                      "版本和更新应集中在通用页的「关于」")
+        XCTAssertTrue(general.contains("AppVersion.current"),
                       "这一节要显示当前版本，用户才知道在跟哪儿比")
-        XCTAssertTrue(advanced.contains("model.checkForUpdates()"),
+        XCTAssertTrue(general.contains("model.checkForUpdates()"),
                       "检查更新按钮要真的接上动作")
-        XCTAssertTrue(advanced.contains("updateResultRow("),
+        XCTAssertTrue(general.contains("updateResultRow("),
                       "结论要摆在按钮下面，不另开窗口")
         XCTAssertTrue(settings.contains("UpdateCheckText.message(for:"),
                       "结论文案走 Core，不在视图里拼字符串")
-        XCTAssertTrue(advanced.contains("check-for-updates"),
+        XCTAssertTrue(general.contains("check-for-updates"),
                       "按钮要挂无障碍标识，键盘与 VoiceOver 靠它定位")
-        XCTAssertFalse(advanced.contains("api.github.com"),
+        XCTAssertFalse(general.contains("api.github.com"),
                        "仓库地址只能有一处（Core 的 UpdateCheck）")
-        XCTAssertFalse(advanced.contains("URLSession"),
+        XCTAssertFalse(general.contains("URLSession"),
                        "请求不该由视图发起")
 
         let actions = codeOnly(try appSource("AppModel+UpdateCheck.swift"))
@@ -2267,8 +2744,8 @@ final class AppLayerStructureTests: XCTestCase {
                       "外观选择器要带「外观」标签，供 LabeledContent 与 VoiceOver 使用")
         XCTAssertTrue(settings.contains(".pickerStyle(.segmented)"),
                       "外观选择器必须是分段样式（参考系统设置），不许用竖排单选组")
-        XCTAssertTrue(settings.contains("LabeledContent(\"外观\")"),
-                      "外观行要左标签右选择器一行排布（LabeledContent），和系统设置一致")
+        XCTAssertTrue(settings.contains("SettingsLabeledRow(\"外观\")"),
+                      "外观行要左标签右选择器一行排布，和系统设置一致")
 
         let controller = codeOnly(try appSource("AppearanceController.swift"))
         XCTAssertTrue(controller.contains("NSApp.appearance"),
@@ -2305,16 +2782,23 @@ final class AppLayerStructureTests: XCTestCase {
     /// 但是不明显」。这里锁两件事：标题真的用了 Core 的 `SettingsTypography`，
     /// 且字号比正文大一档（否则等于没改）。
     func testSectionHeadersUseTheSharedTypographyScale() throws {
-        let settings = codeOnly(try appSource("SettingsView.swift"))
-        XCTAssertTrue(settings.contains("func sectionHeader("),
-                      "分段标题要收在一个 helper 里，字号才有单一出处")
-        guard let helper = braceBlock(after: "private func sectionHeader", in: settings) else {
-            return XCTFail("找不到 sectionHeader")
+        // 2026-10-27：分组表单换成自绘卡片，分段标题从 `sectionHeader(...)` 这个
+        // helper 挪进了 `SettingsCard`。字号出处仍然只有一处，换了个地方而已。
+        let chrome = codeOnly(try appSource("SettingsChrome.swift"))
+        guard let card = braceBlock(after: "struct SettingsCard", in: chrome) else {
+            return XCTFail("找不到 SettingsCard")
         }
-        XCTAssertTrue(helper.contains("SettingsTypography.sectionHeader"),
+        XCTAssertTrue(card.contains("SettingsTypography.sectionHeader"),
                       "分段标题字号必须来自 Core 的 SettingsTypography")
-        XCTAssertTrue(helper.contains(".semibold"),
+        XCTAssertTrue(card.contains(".semibold"),
                       "分段标题保留半粗字重，与正文拉开层次")
+
+        // 页面里不许再各写一份标题字号：一处改了另一处没改，同一页会出现两个层级。
+        for file in ["SettingsView.swift"] {
+            let source = codeOnly(try appSource(file))
+            XCTAssertFalse(source.contains("SettingsTypography.sectionHeader"),
+                           "\(file) 里的分段标题要交给 SettingsCard，不要自己排字号")
+        }
 
         let core = try clientFile("Sources/FlashFindCore/SettingsTypography.swift")
         XCTAssertTrue(core.contains("sectionHeader"), "Core 侧必须登记 sectionHeader 这一级")
@@ -2904,255 +3388,183 @@ final class AppLayerStructureTests: XCTestCase {
                       "只列已启用的来源：停用的来源不该出现在位置面板里")
     }
 
-    // MARK: - 命令面板：顺序与数字快捷键
-
-    /// ★ 设置 ▸ 搜索页必须给出**一段两栏**：左位置、右类型，各带拖动排序 + 数字键。
+    /// ★ 位置候选的顺序必须来自「同一份用户设置」。
     ///
-    /// 这一段守的是「入口在不在、入口在不在同一处」。规则（怎么排、第几行是几号）
-    /// 在 Core，界面只把动作接给模型 —— 所以这里同时要求界面**不自己算编号**。
-    func testSearchSettingsExposeQuickPickOrderAndKeys() throws {
-        let settings = codeOnly(try appSource("SettingsView.swift"))
-        let searchForm = try body(of: "searchForm", in: settings)
-        // 用户 2026-10-26 手绘定稿：一个「命令快捷键」标题下左右并排，
-        // 不再拆成上下两段（拆开时要来回看才知道两个 2 撞不撞）。
-        XCTAssertEqual(searchForm.components(separatedBy: "QuickPickSettingsSection(").count - 1, 1,
-                       "两栏必须在同一段里：拆成两段就又回到「来回看」的老样子")
-        XCTAssertEqual(searchForm.components(separatedBy: "QuickPickColumn(").count - 1, 2,
-                       "左「搜索位置」右「文件类型」，缺一栏等于只做了一半功能")
-        for title in ["搜索位置", "文件类型"] {
-            XCTAssertTrue(searchForm.contains("title: \"\(title)\""),
-                          "栏标题必须是「\(title)」：用户要的就是这两个词")
-        }
-        for kind in [".location", ".fileType"] {
-            XCTAssertTrue(searchForm.contains("kind: \(kind),"),
-                          "\(kind) 那一页要写明自己是哪个面板：页签初始选中与恢复默认都靠它")
-            XCTAssertTrue(searchForm.contains("rows: model.quickPickRows(\(kind))"),
-                          "\(kind) 那一栏的数据必须来自模型的同一个入口（面板与设置页共用顺序）")
-            // ★ 2026-10-27 定稿：行尾的号只读，排序只留「拖」；删掉与换掉走右键。
-            //   三条动作都必须接到 Core，不许界面自己改一份内存里的顺序。
-            XCTAssertTrue(searchForm.contains("onDelete: { model.deleteQuickPick(\(kind), id: $0) }"),
-                          "\(kind) 的右键删除必须落到 Core 的隐藏表（只跳过界面那一行，下次刷新它又回来了）")
-            XCTAssertTrue(searchForm.contains("onReplace: { model.replaceQuickPick(\(kind), id: $0, with: $1) }"),
-                          "\(kind) 的替换必须落到「同一位次换人」")
-            XCTAssertTrue(searchForm.contains("replacements: { model.quickPickReplacements(\(kind), id: $0) }"),
-                          "\(kind) 的替换候选取自 Core：界面各算一份迟早多出一条重复项")
-            XCTAssertTrue(searchForm.contains("moveQuickPick(\(kind), from: $0, to: $1)"),
-                          "\(kind) 要支持拖动排序")
-        }
-
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        XCTAssertEqual(section.components(separatedBy: "Section {").count - 1, 1,
-                       "只有一段：多段就会多出一个标题，页签也就散了")
-        // 用户 2026-10-26 二次定稿：点页签切换，切换时内容向左滑。
-        XCTAssertTrue(section.contains("pickerStyle(.segmented)"),
-                      "两页要能点着切（分段控件），不能又回到并排两栏")
-        XCTAssertFalse(section.contains("HStack(alignment: .top"),
-                       "并排两栏已经废弃：半宽放不下长名字")
-        // ★ 判在 `select(_:)` 的函数体里：整份文件另有一处 `withAnimation(.spring(`
-        //   （落手升/降温），拿全文查 `withAnimation(` 的话这条断言是聋的
-        //   —— build 66 第一轮变异（把切页动画摘掉）就绿着跑过去了。
-        let selectBody = try body(of: "select", in: section)
-        XCTAssertTrue(selectBody.contains("withAnimation(.easeOut("),
-                      "切换必须有动画，否则内容凭空换掉、看不出是换页")
-        XCTAssertTrue(section.contains(".transition(slideTransition)"),
-                      "切页要挂位移过渡：只有状态变、没有过渡等于瞬切")
-        // ★ 审查 F02：`transition` 只在视图**插入/移除**时求值。只换参数、
-        //   不换身份，过渡一次都不会跑（内容会变、高度会变，看起来「像是动了」）。
-        XCTAssertTrue(section.contains(".id(columns[chosenIndex].kind)"),
-                      "★ 页面身份必须绑到页签上：少了它，`transition` 永远不触发（审查 F02）")
-        XCTAssertTrue(section.contains("removal: .offset(x: forward ? -slide : slide)"),
-                      "旧页要往反方向滑走：只淡出、不位移就没有「换页」的方向感")
-        XCTAssertTrue(section.contains("forward = next > chosenIndex"),
-                      "方向要在换页之前定下来（换完之后再比就比不出前后了）")
-        XCTAssertTrue(section.contains(".clipped()"),
-                      "滑出去的那一页必须裁掉，否则压到段落外面")
-        XCTAssertTrue(section.contains(".onDrag"), "没有起拖，用户就没法排序")
-        XCTAssertTrue(section.contains(".onDrop"), "只有起拖没有落点判定，拖了也不生效")
-        // ★ 2026-10-27 定稿：行尾的号码**只读**，不再是下拉选择器。
-        //   上一版那里是「选个号把行搬过去」—— 与拖动是同一件事的两种写法，
-        //   两套入口摆在一起，用户得先分辨哪个才是排序。
-        XCTAssertFalse(section.contains("private func keyPicker"),
-                       "行尾不许再是选择器：排序只留拖动一个入口")
-        XCTAssertEqual(section.components(separatedBy: "Picker(").count - 1, 1,
-                       "整段只该有一个 Picker —— 页签那个分段控件")
-        XCTAssertTrue(section.contains("row.key.map(String.init)"),
-                      "行尾号码必须来自 Core 算好的行号，界面不许自己数")
-        XCTAssertFalse(section.contains("onChooseKey"), "旧的「选数字」入口必须彻底消失")
-        XCTAssertFalse(section.contains("SearchCommandNumbering.numberedLimit"),
-                       "设置页不再算「能选几档」：那档数已经随选择器一起删掉了")
-        // ★ 拖起来是**整行虚影**，不是一个小把手图标（用户 2026-10-27）。
-        XCTAssertTrue(section.contains("} preview: {"), "起拖必须带预览：没有 preview 就退回系统对把手拍的快照")
-        XCTAssertTrue(section.contains("QuickPickDragPreview(row: row)"),
-                      "虚影必须是整行（标题/副标题/号码），行名才是身份")
-        // ★ 放下之后从原位置升/降到新位置，而不是瞬移。
-        XCTAssertTrue(section.contains("withAnimation(.spring("),
-                      "落手要包在动画事务里：`ForEach` 的 id 稳定，包了才会做位置插值")
-        // ★ 右键：删掉 / 替换成别的位置或格式（用户 2026-10-27）。
-        XCTAssertTrue(section.contains(".contextMenu"), "整行要有右键菜单")
-        XCTAssertTrue(section.contains("\"删除该快捷方式\""), "右键第一项是删除")
-        XCTAssertTrue(section.contains("Menu(\"替换为\")"), "右键还要能把这一行换成别的位置/格式")
-        XCTAssertFalse(section.contains("onAssign"), "旧版的「指定键」入口必须彻底消失，不许留两套语义")
-        XCTAssertFalse(section.contains("maxVisible"), "行数上限是面板的事，设置页不该再算一遍")
-        // ★ 预览钩子只能落在预览构建里：少了 `isPreview` 这道门，
-        //   正式版用户设一个环境变量就能把设置页开在第二页。
-        XCTAssertTrue(section.contains("AppEnvironment.isPreview"),
-                      "初始页签的预览钩子必须有 isPreview 守卫")
-        // ★ 拖动状态必须是一栏一份：做成子视图，`@State` 自然每栏一个实例；
-        //   放在容器层就会让左栏的落点高亮闪到右栏去。
-        XCTAssertTrue(section.contains("private struct QuickPickColumnView"),
-                      "栏要单独成视图：两栏的拖动状态各归各的，不许共用一个落点")
-    }
-
-    /// ★ 审查 F01：排序拖拽的载荷里不许装行 id。
-    ///
-    /// 位置行的 id 是 `target:<来源标识>:<根路径>`，根路径就是用户 NAS 上的
-    /// 部门／客户／项目文件夹名。拖拽是**跨应用**通道：用 `NSString` 造 provider，
-    /// 系统会顺带注册 `public.utf8-plain-text` 与 `public.url` 两种公开表示，
-    /// 拖到任何一个接受文本的地方，接收方都能读出这份路径。
-    ///
-    /// 本地排序只需要「是本窗口在拖」，标识本来就存在内存里的 `draggingID`，
-    /// 载荷退化成常量标记即可。
-    func testQuickPickDragPayloadCarriesNoLocationIdentity() throws {
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        XCTAssertFalse(section.contains("NSItemProvider(object:"),
-                       "★ 载荷不许用 NSString 造：会被注册成公开文本与 URL，接收方读得到完整路径（审查 F01）")
-        XCTAssertTrue(section.contains("NSItemProvider(item: Self.reorderMarker as NSSecureCoding"),
-                      "载荷只能是常量标记，且类型由我们显式指定")
-        XCTAssertTrue(section.contains("typeIdentifier: Self.reorderType.identifier"),
-                      "必须显式指定私有类型，否则系统又会按内容推断回公开类型")
-        XCTAssertTrue(section.contains("UTType(exportedAs: \"com.flashfind.quickpick-row\")"),
-                      "排序拖拽要有自己的私有类型")
-        XCTAssertTrue(section.contains(".onDrop(of: [Self.reorderType]"),
-                      "落点只接受这个私有类型")
-        XCTAssertFalse(section.contains(".plainText"),
-                       "★ 旧版按纯文本收落点：等于把「本窗口排序」和「任意文本」并成一条通道")
-        // 载荷不许由行内容决定 —— 路径就是这样被带出去的。
-        let providerLine = section.split(separator: "\n")
-            .first { $0.contains("NSItemProvider(item:") } ?? ""
-        XCTAssertFalse(providerLine.contains("row."),
-                       "★ provider 的实参里出现 row.* 就说明载荷又和行内容绑上了（路径会跟着走）")
-        XCTAssertTrue(providerLine.contains("reorderMarker"),
-                      "provider 实参必须正是那个常量标记")
-    }
-
-    /// ★ 拖动虚影是**整行**：`onDrag` 必须挂在行尾（HStack 收尾之后），
-    /// 不是挂在内侧那个把手上 —— 挂在把手上拖出去的只是一个小图标，
-    /// 用户看不出自己拿的是哪一条（2026-10-27 用户要求）。
-    func testQuickPickDragIsAttachedToTheWholeRow() throws {
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        let row = try body(of: "row", in: section)
-        XCTAssertEqual(row.components(separatedBy: ".onDrag").count - 1, 1,
-                       "整行只该有一处起拖：多了就说明有一处还挂在子视图上")
-        let drag = try XCTUnwrap(row.range(of: ".onDrag {"), "找不到起拖")
-        let wholeRow = try XCTUnwrap(row.range(of: ".frame(maxWidth: .infinity, alignment: .leading)"),
-                                     "找不到整行的 frame：判据靠它区分「整行」与「把手」")
-        XCTAssertTrue(wholeRow.lowerBound < drag.lowerBound,
-                      "★ 起拖要挂在整行（HStack 收尾之后），不是挂在内侧那个把手上")
-        XCTAssertTrue(row.contains("QuickPickDragPreview(row: row)"), "虚影必须是整行")
-        let handle = try XCTUnwrap(row.range(of: "line.3.horizontal"))
-        XCTAssertFalse(row[handle.upperBound..<drag.lowerBound].contains(".onDrag"),
-                       "把手只剩视觉提示，不许自己挂起拖")
-    }
-
-    /// ★ 右键菜单的两项动作必须落到模型（再落到 Core 的隐藏表），
-    /// 不是界面上假装一下（假装的话，关掉设置页再打开那条又回来了）。
-    func testQuickPickRowContextMenuDeletesAndReplaces() throws {
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        let row = try body(of: "row", in: section)
-        XCTAssertTrue(row.contains("column.onDelete(row.id)"), "删除要落到 Core")
-        XCTAssertTrue(row.contains("column.onReplace(row.id, candidate.id)"), "替换要落到 Core")
-        XCTAssertTrue(row.contains("column.replacements(row.id)"),
-                      "替换候选取自调用方（Core 判定），界面不许自己列一份")
-        XCTAssertTrue(row.contains("ForEach(alternatives)"), "每个候选都要能点")
-        XCTAssertTrue(row.contains(".contextMenu"), "菜单挂在整行上，不是藏在某个按钮里")
-    }
-
-    /// 私有类型标识在 Swift 与 `Info.plist` 各写一遍：写错一边编译照样过，
-    /// 运行时表现为「拖了没反应」——所以这条把两边对起来比。
-    func testQuickPickReorderTypeIsDeclaredInInfoPlist() throws {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let url = root.appendingPathComponent("Resources/Packaging/Info.plist")
-        let data = try Data(contentsOf: url)
-        let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-        let declarations = plist?["UTExportedTypeDeclarations"] as? [[String: Any]]
-        let identifier = "com.flashfind.quickpick-row"
-
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        XCTAssertTrue(section.contains(identifier), "Swift 侧的标识必须就是这一个")
-        XCTAssertTrue((declarations ?? []).compactMap { $0["UTTypeIdentifier"] as? String }
-                        .contains(identifier),
-                      "★ Info.plist 必须声明同一个标识：只写一边，拖拽在别的进程里认不出来")
-        let conforms = (declarations ?? [])
-            .first { $0["UTTypeIdentifier"] as? String == identifier }?["UTTypeConformsTo"] as? [String]
-        XCTAssertTrue(conforms?.contains("public.data") == true,
-                      "导出类型要 conform 到 public.data，否则不是一个可搬运的数据类型")
-    }
-
-    /// 预览钩子：`FF_UI_QUICKPICK_SWITCH` 能让设置页定时切一次。
-    ///
-    /// 要它是因为过渡只存在于插入/移除的那几帧里：人手点完再截图只能拿到结束态，
-    /// 首尾两张图都正常既证明不了有动画，也证明不了没有（审查 F02 就这么漏的）。
-    func testQuickPickPreviewSwitchHookIsGuardedAndSharesTheTabsPath() throws {
-        let section = codeOnly(try appSource("QuickPickSettingsSection.swift"))
-        XCTAssertTrue(section.contains("FF_UI_QUICKPICK_SWITCH"),
-                      "没有这个钩子就没法在程序控制下截到过渡的中间帧")
-        // ★ 只取这个函数的**函数体**：整份文件里还有别的 `isPreview`（初始页签那条），
-        //   拿全文查的话，钩子自己丢了守卫也照样绿。
-        let start = try XCTUnwrap(section.range(of: "private func switchPageInPreviewIfRequested"),
-                                  "钩子函数不见了")
-        let rest = section[start.lowerBound...]
-        let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
-        let hook = String(rest[rest.startIndex..<end])
-        XCTAssertTrue(hook.contains("AppEnvironment.isPreview"),
-                      "★ 钩子必须有 isPreview 守卫：正式版设个环境变量就能让设置页自己换页")
-        XCTAssertTrue(hook.contains("select("),
-                      "钩子必须走页签同一条换页路径，不许另写一份")
-        // 页签本身也只能走 select：两份切换逻辑迟早只改一边。
-        XCTAssertTrue(section.contains("set: { select($0) }"),
-                      "页签的 selection 要落到同一个 select(_:)")
-    }
-
-    /// ★ 面板的顺序与编号都必须来自「同一份用户设置」，而且**编号只由顺序决定**。
-    ///
-    /// 最容易犯的错：拖动排序了，编号却还带着一份「用户指定过的键」——
-    /// 于是同一行排第 1 却写着 5，用户拖动之后号也不变（2026-10-26 报障）。
-    func testPaletteOrderAndKeysComeFromTheSavedSettings() throws {
+    /// ★ 2026-10-28 两轮删减之后，这条只剩**读**的一半：
+    ///   命令面板没了，设置页那栏「搜索工具 ▸ 命令快捷键（位置顺序）」也没了
+    ///   （用户原话：「没有用了」），所以拖动 / 删除 / 替换 / 恢复默认四个写入口
+    ///   全部消失。但 `quickPick` **仍在生效**——侧边栏照它排、并照它藏掉用户
+    ///   当年删过的位置。删掉这几条断言，等于让老用户的排序静默失效。
+    func testLocationOrderStillComesFromTheSavedSettings() throws {
         let code = try appModelCode()
         let items = try body(of: "commandItems", in: code)
         XCTAssertTrue(items.contains("SearchCommandArrangement.arrange("),
                       "候选顺序必须走 Core 的重排，不能只按目录自然顺序")
         XCTAssertTrue(items.contains("quickPick.order(for: kind)"),
-                      "顺序要取用户设置；取错了拖动排序就是白做")
+                      "顺序要取用户设置；取错了侧边栏的顺序就是白存")
         XCTAssertTrue(items.contains("hidden: quickPick.hiddenIDs(for: kind)"),
-                      "★ 删掉的候选必须在这一层滤掉：只在界面里跳一行，下次刷新它又回来了")
+                      "★ 用户当年删掉的候选必须在这一层滤掉：过滤器一删，它们会全部回到侧边栏")
 
-        let numbers = try body(of: "commandNumbers", in: code)
-        XCTAssertTrue(numbers.contains("SearchCommandNumbering.keys(in: filteredCommandItems)"),
-                      "编号只能由当前显示的候选顺序算出来")
-        XCTAssertFalse(numbers.contains("assigned"),
-                       "★ 不许再传一份「指定键」：那会让拖动后的数字不跟着变")
+        // ★ 写入口必须**一个都不剩**（2026-10-28）。留着就是一条既没有界面、
+        //   也没有测试能走到的死路——而且它会让「顺序还能改」这件事看起来还成立。
+        for gone in ["func quickPickRows(", "func canResetQuickPick(", "func moveQuickPick(",
+                     "func deleteQuickPick(", "func replaceQuickPick(", "func quickPickReplacements(",
+                     "func resetQuickPick(", "func applyQuickPick("] {
+            XCTAssertFalse(code.contains(gone),
+                           "\(gone) 的入口已经删掉：设置页不再有位置顺序这一栏")
+        }
 
-        let pick = try body(of: "pickCommand", in: code)
-        XCTAssertFalse(pick.contains("assigned"),
-                       "数字键反查也要同一条规则，否则「写几按几」不成立")
+        // 设置页那张卡片也要真的消失，不是藏起来。
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+        let searchForm = try body(of: "searchForm", in: settings)
+        XCTAssertFalse(searchForm.contains("QuickPickSettingsSection("),
+                       "「搜索工具 ▸ 命令快捷键」整张卡片必须删掉")
+        XCTAssertFalse(searchForm.contains("命令快捷键"),
+                       "卡片里的那一行也不许留")
+    }
 
-        // 三个写入口：拖动（from/to）、删除（hide）、替换（replace）。
-        // 后两个都是 2026-10-27 加的右键动作，都必须落到 Core。
-        XCTAssertTrue(code.contains("func deleteQuickPick(_ kind: SearchCommandKind, id: String)"),
-                      "删除入口必须存在")
-        XCTAssertTrue(code.contains("next.hide(id, kind: kind, among: commandItems(for: kind))"),
-                      "★ 删除必须记进 Core 的隐藏表：只从界面列表里跳过，关掉设置页它又回来了")
-        XCTAssertTrue(code.contains("func replaceQuickPick(_ kind: SearchCommandKind, id: String, with newID: String)"),
-                      "替换入口必须存在")
-        XCTAssertTrue(code.contains("next.replace(id, with: newID, kind: kind"),
-                      "替换必须落到「同一位次换人」")
-        // 旧的行尾选号入口必须彻底删掉：留着就是第二套排序语义。
-        XCTAssertFalse(code.contains("moveToKey"),
-                       "★ 「选个数字把行搬过去」已经随行尾选择器一起删了，不许留死代码")
+    /// 搜索位置列表的「全选 / 取消全选」：按钮在标题行，判定在 Core，提交走同一条管线。
+    ///
+    /// 三条各自防一种退化：
+    /// 1. 按钮被塞进列表里当一行数据 —— 会和「这一行能不能勾」混淆；
+    /// 2. 判定被搬回 App 层 —— executableTarget 测不到，等于没测；
+    /// 3. 批量入口自己写集合、绕开 `applyDraftScopes` —— 串行化与过期响应丢弃全部失效，
+    ///    快速连点「全选 / 取消全选」会出现「界面显示 A、核心绑了 B」。
+    /// 给「选择搜索位置」截图用的预览钩子只能在预览包里生效。
+    ///
+    /// 它会直接造一份「已连接、有 N 个共享」的草稿 —— 这些状态正常只能由真连上
+    /// 一台设备才成立。若少了 `AppEnvironment.isPreview` 这道门，正式包里就能被
+    /// 一个环境变量顶出一台假 NAS，界面还会显示「已连接，可以搜索了」。
+    func testPreviewWizardDraftHookIsPreviewOnly() throws {
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        let hook = try body(of: "loadPreviewWizardDraftIfRequested", in: controller)
+        XCTAssertTrue(hook.contains("guard AppEnvironment.isPreview"),
+                      "★ 预览钩子第一句就必须是「只在预览包里」")
+        XCTAssertTrue(hook.contains("FF_UI_WIZARD"),
+                      "钩子变量名改成别的，截图脚本与文档就对不上了")
+        // 造出来的状态只能停在草稿里，不许顺手把真实来源也写进去。
+        XCTAssertFalse(hook.contains("nasSources"),
+                       "★ 预览钩子不许碰真实来源列表")
+    }
 
-        let rows = try body(of: "quickPickRows", in: code)
-        XCTAssertTrue(rows.contains("quickPick.rows("),
-                      "设置页的行由 Core 统一算（含「不列打开设置」），界面不许各写一份")
+    func testWizardOffersBulkScopeSelectionThroughCore() throws {
+        let view = codeOnly(try appSource("NASSourceWizardView.swift"))
+        let section = try body(of: "sharesSection", in: view)
+
+        XCTAssertTrue(section.contains("trailing: {"),
+                      "全选 / 取消全选要挂在标题行右侧，不是列表里的一行")
+        for label in ["\"全选\"", "\"取消全选\""] {
+            XCTAssertTrue(section.contains(label), "搜索位置顶部缺了 \(label) 按钮")
+        }
+        XCTAssertTrue(section.contains("model.selectAllDraftScopes()"), "全选没有接到模型上")
+        XCTAssertTrue(section.contains("model.clearAllDraftScopes()"), "取消全选没有接到模型上")
+        XCTAssertTrue(section.contains("model.offersBulkDraftScopeSelection"),
+                      "位置只有一个时不该出现这两颗按钮，这个判断要由 Core 出")
+        XCTAssertTrue(section.contains("model.canSelectAllDraftScopes"),
+                      "「全选」可不可点要由 Core 判")
+        XCTAssertTrue(section.contains("model.canClearAllDraftScopes"),
+                      "「取消全选」可不可点要由 Core 判")
+        XCTAssertFalse(section.contains("Set("),
+                       "★ 界面里出现集合运算，说明判定被搬回了 App 层")
+
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        let selectAll = try body(of: "selectAllDraftScopes", in: controller)
+        XCTAssertTrue(selectAll.contains("ScopeBulkSelection.selectAll(available: draftAvailableShares)"),
+                      "全选的集合必须由 Core 的 ScopeBulkSelection 算")
+        let clearAll = try body(of: "clearAllDraftScopes", in: controller)
+        XCTAssertTrue(clearAll.contains("ScopeBulkSelection.clearAll()"),
+                      "取消全选也要走 Core，不许在控制器里写死空数组")
+        for bulk in [selectAll, clearAll] {
+            XCTAssertTrue(bulk.contains("applyDraftScopes("),
+                          "批量入口必须走与单点勾选同一条提交管线")
+            XCTAssertFalse(bulk.contains("draftSource.scopes ="),
+                           "★ 批量入口不许自己写集合：绕开 applyDraftScopes 就等于绕开串行化")
+        }
+        XCTAssertTrue(controller.contains("private func applyDraftScopes("),
+                      "三处入口共用的提交管线必须只有一个")
+
+        let offered = try body(of: "offersBulkDraftScopeSelection", in: controller)
+        XCTAssertTrue(offered.contains("ScopeBulkSelection.isOffered(available: draftAvailableShares)"),
+                      "是否提供批量入口要由 Core 判")
+        let canSelect = try body(of: "canSelectAllDraftScopes", in: controller)
+        XCTAssertTrue(canSelect.contains("ScopeBulkSelection.canSelectAll(") ,
+                      "「全选」的可用性要由 Core 判")
+        let canClear = try body(of: "canClearAllDraftScopes", in: controller)
+        XCTAssertTrue(canClear.contains("ScopeBulkSelection.canClearAll("),
+                      "「取消全选」的可用性要由 Core 判")
+    }
+
+    /// 设备名称必须能在**连上以后**改。
+    ///
+    /// 2026-10-27 报障：名称只在「添加搜索来源」向导里出现过一次，连上之后再没有地方改。
+    /// 三条断言各自防一种退化：
+    /// 1. 名称行消失或变回只读文本 —— 又回到「没地方改」；
+    /// 2. 改名顺手重建 Provider —— 掉线（行为侧由
+    ///    `NASProviderHandoffTests.testRenameKeepsSessionAndUpdatesDisplayName` 守着）；
+    /// 3. 改名顺手 invalidate / 重搜 —— 改个名字把用户刚搜出来的结果清掉。
+    func testSourceDetailAllowsRenamingWithoutReconnecting() throws {
+        let view = codeOnly(try appSource("SettingsView.swift"))
+        // 2026-10-27：详情页顶部改成一张「身份卡」——图标 + 名称 + 开关，
+        // 名称输入行与状态都在 `identity(_:)` 里。断言跟着代码走。
+        let detail = try body(of: "identity", in: view)
+
+        XCTAssertTrue(detail.contains("SettingsLabeledRow(\"名称\")"),
+                      "来源详情里没有「名称」行：连上以后仍然没地方改名")
+        XCTAssertTrue(detail.contains("source-detail-name"),
+                      "名称输入框要有稳定的无障碍标识，否则真机点验与 AX 脚本都定位不到")
+        XCTAssertTrue(detail.contains(".textFieldStyle(.roundedBorder)"),
+                      "★ 名称必须是可输入的 TextField，不是只读的 Text")
+        XCTAssertTrue(detail.contains("model.renameSource("),
+                      "名称没有接到模型上，打字不会落盘")
+        XCTAssertTrue(detail.contains("model.nasSources.first(where:"),
+                      "★ 绑定必须在 get 里现取模型：闭包捕获的 `source` 是本次求值的值拷贝，"
+                      + "写入后要等整页重算才更新，中间那一帧会把用户刚敲的字符盖回去")
+
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        let rename = try body(of: "renameSource", in: controller)
+        XCTAssertTrue(rename.contains("NASSourceRename.isRename("),
+                      "要不要写盘、要不要同步 Provider，得由 Core 的规则判")
+        XCTAssertTrue(rename.contains("NASSourceRename.normalized("),
+                      "名字的规范化（换行折空格）必须走 Core，不许在控制器里自己拼")
+        XCTAssertTrue(rename.contains("persistSources()"),
+                      "改完名字要落盘，否则重启就回去了")
+        XCTAssertTrue(rename.contains("updateDisplayName("),
+                      "已连接的那台必须立刻换名字，否则结果行的来源徽标还是旧名")
+        for forbidden in ["rebuildNativeProviders()", "invalidate()", "changedQuery()"] {
+            XCTAssertFalse(rename.contains(forbidden),
+                           "★ renameSource 里出现 \(forbidden)：改名会掉线或清空当前结果。"
+                           + "名字不参与连接身份（sourceID 由 id 派生），没有任何理由动它们")
+        }
+    }
+
+    /// 搜索结果批**必须**走 Core 的合并，一次赋值。
+    ///
+    /// 这条守的是「结果一多就卡」的复发路径：
+    /// ① 逐条 `results.append(row)` ⇒ 每行发一次 `objectWillChange`；
+    /// ② 在闭包里自己 `sort` ⇒ 排序规则出现第二份（与 Core 的 tie-break 不一致）。
+    /// 两者都能跑通、界面也能出结果，只有结果上千条时才表现为卡顿。
+    ///
+    /// ★ 2026-10-28 改口：合并**入口**从 `SearchResultMerge.apply` 换成了
+    /// `integrateResults(_:)`——它背后是 Core 的 `SearchResultWindow`，
+    /// 顺序/去重/重排判据仍在 `SearchResultMerge` 里，另外多管了
+    /// 「只留前 200」与「总共匹配多少」。断言因此改成两层：
+    /// App 层只许调用 `integrateResults`，窗口内部才许出现 `SearchResultMerge.apply`。
+    func testSearchBatchMergeGoesThroughCoreAndAssignsOnce() throws {
+        let code = codeOnly(try appSource("AppModel+NASConnections.swift"))
+        XCTAssertTrue(code.contains("integrateResults(event.results)"),
+                      "结果批必须走 `integrateResults`（上限、去重、总数、一次赋值都在 Core 的窗口里）")
+        XCTAssertTrue(code.contains("resultWindow.integrate(incoming)"),
+                      "★ `integrateResults` 必须真的调 Core 的 `SearchResultWindow.integrate`，"
+                      + "不许在这里再拼一遍排序")
+        let window = codeOnly(try coreSource("SearchResultLimit.swift"))
+        XCTAssertTrue(window.contains("SearchResultMerge.apply(existing: all, incoming: incoming)"),
+                      "★ 窗口内部必须复用 `SearchResultMerge`：排两套顺序会让「合并 == 一次排完」这条不变量失效")
+        XCTAssertFalse(code.contains("results.append("),
+                       "★ 事件闭包里逐条 append：每行一次 objectWillChange，结果上千条时界面开始卡")
+        XCTAssertFalse(code.contains("results.sort"),
+                       "★ 排序规则只许有一份：闭包里再 sort 一次，就等于放弃了 Core 的 tie-break")
+        // 上限与总数只能经窗口，不许在 App 层另写一个 200。
+        XCTAssertFalse(code.contains(".prefix(200)"),
+                       "★ 200 只许出现在 `SearchResultLimit.perSearch` 一处，界面与模型都不许再写一遍")
     }
 }

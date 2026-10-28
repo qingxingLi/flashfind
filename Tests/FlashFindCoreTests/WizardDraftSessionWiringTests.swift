@@ -78,11 +78,22 @@ final class WizardDraftSessionWiringTests: XCTestCase {
 
     /// ★ 这条直接对着 bug：`guard pendingProvider != nil` 会让编辑态永远进不来。
     func testToggleScopeUsesSessionOwnershipNotPendingProvider() throws {
-        let method = try body(of: "toggleDraftScope", in: try controllerSource())
-        XCTAssertTrue(method.contains("draftSession.canEditScopes"),
+        let source = try controllerSource()
+        let method = try body(of: "toggleDraftScope", in: source)
+        // 勾一个 / 全选 / 取消全选三个入口共用同一道准入门（2026-10-27 加的批量入口
+        // 也走它）。断言跟着代码走：判断留在共用函数里，这里只查「有没有过门」。
+        XCTAssertTrue(method.contains("mayEditDraftScopes()"),
+                      "勾选要过共用的准入门，不许各写一份")
+        let gate = try body(of: "mayEditDraftScopes", in: source)
+        XCTAssertTrue(gate.contains("draftSession.canEditScopes"),
                       "勾选是否可用要问会话本身（借来的也能改）")
-        XCTAssertFalse(method.contains("pendingProvider != nil"),
+        XCTAssertFalse(gate.contains("pendingProvider != nil"),
                        "旧的判定「有没有本次新连的会话」会让编辑已连接来源时永远提示「请先完成连接」")
+        for entry in ["toggleDraftScope", "selectAllDraftScopes", "clearAllDraftScopes"] {
+            let body = try body(of: entry, in: source)
+            XCTAssertTrue(body.contains("mayEditDraftScopes()"),
+                          "\(entry) 没过准入门：按下去可能什么都不说")
+        }
     }
 
     // MARK: - 取消 / 返回：不许断开借来的会话，且要回滚范围
