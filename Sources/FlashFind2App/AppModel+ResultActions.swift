@@ -6,27 +6,15 @@ import FlashFindCore
 // ─────────────────────────────────────────────────────────────────────────────
 // AppModel 的「结果定位与打开」分区（Stage 3A）。
 //
-// 一组彼此咬合的动作：绑定挂载目录 → 解析结果 URL（必要时触发挂载）→ 打开 /
-// 预览 / 复制 / 在 Finder 中定位。它们共同回答一个问题：**搜到的这一条，
-// 用户到底能不能打开**。所以放在一起，不按「转发 / 非转发」拆散。
+// 一组彼此咬合的动作：解析结果 URL（必要时触发挂载）→ 打开 / 预览 / 复制 /
+// 在 Finder 中定位。它们共同回答一个问题：**搜到的这一条，用户到底能不能打开**。
+// 所以放在一起，不按「转发 / 非转发」拆散。
 //
-// 行为一行未改，调用点仍是 `model.xxx`，一行不动。
+// 2026-10-28 清理：删掉了服务端线残留的「bind / 挂载绑定」分支与 openServerManagement
+//（那条产品线已废弃，且没有任何界面调用方）。
 // ─────────────────────────────────────────────────────────────────────────────
 extension AppModel {
-    func bind(_ source: Source) {
-        if fixtureMode, let id = selectedConnectionID {
-            _ = updateProfile(id, { $0.bindings[source.id] = MountBinding(root: AppEnvironment.previewRoot.appendingPathComponent("MockMount")) })
-            updateCompatibility(); status = "UI 样例：绑定已保存到内存"; return
-        }
-        guard !AppEnvironment.isPreview, let id = selectedConnectionID,
-              connectionStates[id]?.sources.contains(source) == true else { return }
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let binding = MountBinding(root: url, bookmark: try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))
-        guard updateProfile(id, { $0.bindings[source.id] = binding }) else { return }
-        updateCompatibility(); invalidate(); changedQuery(); status = "已绑定 " + source.name
-    }
-    /// 当前列表里这一行还能不能操作（还在这批结果里、来源与权限也没变）。
+    /// 当前列表里这一行还能不能操作（还在这批结果里）。
     func currentResult(_ result: SearchResult) -> SearchResult? {
         guard canUseDisplayedResults, results.contains(where: { $0.id == result.id }) else { return nil }
         return actionableRow(result)
@@ -36,17 +24,11 @@ extension AppModel {
     ///
     /// ★ 与 `currentResult` 只差**一条**：不要求它此刻还在 `results` 里。
     ///   钉住的意义就是「搜索框去搜下一组，这一批留着」，所以「不在当前结果里」
-    ///   是**常态**，不是失效。但来源开关、权限版本、连接状态这些照旧要核——
+    ///   是**常态**，不是失效。但来源开关这些照旧要核——
     ///   钉住的结果也可能因为断开 NAS 而打不开，那时该说「搜索或权限已变化」。
     func pinnedResult(_ result: SearchResult) -> SearchResult? { actionableRow(result) }
 
     private func actionableRow(_ row: SearchResult) -> SearchResult? {
-        if let id = row.connectionID {
-            guard enabled, let profile = nasConnections.first(where: { $0.id == id }), profile.enabled,
-                  profile.cacheProfile == row.accountProfile, let runtime = runtimes[id], !runtime.blocked,
-                  runtime.permissionRevision == row.permissionRevision, profile.selectedSourceIDs.contains(row.sourceID ?? ""),
-                  connectionStates[id]?.sources.contains(where: { $0.id == row.sourceID }) == true else { return nil }
-        }
         return row
     }
     /// 解析结果的本地 URL。
@@ -59,10 +41,7 @@ extension AppModel {
            let provider = nativeProviders.values.first(where: { $0.source.id == sourceID }) {
             return try await provider.verifiedFileURL(result)
         }
-        guard let id = result.connectionID, let profile = nasConnections.first(where: { $0.id == id }),
-              let sourceID = result.sourceID, let source = connectionStates[id]?.sources.first(where: { $0.id == sourceID }),
-              let binding = profile.bindings[sourceID] else { throw FlashFindError.message("请先为此 NAS 来源绑定 SMB 挂载目录") }
-        return try binding.resolve(source: source, relativePath: result.relativePath)
+        throw FlashFindError.message("此结果来自已下线的搜索来源，无法打开")
     }
 
     func preferredOpenTarget(_ result: SearchResult) async throws -> SearchOpenTarget {
@@ -82,15 +61,9 @@ extension AppModel {
            let provider = nativeProviders.values.first(where: { $0.source.id == sourceID }) {
             return try provider.verifiedFileURLWithoutMounting(result)
         }
-        return try fileURLSync(result)
+        throw FlashFindError.message("此结果来自已下线的搜索来源，无法打开")
     }
 
-    func fileURLSync(_ result: SearchResult) throws -> URL {
-        guard let id = result.connectionID, let profile = nasConnections.first(where: { $0.id == id }),
-              let sourceID = result.sourceID, let source = connectionStates[id]?.sources.first(where: { $0.id == sourceID }),
-              let binding = profile.bindings[sourceID] else { throw FlashFindError.message("请先为此 NAS 来源绑定 SMB 挂载目录") }
-        return try binding.resolve(source: source, relativePath: result.relativePath)
-    }
     func openSelectedResult() { if let row = results.first(where: { $0.id == selected }) { openCurrentResult(row) } }
     var selectedResult: SearchResult? { results.first { $0.id == selected } }
     /// ⌘↵：在 Finder 中定位当前结果。
@@ -124,9 +97,4 @@ extension AppModel {
     func copy(_ result: SearchResult) { resultActions.copyPath(result) }
     /// 复制网页链接。只有网页来源（OpenList 这类）有；与「复制路径」是两个不同结果。
     func copyWebLink(_ result: SearchResult) { resultActions.copyWebLink(result) }
-    func openServerManagement() {
-        guard !AppEnvironment.isPreview, let id = selectedConnectionID,
-              let profile = nasConnections.first(where: { $0.id == id }), let url = URL(string: profile.address), url.scheme == "https" else { return }
-        if !NSWorkspace.shared.open(url) { status = "系统无法打开服务器管理页面" }
-    }
 }

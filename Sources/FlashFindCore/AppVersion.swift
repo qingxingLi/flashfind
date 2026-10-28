@@ -7,8 +7,8 @@ import Foundation
 /// 另一处又拼成别的说法，同一次安装里出现两个版本号。
 /// 所以读取与格式化都收在这里，`AboutPanel` 与 `SettingsView` 共用。
 ///
-/// 界面只认短版本（`1.0.1`），**不带构建号**。构建号是内部序号：同一个 `1.0.1`
-/// 会为了修 bug 重打若干次（build 18、19…），摆进界面只会让用户看到一串对不上
+/// 界面只认短版本（如 `1.1.29`），**不带构建号**。构建号是内部序号：同一个短版本
+/// 会为了修 bug 重打若干次（build 77、78…），摆进界面只会让用户看到一串对不上
 /// 任何东西的数字，还得有人解释它是什么。构建号仍留在 Info.plist 的
 /// `CFBundleVersion` 里，打包脚本与 CI 拿它比对，但**不进界面**。
 ///
@@ -17,10 +17,10 @@ import Foundation
 /// 把拼装逻辑抽出来才测得到。
 public enum AppVersion {
 
-    /// 一行式展示的版本号：`1.0.1`。
+    /// 一行式展示的版本号（如 `1.1.29`）。
     ///
     /// 缺值时降级而不是摆空占位——读不到版本就显示 `—`，
-    /// 两端的空白要剪掉，Info.plist 里多敲一个空格不该显示成 ` 1.0.1 `。
+    /// 两端的空白要剪掉，Info.plist 里多敲一个空格不该显示成带空格的样子。
     public static func displayText(short: String?) -> String {
         let s = (short ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? "—" : s

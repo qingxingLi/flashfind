@@ -83,14 +83,14 @@ final class ReleaseBackendTests: XCTestCase {
                       "兜底要真的切换后端（记住这次降级），不能只是把失败吞掉")
     }
 
-    /// 文件后端不许删：迁移读取与命令行工具都还要用它。
+    /// 文件后端不许删：迁移读取还要用它。
+    ///
+    /// 2026-10-28：FlashFindCLI 随自研服务端线一起删除，原先「CLI 落盘方式」的
+    /// 断言一并移除；文件后端本身仍服务于明文迁移读取。
     func testFileBackendIsStillAvailableForMigrationAndTools() throws {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: clientRoot.appendingPathComponent("Sources/FlashFindCore/FileSecretStore.swift").path),
-            "文件后端是迁移源与CLI的落点，不能删")
-        let cli = try contents("tools/DevTools/FlashFindCLI/main.swift")
-        XCTAssertTrue(cli.contains(fileBackend),
-                      "命令行工具仍按自己的方式落盘 —— 它进 DevTools 了，不该拖着 GUI 一起停")
+            "文件后端是迁移源的落点，不能删")
     }
 
     /// 身份绑定真的接进了保存路径：只在读取侧校验是不够的，写的时候就得带上。

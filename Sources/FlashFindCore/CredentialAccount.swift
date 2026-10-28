@@ -15,14 +15,6 @@ public enum CredentialAccount {
         "nas:" + id + ":" + AccountProfile.key(address: address, username: username)
     }
 
-    /// 早期拼法（`<地址>|<账号>`），CLI 与旧版读过它存的凭据。
-    ///
-    /// 它**不含 sourceID**，因此身份绑定的强度弱于另外两种；保留是因为存量凭据就按它存的，
-    /// 改掉等于让老用户重新输一遍密码。
-    public static func legacy(address: String, username: String) -> String {
-        address + "|" + username
-    }
-
     /// 三个前缀，供审计脱敏与日志识别。
     public static let sourcePrefix = "nas-source:"
     public static let profilePrefix = "nas:"

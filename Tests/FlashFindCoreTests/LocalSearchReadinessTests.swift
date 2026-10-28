@@ -109,11 +109,4 @@ final class LocalSearchReadinessTests: XCTestCase {
         XCTAssertEqual(URL(string: candidate.safeSMBURL)?.scheme, "smb")
         XCTAssertNil(SMBMountCandidate.parse(origin: "//alice@nas/share/subfolder", mountPath: "/Volumes/x"))
     }
-    func testBlankNASIsNotConfiguredOrEnabled() {
-        let blank = NASConnectionProfile()
-        XCTAssertFalse(blank.enabled)
-        XCTAssertFalse(blank.isConfigured)
-        XCTAssertFalse(NASConnectionProfile(address: "https://nas.example", username: "").isConfigured)
-        XCTAssertTrue(NASConnectionProfile(address: "https://nas.example:9543", username: "alice").isConfigured)
-    }
 }

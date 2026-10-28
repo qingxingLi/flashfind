@@ -24,7 +24,6 @@ struct SearchFieldModule: View {
     @Binding var query: String
     let focused: FocusState<Bool>.Binding
     let searching: Bool
-    let syncing: Bool
     let submit: () -> Void
     /// 用当前关键词**重跑一次**全部来源。
     ///
@@ -93,7 +92,7 @@ struct SearchFieldModule: View {
                 .textFieldStyle(.plain).font(.system(size: 20, weight: .regular))
                 .focused(focused).onSubmit(submit)
                 .accessibilityLabel("搜索文件与文件夹")
-            if searching || syncing { ProgressView().controlSize(.small).accessibilityLabel(searching ? "正在搜索" : "正在同步") }
+            if searching { ProgressView().controlSize(.small).accessibilityLabel("正在搜索") }
             if !query.isEmpty {
                 Button { query = ""; focused.wrappedValue = true } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)

@@ -32,13 +32,13 @@ let helperInfoPlist = packagingDirectory.appendingPathComponent("HelperInfo.plis
 //
 // 对外产品是 Core 库、App，以及 1.1.2 起随包分发的 MCP 助手（target 名
 // `FlashFindMCP`，打包后叫 `flashfind-mcp`）。CLI / smoke 是开发期工具，源码在
-// tools/DevTools/，不列进 products，但仍可 `swift run FlashFindCLI` /
-// `swift build --target FlashFindSmoke` 构建。
+// tools/DevTools/，不列进 products，但仍可 `swift run` /
+
 let package = Package(
     name: "FlashFind2",
     platforms: [.macOS(.v13)],
     // 说明：`FlashFindMCP` 没有单独的 product 条目——SwiftPM 会给每个
-    // executableTarget 自动生成同名 product（`FlashFindCLI` / `FlashFindSmoke` 也是
+    // executableTarget 自动生成同名 product（各个 DevTools 工具也是
     // 这样来的，见 `swift package describe`）。这里不重复声明，免得以后有人以为
     // 「没写进 products 就不算产品」而再加一份。
     products: [.library(name: "FlashFindCore", targets: ["FlashFindCore"]),
@@ -90,10 +90,6 @@ let package = Package(
                                .product(name: "MCP", package: "swift-sdk"),
                                .product(name: "Logging", package: "swift-log")]),
 
-        .executableTarget(name: "FlashFindCLI", dependencies: ["FlashFindCore"],
-                          path: "tools/DevTools/FlashFindCLI"),
-        .executableTarget(name: "FlashFindSmoke", dependencies: ["FlashFindCore"],
-                          path: "tools/DevTools/FlashFindSmoke"),
         // Phase 6.1 的**跨进程**冒烟入口：起一个真实的权威端监听，让另一个进程去连。
         // `swift test` 里的监听与用例同进程，证明不了权限位、第二个实例、stale 接管
         // 这些「跨进程才看得见」的事。不进产品（与上面两个 CLI 同类）。

@@ -358,8 +358,7 @@ final class SearchPanelController {
             // 所以这两个量就是这条缺陷的唯一判据——截图看不出来，肉眼也看不出来。
             "dragProbes": Self.dragProbes(panel: panel, results: results.panel.isVisible ? results.panel : nil),
             "cacheRoot": AppEnvironment.previewRoot.path,
-            "networkEnabled": model.enabled,
-            "rememberPassword": model.rememberPassword
+            "networkEnabled": model.enabled
         ]
         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: root.appendingPathComponent("current-window.json"), options: .atomic)

@@ -187,33 +187,6 @@ public enum CredentialStore {
         delete(account: config.credentialAccount, reason: "来源已被用户移除")
     }
 
-    // MARK: - 旧键规则条目的清理
-
-    /// 清掉同一目标在**旧键规则**下的那条副本。
-    ///
-    /// 1.0 时期凭据按 `<地址>|<账号>` 存（`CredentialAccount.legacy`），新键是 `nas-source:<id>`。
-    /// 换键之后旧条目不会自己消失：它不含来源 ID，于是「删来源」「关记住密码」
-    /// 两条删除路径都点不到它——用户以为密码已清干净，钥匙串里其实还留着一份。
-    ///
-    /// 两个前提，缺一不可：
-    /// - **只能按已知键定点删**。钥匙串**不能枚举**（`allAccounts` 会触碰系统授权），
-    ///   所以找不出「现在有哪些孤儿」，只能由握着旧键的一方（连接档案的
-    ///   `legacyCredentialAccount`）指名删除。
-    /// - **只能在新键那一份确认写进去之后调用**。本函数不读新键（读 = 一次授权），
-    ///   因此它无法自证「新的一份确实在」；顺序搞反就变成删掉唯一副本。
-    ///
-    /// - Returns: 是否真的删掉了东西。
-    @discardableResult
-    public static func removeLegacyItem(_ legacyAccount: String?,
-                                        migratedTo account: String,
-                                        reason: String = "未标注") -> Bool {
-        guard let legacyAccount, !legacyAccount.isEmpty else { return false }
-        // 新旧是同一个键：新键那次删除已经处理过了。再删一次不但多报一条变更，
-        // 更要紧的是——此时「旧键」就是刚写进去的那份活凭据，删它等于清掉唯一副本。
-        guard legacyAccount != account else { return false }
-        return delete(account: legacyAccount, reason: reason)
-    }
-
     // MARK: - 迁移（明文 → 其它后端）
 
     /// 把旧明文文件里的凭据写入当前后端。

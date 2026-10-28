@@ -21,22 +21,13 @@ final class LocalSourceController: ObservableObject {
     /// 初值若写死成「正在检查本机搜索状态」，而启动时没有任何地方真的去检查，
     /// 那行字就会一直挂着，检查永远不会结束。
     @Published var localSearchAvailabilityMessage = ""
-    @Published var mountedSMBShares: [SMBMountCandidate] = []
-    @Published var importedSMBShare: SMBMountCandidate?
-    @Published var mountedSMBDiscoveryCompleted = false
-    @Published var mountedSMBDiscoveryError: String?
 
-    private var importedShares: [String: SMBMountCandidate] = [:]
     private let preferences: any ClientPreferences
-    private let mountDiscovery: @Sendable () throws -> [SMBMountCandidate]
     private let isPreview: Bool
     private let fixtureMode: Bool
 
-    init(preferences: any ClientPreferences,
-         mountDiscovery: @escaping @Sendable () throws -> [SMBMountCandidate],
-         isPreview: Bool, fixtureMode: Bool) {
+    init(preferences: any ClientPreferences, isPreview: Bool, fixtureMode: Bool) {
         self.preferences = preferences
-        self.mountDiscovery = mountDiscovery
         self.isPreview = isPreview
         self.fixtureMode = fixtureMode
     }
@@ -47,19 +38,6 @@ final class LocalSourceController: ObservableObject {
     var onStatus: (String) -> Void = { _ in }
     /// 影响搜索结果的配置变了：作废当前结果并重新发起。
     var onSearchReset: () -> Void = {}
-    /// 导入一条挂载共享时要先建一条新连接，返回它的 ID。
-    var createConnection: () -> String? = { nil }
-    /// 把导入得到的共享名与账号填进连接表单。
-    var applyImportedIdentity: (_ name: String, _ username: String) -> Void = { _, _ in }
-    /// 清空地址与密码：挂载信息里没有索引服务地址，那一项仍要用户自己填。
-    var clearAddressAndPassword: () -> Void = {}
-    /// 当前选中的连接。绑定写的是这条连接的配置。
-    var currentConnectionID: () -> String? = { nil }
-    /// 某个来源的 SMB 端点。判断「导入的共享是不是这个来源」要用。
-    var endpointForSource: (String) -> String? = { _ in nil }
-    var applyBinding: (_ connectionID: String, _ sourceID: String, _ root: URL) -> Bool = { _, _, _ in false }
-    /// 绑定写完之后刷新兼容性与搜索。
-    var onBindingsChanged: () -> Void = {}
 
     // MARK: - 启动装配
 
@@ -150,72 +128,4 @@ final class LocalSourceController: ObservableObject {
         localSettingsChanged()
     }
 
-    // MARK: - 已挂载的 SMB 共享
-
-    func refreshMountedSMBShares() {
-        if fixtureMode {
-            let fixtures = ProcessInfo.processInfo.environment["FF_UI_MOUNTS"] == "empty" ? [] : [SMBMountCandidate.parse(origin: "//fixture-user@nas.example/Team", mountPath: AppEnvironment.previewRoot.appendingPathComponent("MockMount").path)].compactMap { $0 }
-            mountedSMBShares = fixtures
-            mountedSMBDiscoveryCompleted = true
-            onStatus("UI 样例：仅模拟挂载信息，未读取本机挂载表")
-            return
-        }
-        guard !isPreview else { return }
-        Task {
-            let discover = mountDiscovery
-            do {
-                let candidates = try await Task.detached { try discover() }.value
-                mountedSMBShares = candidates
-                mountedSMBDiscoveryError = nil
-                onStatus(candidates.isEmpty ? "没有发现已挂载的 SMB 共享；不会自动连接 NAS"
-                                            : "发现 \(candidates.count) 个已挂载共享，请选择导入；仍需配置 HTTPS 索引服务")
-            } catch {
-                mountedSMBShares = []
-                mountedSMBDiscoveryError = error.localizedDescription
-                onStatus("挂载信息读取失败：" + error.localizedDescription)
-            }
-            mountedSMBDiscoveryCompleted = true
-        }
-    }
-
-    /// 把一条已挂载共享导入成新的连接草稿。
-    ///
-    /// ★ 只带过来「这台机器上挂着哪个共享」，**不带密码**——
-    /// 挂载表里没有索引服务的凭据，索引地址也必须用户自己填。
-    @discardableResult
-    func importMountedSMB(_ id: String) -> Bool {
-        guard let candidate = mountedSMBShares.first(where: { $0.id == id }) else {
-            onStatus("挂载信息已变化，请重新刷新后选择")
-            return false
-        }
-        guard let connectionID = createConnection() else { return false }
-        importedShares[connectionID] = candidate
-        importedSMBShare = candidate
-        applyImportedIdentity(candidate.host + " / " + candidate.shareName, candidate.username ?? "")
-        clearAddressAndPassword()
-        onStatus("已导入 SMB 挂载信息；请填写实际 HTTPS 索引地址并确认账号。没有读取 Finder 密码或取得索引登录令牌。")
-        return true
-    }
-
-    /// 切到某条连接时，把当初导入的那条挂载共享带回来（没有就是 nil）。
-    func restoreImportedShare(for connectionID: String) {
-        importedSMBShare = importedShares[connectionID]
-    }
-
-    /// 导入的共享是不是就是这个来源——是才允许直接绑定，否则让用户手动选目录。
-    func canApplyImportedSMBBinding(_ sourceID: String) -> Bool {
-        guard let candidate = importedSMBShare, let endpoint = endpointForSource(sourceID) else { return false }
-        return candidate.matches(smbEndpoint: endpoint)
-    }
-
-    func applyImportedSMBBinding(_ sourceID: String) {
-        guard (!isPreview || fixtureMode), let id = currentConnectionID(), let candidate = importedSMBShare,
-              canApplyImportedSMBBinding(sourceID),
-              applyBinding(id, sourceID, candidate.mountRoot) else {
-            onStatus("挂载共享与此来源不匹配，请通过目录选择器手动绑定")
-            return
-        }
-        onBindingsChanged()
-        onStatus("已使用所选已挂载共享绑定此来源；没有重新登录 SMB")
-    }
 }

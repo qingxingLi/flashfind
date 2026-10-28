@@ -60,7 +60,6 @@ struct SearchView: View {
     private var fieldModule: some View {
         SearchFieldModule(query: $model.query, focused: $focused,
                           searching: model.searching || pending,
-                          syncing: model.syncing,
                           submit: model.openSelectedResult,
                           research: model.changedQuery,
                           openSettings: openSettings,

@@ -314,11 +314,13 @@ final class AppLayerStructureTests: XCTestCase {
                       "必须把 localSources 的 objectWillChange 接到 AppModel，否则设置界面不刷新")
     }
 
-    /// ★ 本机来源的三件事只能住在 controller 里：
-    /// 偏好读写、本机文件夹选择、挂载表发现。
+    /// ★ 本机来源的两件事只能住在 controller 里：偏好读写、本机文件夹选择。
     ///
-    /// `NSOpenPanel` 本身不能拿来做断言——AppModel 里还有 `bind(_:)`
-    /// 给旧版来源绑目录，也是同一个面板。所以挑只属于「本机文件夹」的
+    /// （挂载表发现已随「导入已挂载 SMB 共享」流程一起移除——那条流程是
+    /// 自研服务端线的配套 UX，没有任何界面调用方。SMB 挂载的现行入口在
+    /// Core 的 `SMBMountService` 与打开结果时的自动挂载，不归这里。）
+    ///
+    /// `NSOpenPanel` 本身不能拿来做断言——所以挑只属于「本机文件夹」的
     /// `volumeIsLocalKey`（网络卷不许进本机搜索）作标记。
     func testLocalSourceMechanicsLiveOnlyInController() throws {
         let appModel = try appModelCode()
@@ -326,13 +328,10 @@ final class AppLayerStructureTests: XCTestCase {
                        "选择本机文件夹（含排除网络卷）应归 LocalSourceController")
         XCTAssertFalse(appModel.contains("ff2.localSearchMode"),
                        "本机搜索方式的偏好读写应归 LocalSourceController")
-        XCTAssertFalse(appModel.contains("self.mountDiscovery ="),
-                       "挂载表读取的入口应随状态一起搬到 LocalSourceController")
 
         let controller = codeOnly(try appSource("LocalSourceController.swift"))
         XCTAssertTrue(controller.contains("volumeIsLocalKey"))
         XCTAssertTrue(controller.contains("ff2.localSearchMode"))
-        XCTAssertTrue(controller.contains("mountDiscovery"))
     }
 
     // MARK: - 向导（添加 / 编辑 NAS 来源）
@@ -349,8 +348,8 @@ final class AppLayerStructureTests: XCTestCase {
         for name in ["draftSource", "draftStatus", "draftBusy", "draftConnected", "draftAvailableShares",
                      "nasSources", "nasSourceStatus", "nativeProviders", "selectedSourceID",
                      "nativeNASPassword", "nativeNASOTP", "nasTrustCandidate"] {
-            // ★ 要整词匹配：`selectedSourceID` 会被 `selectedSourceIDs`
-            // （复数、属于 NASConnectionProfile）误伤——那是另一个字段，不在此列。
+            // ★ 要整词匹配：`selectedSourceID` 会被复数形式的 `selectedSourceIDs`
+            // （另一个字段）误伤——后者不在此列。
             let publishedLine = appModel.split(separator: "\n").first { line in
                 guard line.contains("@Published") else { return false }
                 return line.contains(name + " ") || line.contains(name + ":")
@@ -3550,7 +3549,7 @@ final class AppLayerStructureTests: XCTestCase {
     /// 「只留前 200」与「总共匹配多少」。断言因此改成两层：
     /// App 层只许调用 `integrateResults`，窗口内部才许出现 `SearchResultMerge.apply`。
     func testSearchBatchMergeGoesThroughCoreAndAssignsOnce() throws {
-        let code = codeOnly(try appSource("AppModel+NASConnections.swift"))
+        let code = codeOnly(try appSource("AppModel+SearchSession+Results.swift"))
         XCTAssertTrue(code.contains("integrateResults(event.results)"),
                       "结果批必须走 `integrateResults`（上限、去重、总数、一次赋值都在 Core 的窗口里）")
         XCTAssertTrue(code.contains("resultWindow.integrate(incoming)"),

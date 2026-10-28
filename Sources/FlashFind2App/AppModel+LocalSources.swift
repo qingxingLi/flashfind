@@ -14,11 +14,6 @@ extension AppModel {
     // 界面直接调 AppModel，保留这些签名是为了调用点一行不改。
     func refreshLocalSearchAvailability() { localSources.refreshLocalSearchAvailability() }
     func setLocalSearchMode(_ mode: LocalSearchMode) { localSources.setLocalSearchMode(mode) }
-    func refreshMountedSMBShares() { localSources.refreshMountedSMBShares() }
-    @discardableResult
-    func importMountedSMB(_ id: String) -> Bool { localSources.importMountedSMB(id) }
-    func canApplyImportedSMBBinding(_ sourceID: String) -> Bool { localSources.canApplyImportedSMBBinding(sourceID) }
-    func applyImportedSMBBinding(_ sourceID: String) { localSources.applyImportedSMBBinding(sourceID) }
     func removeLocalFolder(_ folder: URL) { localSources.removeLocalFolder(folder) }
     func addLocalFolder() { localSources.addLocalFolder() }
     func localSettingsChanged() { localSources.localSettingsChanged() }

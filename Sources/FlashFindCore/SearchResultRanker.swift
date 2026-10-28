@@ -2,7 +2,7 @@ import Foundation
 
 /// 搜索结果与查询词的相关度评分。
 ///
-/// 分值越低越靠前。与 `LocalFolderSearch`、`IndexDatabase`、`AppCatalog`
+/// 分值越低越靠前。与 `LocalFolderSearch`、`AppCatalog`
 /// 使用同一套约定（整名 0 / 前缀 1 / 全词命中 2 / 路径命中 3 / 其余 4），
 /// 这样 NAS、本地、应用三类结果合并排序时不会互相插队。
 ///
