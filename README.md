@@ -52,8 +52,8 @@ NAS 上的文件要找，通常得先连上共享文件夹，再用 Finder 慢�
 |---|---|---|
 | 群晖 Synology | DSM `SYNO.FileStation.Search` v2 | 走 DSM 的 Web API，支持 OTP 双因子登录 |
 | OpenList | OpenList 的 `/api/fs/search` | 自带账号体系，支持 2FA 动态码；按搜索根查询，最多 4 路并发 |
-| 通用 WebDAV | WebDAV `PROPFIND` / `SEARCH` | 含飞牛 fnOS 等；OpenList 的入口是 `/dav` 且必须 https |
-| SMB/CIFS | 系统 `mount_smbfs` | 只用于打开结果，不用于搜索 |
+| WebDAV / 威联通 / 绿联 | 实验性，默认隐藏 | 需在设置打开「显示实验性搜索来源」才可见；WebDAV 走 `PROPFIND` 爬目录树，未经真机全面验证，速度与连通性不做承诺 |
+| SMB/CIFS | 系统 `mount_smbfs` | 不作为搜索来源；只在打开结果时匹配本机已有的挂载路径 |
 
 局域网发现走五路证据合并：Bonjour / Synology UDP 9999 / SSDP / ARP / TCP 端口探测
 （端口探测已降级为兜底，只探「ARP 说在线但没有任何识别证据」的主机）。
