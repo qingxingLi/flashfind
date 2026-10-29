@@ -1,6 +1,6 @@
 """Reproducibly compile the frozen MyNAS Dart core and native trust helper into app resources."""
 from pathlib import Path
-import argparse,hashlib,json,os,shutil,subprocess
+import argparse,hashlib,json,os,shutil,subprocess,tempfile
 # 本脚本住在 scripts/ 下，往上两级才是 client/；root 是项目根，所有输出都必须落在它里面。
 # root 按**内容**认定（Package.swift + Sources/ + MyNASCore/），不能写死 `client.parents[2]`
 # （那是内部布局的层级），也不能要求 `.git` 存在（GitHub 的 Download ZIP 解压出来没有）。
@@ -71,10 +71,31 @@ for p in ['bin','native','licenses','tmp']: (out/p).mkdir()
 env={'PATH':'/usr/bin:/bin','LANG':'en_US.UTF-8','CI':'true','DART_SUPPRESS_ANALYTICS':'true','CLANG_MODULE_CACHE_PATH':str(cache),'SWIFT_MODULE_CACHE_PATH':str(cache)}
 inputs={str(p.relative_to(source)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(source.rglob('*')) if p.is_file()}
 record={'task':'mynas resources','version':'0.1','date':'2026-10-09','status':'未执行','inputs':inputs,'steps':[],'architecture':arch}
-for name,cmd in [('dart-core',[str(sdk/'bin/dart'),'--disable-dart-dev','compile','exe',str(source/'bin/harness.dart'),'-o',str(out/'bin/mynas-core')]),('native-trust',['/usr/bin/swiftc',*swift_target,str(source/'native/TrustHTTP.swift'),'-o',str(out/'native/TrustHTTP')])]:
- p=subprocess.run(cmd,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT);(logs/(arch+'-'+name+'.log')).write_bytes(p.stdout);record['steps'].append({'name':name,'exitCode':p.returncode})
+# ★ 源码 URI 不许带构建机路径（2026-10-29 实测，1.1.30 及以前一直在带）。
+#   `dart compile exe /绝对路径/harness.dart` 会把 `/Users/<用户名>/Documents/…/MyNASCore/lib/*.dart`
+#   作为源码 URI 嵌进 AOT 产物 —— 不用启动 App，`grep -a /Users` 就能读出发动机的目录结构。
+#   verify_clean 只按文本扫、扫不到二进制，所以这个洞一直没被拦住。
+#   做法：临时目录里放一份同名副本，cwd 进去、用**相对路径**编译 ⇒ URI 落成
+#   `MyNASCore/lib/xxx.dart`。副本只负责路径，内容必须与原件逐字节一致（下面核对），
+#   否则「换了个目录编译」就可能悄悄换掉源码。
+stage=Path(tempfile.mkdtemp(prefix='ff2-dart-'))/'MyNASCore'
+shutil.copytree(source,stage)
+staged={str(p.relative_to(stage)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(stage.rglob('*')) if p.is_file()}
+if staged!=inputs:
+    shutil.rmtree(stage.parent,ignore_errors=True)
+    raise SystemExit('staged Dart sources differ from the originals')
+record['dart_build_cwd']='neutral-tempdir'
+steps=[('dart-core',[str(sdk/'bin/dart'),'--disable-dart-dev','compile','exe','MyNASCore/bin/harness.dart','-o',str(out/'bin/mynas-core')],stage.parent),
+       ('native-trust',['/usr/bin/swiftc',*swift_target,str(source/'native/TrustHTTP.swift'),'-o',str(out/'native/TrustHTTP')],None)]
+for name,cmd,cwd in steps:
+ p=subprocess.run(cmd,env=env,cwd=(str(cwd) if cwd else None),stdout=subprocess.PIPE,stderr=subprocess.STDOUT);(logs/(arch+'-'+name+'.log')).write_bytes(p.stdout);record['steps'].append({'name':name,'exitCode':p.returncode})
  (out/'resource-record.json').write_text(json.dumps(record,ensure_ascii=False,indent=2))
  if p.returncode:raise SystemExit(name+' failed')
+shutil.rmtree(stage.parent,ignore_errors=True)
+# 硬闸：产物里一个构建机绝对路径都不许有（相对 URI 是允许的，那正是修好的样子）。
+leaky=[rel for rel in ('bin/mynas-core','native/TrustHTTP') if b'/Users/' in (out/rel).read_bytes()]
+if leaky:
+ raise SystemExit('build-machine path leaked into packaged binary: '+', '.join(leaky))
 # 产物架构必须与声明一致：一个架构混进另一个，只有「跑起来不对」时才暴露。
 record['productArchs']={}
 for rel in ('bin/mynas-core','native/TrustHTTP'):

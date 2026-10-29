@@ -560,6 +560,11 @@ macos.mkdir(parents=True)
 (app / 'Contents/Resources').mkdir()
 shutil.copyfile(binary, macos / 'FlashFind2App')
 (macos / 'FlashFind2App').chmod(0o755)
+# ★ 调试映射表（STABS 的 N_SO / N_OSO）里写着构建机的绝对路径：
+#   `/Users/<用户名>/Documents/…/client/.ff2-scratch/out/…/Objects-normal/…`。
+#   1.1.49 实测主二进制 547 处、helper 441 处 —— 公开资产不该带这些。
+#   必须在**签名之前** strip：签完再动二进制，`codesign --verify` 立刻报封存不符。
+run(['strip', '-S', str(macos / 'FlashFind2App')], 'strip-app')
 
 # 首次运行教学：离线 HTML 随包分发，不依赖开发机路径。
 onboarding_source = client / 'Resources/Onboarding'
@@ -581,6 +586,9 @@ helpers = app / 'Contents/Helpers'
 helpers.mkdir(parents=True)
 shutil.copyfile(helper_binary, helpers / HELPER_NAME)
 (helpers / HELPER_NAME).chmod(0o755)
+# 同上：Helper 也带 STABS 调试映射表（1.1.49 实测 441 处）。嵌进去的 Info.plist 是
+# `__TEXT` 段，strip -S 只删调试符号，不动它 —— 版本自检在上面已经做过一遍了。
+run(['strip', '-S', str(helpers / HELPER_NAME)], 'strip-helper')
 record['helper']['path_in_app'] = 'Contents/Helpers/' + HELPER_NAME
 record['helper']['entries'] = verify_helpers_directory(app)
 info = plistlib.loads((client / 'Resources/Packaging/Info.plist').read_bytes())
@@ -657,6 +665,14 @@ if leaked:
 app_logs = sorted(str(p.relative_to(app)) for p in app.rglob('*.log'))
 if app_logs:
     raise SystemExit('build log leaked into app: ' + ', '.join(app_logs[:5]))
+# ★ 构建机绝对路径同样不许进包（2026-10-29）。日志那条闸只拦 `.log`，
+#   而路径真正藏身的地方是**二进制本身**：Swift 的 STABS 调试映射表、Dart AOT 的源码 URI。
+#   `verify_clean` 按扩展名扫文本，二进制一律被跳过 —— 所以「脱敏检查通过」从来没覆盖过这里。
+#   按字节扫，四种 Mach-O 全查一遍；命中就退回，不打包。
+app_path_leaks = sorted(str(p.relative_to(app)) for p in app.rglob('*')
+                        if p.is_file() and b'/Users/' in p.read_bytes())
+if app_path_leaks:
+    raise SystemExit('build-machine path leaked into app: ' + ', '.join(app_path_leaks[:5]))
 record['app_file_count'] = sum(1 for p in app.rglob('*') if p.is_file())
 record['app_bytes'] = sum(p.stat().st_size for p in app.rglob('*') if p.is_file())
 for component in ('bin/mynas-core', 'native/TrustHTTP'):
