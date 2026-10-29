@@ -186,31 +186,7 @@ struct PinnedResultsView: View {
                 else if hoveredID == result.id { hoveredID = nil }
             }
             .onTapGesture(count: 2) { model.openPinned(result) }
-            .contextMenu { menu(result) }
-    }
-
-    /// 菜单与结果模块里那一套同义：能打开、能定位、能复制。
-    @ViewBuilder private func menu(_ result: SearchResult) -> some View {
-        if result.hasWebOpenTarget {
-            Button("打开", systemImage: "arrow.up.forward.square") { model.openPinned(result) }
-            Divider()
-            Button("复制网页链接", systemImage: "link") { model.copyPinnedWebLink(result) }
-            Button("复制站点内路径", systemImage: "doc.on.doc") { model.copyPinned(result) }
-        } else {
-            Button("打开", systemImage: "arrow.up.forward.square") { model.openPinned(result) }
-            Button("在 Finder 中显示", systemImage: "folder") { model.openPinned(result, reveal: true) }
-            Button("快速查看", systemImage: "eye") { model.quickLookPinned(result) }
-            Divider()
-            Button("复制路径", systemImage: "doc.on.doc") { model.copyPinned(result) }
-        }
-        // 与主结果窗同一条口径：下载是显式动作，不进默认打开链。
-        // 钉住窗里的行是**快照**，下载前会经 resolve 重新核来源与权限。
-        if model.supportsDirectDownload(result) {
-            Divider()
-            Button("下载后打开", systemImage: "arrow.down.circle") { model.downloadAndOpen(result) }
-            Button("下载到…", systemImage: "square.and.arrow.down") { model.downloadToFolder(result) }
-        }
-        Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
+            .contextMenu { ResultContextMenu(result: result, pinned: true, model: model) }
     }
 }
 

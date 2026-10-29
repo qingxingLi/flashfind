@@ -44,17 +44,25 @@ final class ResultActionController: ObservableObject {
     var onStatus: (String) -> Void = { _ in }
     /// 让浮窗收起。定位到访达后必须让位，否则浮窗还压在访达上面。
     var onHidePanel: () -> Void = {}
+    /// 打开退到网页时的一条诊断（App 层注入，写进 NAS 诊断文件）。
+    ///
+    /// 用户看到的只是「双击打开了登录页」，而原因有四种：结果行没有 SMB 目标、
+    /// 有目标但认不出本机挂载、认出了但 445 不通、以及最后一种「根本没有网页入口」。
+    /// 不在这一刻记一笔，下一次报障又要从头猜一遍。
+    var onWebFallback: (SearchResult) -> Void = { _ in }
 
-    // MARK: - 下载（fnOS 右键动作）
+    // MARK: - 下载（三家 NAS 共用的右键动作）
 
     /// 打开链的默认路径是 SMB（可达时）/网页（不可达时），**下载只出现在
     /// 右键菜单里**（2026-10-29 用户定）：它耗时且占流量，只该被显式要求。
-    /// 下载走核心的 `download` 命令（zip 包 → 解包 → 本地临时文件）。
+    ///
+    /// 走哪条路由由 Core 的 `ResultDownloadRouting` 回答（宿主注入本闭包时
+    /// 就按它分派）：飞牛走设备下载接口（zip 包 → 解包），群晖 / OpenList
+    /// 从本机挂载路径拷一份。**菜单项不按品牌出现**——所以这里没有
+    /// 「这个来源不支持下载」这种前置判断。
     var downloadToTemp: (SearchResult) async throws -> URL = { _ in
-        throw FlashFindError.message("这个来源不支持下载")
+        throw FlashFindError.message("这个来源暂不支持下载")
     }
-    /// 这条结果的来源是否提供下载动作（fnOS 是目前唯一实现的品牌）。
-    var supportsDownloadRow: (SearchResult) -> Bool = { _ in false }
 
     // MARK: - 动作
 
@@ -75,6 +83,7 @@ final class ResultActionController: ObservableObject {
                     onStatus("搜索或权限已变化，请重新选择结果"); return
                 }
                 if case .webURL(let url) = target {
+                    onWebFallback(row)
                     guard !reveal else {
                         onStatus("此文件没有可用的本机挂载路径，请直接打开以使用浏览器"); return
                     }

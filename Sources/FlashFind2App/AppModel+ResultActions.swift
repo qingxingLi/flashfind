@@ -83,11 +83,7 @@ extension AppModel {
     // （SearchView、菜单、快捷键作用域都直接调 AppModel）。
     func quickLook(_ result: SearchResult) { resultActions.quickLook(result) }
 
-    /// 这条结果的来源是否提供右键「下载」动作（fnOS）。
-    func supportsDirectDownload(_ result: SearchResult) -> Bool {
-        resultActions.supportsDownloadRow(result)
-    }
-    /// 右键「下载后打开」：下载到临时目录并交系统默认程序打开。
+    /// 右键「下载后打开」：取一份本地副本（设备下载接口 / 从挂载路径拷）并交系统打开。
     func downloadAndOpen(_ result: SearchResult) { resultActions.downloadAndOpen(result) }
     /// 右键「下载到…」：弹保存框选位置，完成后在访达里显示。
     func downloadToFolder(_ result: SearchResult) { resultActions.downloadToFolder(result) }

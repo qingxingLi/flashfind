@@ -389,21 +389,76 @@ final class AppModel: ObservableObject {
             guard let self else { throw FlashFindError.message("已退出") }
             return try self.fileURLWithoutMounting(row)
         }
+        // ★ 「下载」对**所有 NAS 来源**都成立（2026-10-29 用户定：三家右键菜单一样）。
+        //   差别只在怎么拿到本地副本，判定收在 Core 的 `ResultDownloadRouting`：
+        //   飞牛有设备侧下载接口；群晖 / OpenList 从本机挂载路径拷一份。
         resultActions.downloadToTemp = { [weak self] row in
             guard let self else { throw FlashFindError.message("已退出") }
             guard let sourceID = row.sourceID,
                   let provider = self.nativeProviders.values.first(where: { $0.source.id == sourceID }) else {
                 throw FlashFindError.message("此结果来自已下线的搜索来源，无法下载")
             }
-            return try await NASSearchProvider.downloadRowToTemp(row, bridge: provider.bridge,
-                                                                 sourceID: provider.source.id)
-        }
-        resultActions.supportsDownloadRow = { [weak self] row in
-            guard let self, let sourceID = row.sourceID,
-                  let provider = self.nativeProviders.values.first(where: { $0.source.id == sourceID }) else { return false }
-            return provider.config.vendor == .fnos
+            let hasLocalPath = (try? self.fileURLWithoutMounting(row)) != nil
+            switch ResultDownloadRouting.route(for: row, vendor: provider.config.vendor,
+                                               hasLocalPath: hasLocalPath) {
+            case .deviceDownload:
+                return try await NASSearchProvider.downloadRowToTemp(row, bridge: provider.bridge,
+                                                                     sourceID: provider.source.id)
+            case .localCopy:
+                // 没挂载时由打开链先挂上（这一步可能等网络），再拷一份出来。
+                let local = try await self.fileURL(row)
+                return try LocalMirror.copyToTemporaryDirectory(local)
+            case .unsupported(let message):
+                throw FlashFindError.message(message)
+            }
         }
         resultActions.onStatus = { [weak self] text in self?.status = text }
+        // 打开退到网页时记一笔（不含路径 / 文件名 / 凭据）：下次「双击打开了
+        // 登录页」时，这个文件能直接回答是哪一步没认出来。
+        resultActions.onWebFallback = { [weak self] row in
+            guard let self else { return }
+            let provider = row.sourceID.flatMap { id in
+                self.nativeProviders.values.first { $0.source.id == id }
+            }
+            let mounts = (try? SMBMountCandidate.discover()) ?? []
+            // 判定链每一步各留一个证据，下次一眼看出断在哪：
+            //   rowTarget=web/none → 核心没解出共享名（Dart 侧共享表是空的）；
+            //   rowTarget=smb 但 overlap=false → 挂载没认出来（主机/账号/共享名）。
+            // 只放布尔与计数，路径、文件名、共享名、账号一律不进日志。
+            let sshShare: String? = {
+                if case .smbLocation(let url) = row.openTarget { return url.pathComponents.dropFirst().first }
+                return nil
+            }()
+            let overlap = sshShare.map { share in mounts.contains { $0.shareName == share } } ?? false
+            let hostMatch = provider.map { p in
+                mounts.contains { $0.host.caseInsensitiveCompare(p.config.hostName) == .orderedSame }
+            } ?? false
+            // 挂载的共享名有没有出现在结果路径里 —— 这一条能直接说清
+            // 「设备侧共享表按账号可见性过滤、没覆盖这个共享」这种情形。
+            let pathSegments = Set(row.path.split(separator: "/").map(String.init))
+            let nameInPath = mounts.contains { pathSegments.contains($0.shareName) }
+            // `Int??` 直接塞进字典会变成一个空的 Optional，JSON 写不出去。
+            let deviceShareCount: Any = {
+                guard let count = provider?.deviceSmbShareCount else { return NSNull() }
+                return count
+            }()
+            self.diagnostics.append([
+                "at": ISO8601DateFormatter().string(from: Date()),
+                "event": "openFallback",
+                "sourceID": row.sourceID ?? "",
+                "vendor": provider?.config.vendor.rawValue ?? "unknown",
+                "rowHasSMBTarget": !row.hasWebOpenTarget,
+                "rowTarget": sshShare != nil ? "smb" : (row.hasWebOpenTarget ? "web" : "none"),
+                "smbMountSharesOverlapSource": overlap,
+                "smbMountHostMatchesSource": hostMatch,
+                "smbMountShareNameInPath": nameInPath,
+                "deviceAccountKnown": provider?.deviceAccount != nil,
+                // 0 = 设备侧的共享表是空的（重启后没刷 / 设备拒了）；
+                // null = 核心没报这个数（非 SMB 映射品牌）。
+                "deviceSmbShareCount": deviceShareCount,
+                "smbMountCount": mounts.count,
+            ])
+        }
         resultActions.onHidePanel = { [weak self] in self?.hideSearch() }
         resultActionBridge = resultActions.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         // 本机来源：状态与搜索重置由本类回答（旧连接管理的表单/挂载绑定入口

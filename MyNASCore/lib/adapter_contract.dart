@@ -270,6 +270,13 @@ abstract class SmbShareResolving {
   /// 逻辑路径（`/vol2/1000/备份/sub/x.pdf`）→ 共享名 `备份` + 相对段
   /// `[sub, x.pdf]`。不在任何共享前缀下时返回 null。
   SmbShareMapping? smbShareFor(String logicalPath);
+
+  /// 这个会话**已经解析出几条共享**；还没问过时为 null。
+  ///
+  /// 存在的唯一理由是诊断：打开链退到网页时，得能分清是
+  /// 「共享表压根没取到（0 条）」还是「取到了，但这条路径不在任何共享前缀下」。
+  /// **默认 null，不要返回 0** —— 0 是「问了，一条都没有」的断言。
+  int? get resolvedShareCount => null;
 }
 
 /// 一次成功解析的 SMB 映射。
@@ -302,6 +309,30 @@ class SmbShareMapping {
 abstract class SessionSecretProviding {
   /// 下次可直接续期的凭据；拿不到时返回 null（比如还没登录）。
   String? get sessionSecret;
+}
+
+/// 「设备认得我的账号名」的品牌实现这个接口。
+///
+/// ── 为什么需要它 ────────────────────────────────────────────────
+/// 打开链要回答「这台 Mac 上已有的挂载，是不是这台 NAS 的这个共享」
+/// （见 Swift 侧 `SMBMountCandidate.matching`）。判定用的证据是
+/// **共享名 + 登录账号**：来源里填的是域名、访达里挂的是局域网 IP 时，
+/// 域名与 IP 之间没有可靠换算，只剩「谁在登录这个共享」这一条旁证。
+///
+/// 账密品牌的账号就在用户填的表单里（`config.username`）。飞牛没有表单账号
+/// ——它走 OAuth 授权码，来源配置里的账号字段恒为空串，于是那条旁证永远
+/// 拿不到，打开一律退回网页（2026-10-29 真机：文件就在 `/Volumes/共享文档`
+/// 下可读，双击却打开飞牛的登录页）。设备自己在 `user.info` 里报了
+/// `userInfo.user`，这就是 SMB 登录用的那个账号，回传上去即可。
+///
+/// 做成**可选接口**而不是往 `NasBrandAdapter` 里加抽象成员：四个账密适配器是
+/// `implements`，抽象类里的默认实现不会被继承（同 `SessionSecretProviding`）。
+abstract class SignedInAccountProviding {
+  /// 设备侧账号名（`user.info` 的 `userInfo.user`）；还没登录时返回 null。
+  ///
+  /// ★ 这是**登录名**，不是昵称：它要跟 SMB 挂载里的登录账号逐字比对。
+  ///   拿不到就返回 null，不许拿别的东西顶（顶错了会把别的共享认成本来源）。
+  String? get signedInAccount;
 }
 
 /// 授权页上的一项权限。

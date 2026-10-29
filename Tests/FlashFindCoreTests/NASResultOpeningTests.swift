@@ -122,15 +122,104 @@ final class NASResultOpeningTests: XCTestCase {
                        "来源填域名、Finder 用局域网 IP 挂着同账号同共享 ⇒ 必须本地打开")
     }
 
-    func testFnOSDoesNotGuessWhenTheAccountOrShareDiffers() throws {
+    /// ★★ 2026-10-29 真机：飞牛的表单账号恒为空（授权码登录），来源填域名、
+    /// 访达用局域网 IP 挂着**同一个共享**、登录名也不同 —— 旧判定一路退回网页，
+    /// 用户看到的是飞牛登录页，而文件就在 `/Volumes/共享文档` 下可读。
+    func testFnOSOpensTheOnlyMountWithThatShareWhenTheAccountIsUnknown() throws {
         let mountRoot = try fnosRoot()
-        let otherAccount = try smb(user: "someone", at: mountRoot)
+        let mounted = try smb("10.60.70.2", "李青宇", user: "nasuser", at: mountRoot)
+        var locator = fnosLocator()
+        locator = NASLocator(sourceID: "fnos", host: locator.host, shares: locator.shares,
+                             scopePrefixes: locator.scopePrefixes, preferredSMBUser: nil)
+        let target = try NASResultOpening.target(for: try fnosRow(), vendor: .fnos, origin: origin,
+                                                 locator: locator, smbMounts: [mounted], webDAVMounts: [])
+        XCTAssertEqual(target, .mountedFile(mountRoot.appendingPathComponent("文档/报告.pdf").resolvingSymlinksInPath()),
+                       "★ 账号不知道、共享名只挂在一台主机上 ⇒ 就地打开（旧判定这里开登录网页）")
+    }
+
+    func testFnOSDoesNotGuessWhenTheShareDiffers() throws {
+        let mountRoot = try fnosRoot()
         let otherShare = try smb("10.20.30.96", "部门文档", at: mountRoot.appendingPathComponent("文档"))
-        for mounts in [[otherAccount], [otherShare]] {
-            let target = try NASResultOpening.target(for: try fnosRow(), vendor: .fnos, origin: origin,
-                                                     locator: fnosLocator(), smbMounts: mounts, webDAVMounts: [])
-            XCTAssertEqual(target, try fnosRow().openTarget, "账号或共享名对不上时不许猜")
-        }
+        let target = try NASResultOpening.target(for: try fnosRow(), vendor: .fnos, origin: origin,
+                                                 locator: fnosLocator(), smbMounts: [otherShare], webDAVMounts: [])
+        XCTAssertEqual(target, try fnosRow().openTarget, "共享名对不上时不许猜，仍回网页出口")
+    }
+
+    /// 两台设备都挂着同名共享 ⇒ 一条都不认（猜错就是另一台设备上的同名文件）。
+    func testFnOSRefusesTwoHostsWithTheSameShareName() throws {
+        let mountRoot = try fnosRoot()
+        let a = try smb("10.60.70.2", "李青宇", user: "nasuser", at: mountRoot)
+        let b = try smb("10.60.70.9", "李青宇", user: "nasuser", at: mountRoot)
+        let target = try NASResultOpening.target(for: try fnosRow(), vendor: .fnos, origin: origin,
+                                                 locator: fnosLocator(), smbMounts: [a, b], webDAVMounts: [])
+        XCTAssertEqual(target, try fnosRow().openTarget)
+    }
+
+    // MARK: - 飞牛第二条路：设备共享表看不全时，按「本机挂载的共享名出现在路径里」认
+
+    /// ★★ 2026-10-29 真机第三次：这台 NAS 上实际有 14 个 SMB 共享（`smbutil view` 实测），
+    /// 而闪寻账号的 `file.share.list` 只回 1 条 —— **共享表是按账号可见性过滤的**，
+    /// 那条路径覆盖不到 `/vol1/1000/共享文档/示例发票.pdf`。于是结果行的
+    /// `openTarget` 只能是网页，双击开飞牛登录页；而文件就在 `/Volumes/共享文档` 里。
+    /// 这条用例锁住第二条路：设备不给共享名，就用「本机挂的共享名」认。
+    private func mountedShareFixture(_ share: String = "共享文档",
+                                     host: String = "10.60.70.2") throws -> (root: URL, mount: SMBMountCandidate) {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try Data().write(to: url.appendingPathComponent("报告.pdf"))
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        let candidate = try XCTUnwrap(
+            SMBMountCandidate.parse(origin: "//nasuser@\(host)/\(share)", mountPath: url.path))
+        return (url, candidate)
+    }
+
+    /// 设备没解出共享名（`openTarget` 是网页）飞牛结果行。
+    private func fnosWebRow(_ path: String = "/vol1/1000/共享文档/报告.pdf") throws -> SearchResult {
+        var row = SearchResult(id: "fnos-web", name: "报告.pdf", relativePath: path,
+                               sourceID: "fnos", sourceName: "飞牛 fnOS", kind: "file",
+                               size: nil, localURL: nil)
+        var components = URLComponents()
+        components.scheme = "https"; components.host = "fn.example.net"; components.path = "/"
+        row.openTarget = .webURL(try XCTUnwrap(components.url))
+        return row
+    }
+
+    func testFnOSUsesTheMountedShareNameWhenTheDeviceShareTableMissesIt() throws {
+        let fixture = try mountedShareFixture()
+        let target = try NASResultOpening.target(
+            for: try fnosWebRow(), vendor: .fnos, origin: origin, locator: fnosLocator(),
+            smbMounts: [fixture.mount], webDAVMounts: [])
+        XCTAssertEqual(target, .mountedFile(fixture.root.appendingPathComponent("报告.pdf").resolvingSymlinksInPath()),
+                       "★ 设备共享表没覆盖 ⇒ 用本机挂载的共享名认（旧判定这里开登录网页）")
+    }
+
+    /// 同名共享挂在两台主机上 ⇒ 分不清，宁可不打开。
+    func testFnOSSegmentFallbackRefusesTwoMountsWithTheSameName() throws {
+        let a = try mountedShareFixture(host: "10.60.70.2")
+        let b = try mountedShareFixture(host: "10.60.70.9")
+        let target = try NASResultOpening.target(
+            for: try fnosWebRow(), vendor: .fnos, origin: origin, locator: fnosLocator(),
+            smbMounts: [a.mount, b.mount], webDAVMounts: [])
+        XCTAssertEqual(target, try fnosWebRow().openTarget, "同名挂两处 ⇒ 不猜")
+    }
+
+    /// 名下拼出来的文件不存在 ⇒ 不认（这条判据就是防止「名字像就打开」）。
+    func testFnOSSegmentFallbackRequiresTheFileToExist() throws {
+        let fixture = try mountedShareFixture()
+        try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("报告.pdf"))
+        let target = try NASResultOpening.target(
+            for: try fnosWebRow(), vendor: .fnos, origin: origin, locator: fnosLocator(),
+            smbMounts: [fixture.mount], webDAVMounts: [])
+        XCTAssertEqual(target, try fnosWebRow().openTarget, "文件不在那儿 ⇔ 不是这个共享")
+    }
+
+    /// 共享名不在路径里时一律不动（路径拿不到共享名就老老实实回网页）。
+    func testFnOSSegmentFallbackIgnoresUnrelatedMountNames() throws {
+        let fixture = try mountedShareFixture("别的共享")
+        let target = try NASResultOpening.target(
+            for: try fnosWebRow(), vendor: .fnos, origin: origin, locator: fnosLocator(),
+            smbMounts: [fixture.mount], webDAVMounts: [])
+        XCTAssertEqual(target, try fnosWebRow().openTarget)
     }
 
     func testOpenListNeverUsesSameHostSMBMount() throws {

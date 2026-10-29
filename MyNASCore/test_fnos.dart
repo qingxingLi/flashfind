@@ -125,6 +125,9 @@ class FnosFixture {
   /// 对这些存储路径，`file.share.info` 强制回 fail（模拟共享名问不出）。
   final Set<String> shareInfoFailFor = <String>{};
 
+  /// 让 `file.share.list` 回 fail（模拟列共享失败 ⇒ 共享表整张空）。
+  bool failShareList = false;
+
   final Set<String> _issuedDownloadTokens = <String>{};
 
   int _downloadSerial = 0;
@@ -335,6 +338,14 @@ class FnosFixture {
         ]);
 
       case 'file.share.list':
+        if (failShareList) {
+          // ★ 回 500 而不是 `result:fail`：`result:fail` 是**设备明确答复**
+          //   （「你的账号看不到共享列表」），问过一次就不该再问；
+          //   这里要模拟的是**请求本身没成功**（超时 / 5xx），那种才值得
+          //   在下次搜索前补一次。
+          reply({'code': 'INTERNAL', 'status': 500, 'title': 'server error'}, status: 500);
+          return;
+        }
         reply([
           {
             'result': 'succ',
@@ -376,7 +387,7 @@ class FnosFixture {
           reply([
             {
               'files': [
-                {'btim': 1757549185, 'dir': 1, 'mtim': 1757564938, 'name': '工作资料', 'uid': 1000},
+                {'btim': 1757549185, 'dir': 1, 'mtim': 1757564938, 'name': '共享文档', 'uid': 1000},
                 {'btim': 1757549186, 'dir': 1, 'mtim': 1757568293, 'name': 'Photos', 'uid': 1000},
               ],
               'uver': 117518492958720,
@@ -384,7 +395,7 @@ class FnosFixture {
           ]);
           return;
         }
-        if (path == 'vol2/1000/工作资料') {
+        if (path == 'vol2/1000/共享文档') {
           reply([
             {
               'files': [
@@ -749,7 +760,7 @@ Future<void> transportTests(FnosFixture fixture) async {
     fixture.reset();
     final adapter = adapterFor(fixture);
     await loginHelper(adapter, fixture);
-    final items = await adapter.list('/vol2/1000/工作资料');
+    final items = await adapter.list('/vol2/1000/共享文档');
     expectEqual(items.length, 1, '条目数');
     expectTrue(!items.single.sizeKnown, '设备没给大小 ⇒ 未知');
     expectTrue(items.single.isDirectory, '这是一个目录');
@@ -924,6 +935,92 @@ List<int> buildZip(List<(String, List<int>)> entries) {
 
 /// 打开链（2026-10-29 用户定）：SMB（映射）> 网页；下载只作右键选项。
 Future<void> openChainTests(FnosFixture fixture) async {
+  // ★★ 设备侧账号名要回传：Swift 侧拿它认「本机已挂的共享」是不是这个来源的
+  //    （`SMBMountCandidate.matching` 第二档）。飞牛的表单账号恒为空串，
+  //    没有这一条，来源填域名 + 访达用 IP 挂同一共享时双击只能开登录网页
+  //    （2026-10-29 真机报障）。
+  await check('打开链：设备侧账号名随会话回传（来源配置里没有账号）', () async {
+    fixture.reset();
+    final adapter = adapterFor(fixture);
+    await loginHelper(adapter, fixture);
+    // ★ 会话一建立就得有，**不等 `shareRoots()`**：重启后走的是令牌续期，
+    //   那条路不会重新列位置（2026-10-29 真机二次报障）。
+    expectEqual(adapter.signedInAccount, 'tester', '账号取自 user.info 的 userInfo.user');
+
+    final session = BrandSession(adapter, sourceID: 's1', sourceName: '飞牛', smbHost: 'nas.local');
+    expectEqual(session.signedInAccount, 'tester', 'BrandSession 要把它交给上层（sessionState）');
+  });
+
+  // ★★ 2026-10-29 真机二次报障：装了「账号回传 + 第三档匹配」的版本，双击
+  //    结果**还是**开登录网页。诊断日志写着
+  //    `openFallback … rowHasSMBTarget:false, deviceAccountKnown:false` ——
+  //    两个证据同时为空，不是匹配算法的问题，是**这两样根本没被准备**：
+  //    它们原来只在 `shareRoots()` 里赋值，而重启 App 走的是 refresh token
+  //    续期，那条路一次都不经过 `shareRoots()`。
+  await check('★ 打开链：令牌续期（重启后自动重连）也要备好账号与共享表', () async {
+    fixture.reset();
+    final adapter = adapterFor(fixture);
+    // 模拟重启：不给授权码，直接把上次存下的 refresh token 当 password 交回来。
+    final restored = await adapter.login(username: '', password: fixture.refreshToken);
+    expectTrue(restored is LoginSuccess, '续期应当成功');
+
+    // 关键：**不调用 `shareRoots()`**。
+    expectEqual(adapter.signedInAccount, 'tester', '账号要随续期一起拿到');
+    final hit = adapter.smbShareFor('/vol2/1000/备份/示例发票.pdf');
+    expectTrue(hit != null, '★ 旧实现这里恒 null ⇒ 结果行没有 SMB 目标 ⇒ 双击开登录网页');
+    expectEqual(hit!.shareName, '备份', '共享名来自 file.share.info');
+    // 诊断用的那个数：退网页时能分出「共享表空」还是「路径没落在共享下」。
+    expectEqual(adapter.resolvedShareCount, 1, '已经问过 ⇒ 报真实条数');
+
+    final session = BrandSession(adapter, sourceID: 's1', sourceName: '飞牛', smbHost: 'fn.example.icu');
+    final row = session.row(
+      FileItem(
+        path: '/vol2/1000/备份/示例发票.pdf',
+        name: '示例发票.pdf',
+        isDirectory: false,
+        size: 10,
+      ),
+      '/vol2/1000',
+    );
+    expectTrue(row['openTarget'] is Map, '结果行必须带打开目标');
+    final target = row['openTarget']! as Map;
+    expectEqual(target['kind'], 'smbLocation', '★ 续期后的结果行要发 smbLocation，不是网页');
+    expectEqual(target['share'], '备份', '共享名');
+  });
+
+  // 同一条命根子再加一道：万一**还有**没被想到的会话路径漏刷共享表，
+  // 第一次搜索前自己补一次 —— 宁可在首次搜索上多花一次往返，
+  // 也不要整台设备都只能开网页。
+  await check('★ 打开链：共享表一次都没问成时，第一次搜索会补问一次', () async {
+    fixture.reset();
+    fixture.failShareList = true;
+    final adapter = adapterFor(fixture);
+    await loginHelper(adapter, fixture);
+    expectTrue(adapter.smbShareFor('/vol2/1000/备份/a.pdf') == null, '问不出来时就是没有，不许猜');
+
+    fixture.failShareList = false;
+    await adapter.search('发票', roots: const ['/vol2/1000']);
+    expectTrue(adapter.smbShareFor('/vol2/1000/备份/a.pdf') != null,
+        '★ 搜索前必须补一次：否则重启后的每一轮搜索都只能开网页');
+  });
+
+  // ★ 2026-10-29 真机：设备给的共享路径只要多一个前导/结尾斜杠，前缀比较就全废，
+  //   症状是「双击打开登录网页」，看上去像匹配算法错了。两侧都归一化。
+  await check('打开链：共享路径带前导/结尾斜杠也要认出来', () async {
+    fixture.reset();
+    fixture.smbShares
+      ..clear()
+      ..['/vol2/1000/备份/'] = '备份';
+    final adapter = adapterFor(fixture);
+    await loginHelper(adapter, fixture);
+    await adapter.shareRoots();
+    final hit = adapter.smbShareFor('/vol2/1000/备份/示例发票.pdf');
+    expectTrue(hit != null, '★ 设备给 `/vol2/1000/备份/`、结果路径不带斜杠时旧实现恒 null');
+    expectEqual(hit!.shareName, '备份', '共享名');
+    expectTrue(hit.relativeSegments.join('/') == '示例发票.pdf',
+        '相对段要干净：${hit.relativeSegments}');
+  });
+
   await check('打开链：SMB 共享映射——前缀匹配 + 最长优先', () async {
     fixture.reset();
     final adapter = adapterFor(fixture);

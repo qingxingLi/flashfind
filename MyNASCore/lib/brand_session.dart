@@ -85,6 +85,25 @@ class BrandSession {
     return a is SessionSecretProviding ? a.sessionSecret : null;
   }
 
+  /// 设备侧账号名（`user.info` 的 `userInfo.user`）；没有这条能力的品牌为 null。
+  ///
+  /// Swift 侧拿它当「用哪个账号连 SMB」的旁证（`SMBMountCandidate.matching`）：
+  /// 飞牛的来源配置里没有账号字段，只有设备自己知道。见
+  /// `SignedInAccountProviding` 的说明。
+  String? get signedInAccount {
+    final Object a = adapter;
+    return a is SignedInAccountProviding ? a.signedInAccount : null;
+  }
+
+  /// 会话里已经解析出几条 SMB 共享；拿不到（或还没问过）为 null。
+  ///
+  /// 纯诊断用：打开链退到网页时，上层据此分清「共享表是空的（0）」
+  /// 与「共享表有内容，只是这条路径不在任何共享前缀下」。
+  int? get resolvedSmbShareCount {
+    final Object a = adapter;
+    return a is SmbShareResolving ? a.resolvedShareCount : null;
+  }
+
   /// 网页打开的兜底地址（fnOS 的站点首页 —— 桌面）。
   ///
   /// 只在 SMB 判定不可达时由 Swift 使用（双击结果 → 445 探测失败 → 开浏览器）。

@@ -193,6 +193,24 @@ import Foundation
     ///   所以这个地址只到桌面，别再往里拼路径（2026-10-29 真机 Not Found）。
     public private(set) var webFileURL: URL?
 
+    /// 设备自报的账号名（飞牛 `user.info` 的 `userInfo.user`）。
+    ///
+    /// ★ 飞牛的来源配置里**没有账号**（OAuth 授权码登录，`username` 恒为空串），
+    ///   而打开链要拿「SMB 登录账号」去认本机已有的挂载。没有它，来源填域名、
+    ///   访达用局域网 IP 挂同一共享时，双击结果只能打开登录网页
+    ///   （2026-10-29 真机：`/Volumes/共享文档/示例发票.pdf` 明明可读）。
+    ///   只在运行时用，**不写回配置**：它是设备事实，不是用户设置。
+    public private(set) var deviceAccount: String?
+
+    /// 设备侧**已经解析出几条 SMB 共享**（飞牛 `file.share.list` + `info`）；
+    /// 核心还没问过时为 nil。
+    ///
+    /// ★ 纯诊断，不参与打开判定：打开退到网页时，只有这个数能分清是
+    ///   「共享表压根是空的」（0 —— 重启后没刷、或设备拒了）还是
+    ///   「共享表有内容、只是这条路径不在任何共享前缀下」（>0）。
+    ///   2026-10-29 两次真机报障都卡在这两种情况的区分上。
+    public private(set) var deviceSmbShareCount: Int?
+
     public init(bridge: any MyNASBridgeTransport, config: NASSourceConfig, port: Int, now: @escaping () -> Date = Date.init) {
         self.bridge = bridge
         self.config = config
@@ -202,14 +220,18 @@ import Foundation
         locatorSnapshot = Self.makeLocator(sourceID: source.id, config: config)
     }
 
-    private static func makeLocator(sourceID: String, config: NASSourceConfig) -> NASLocator {
+    private static func makeLocator(sourceID: String, config: NASSourceConfig,
+                                    deviceAccount: String? = nil) -> NASLocator {
         // 多位置时每条结果按「属于哪个共享」判定，不能只留一个前缀。
         let prefixes = config.scopes.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
         // ★ `smbUsername` 从来没被任何界面写过（恒 nil），而它想表达的「用哪个账号连 SMB」
         //   在群晖/飞牛上就是 DSM 账号本身。直接取 `config.username` 兜底，否则
         //   「按登录账号认挂载」这条判据（见 `SMBMountCandidate.matching`）永远拿到 nil。
+        // ★ 再兜一层「设备自报的账号」：飞牛的表单账号是空串，只有设备知道
+        //   （`deviceAccount`，登录后才有）。
         let smbUser = config.smbUsername.flatMap { $0.isEmpty ? nil : $0 }
             ?? (config.username.isEmpty ? nil : config.username)
+            ?? deviceAccount
         return NASLocator(sourceID: sourceID, host: config.hostName,
                           shares: Set(config.scopes.map { String($0.dropFirst()) }),
                           scopePrefixes: prefixes, preferredSMBUser: smbUser,
@@ -220,7 +242,8 @@ import Foundation
     /// 配置变化后刷新定位快照。scope 改动必须走这里，否则后台核验仍用旧范围。
     public func updateConfig(_ newValue: NASSourceConfig) {
         config = newValue
-        locatorSnapshot = Self.makeLocator(sourceID: source.id, config: newValue)
+        locatorSnapshot = Self.makeLocator(sourceID: source.id, config: newValue,
+                                           deviceAccount: deviceAccount)
     }
 
     /// 用户在设置里给这台 NAS 改名。
@@ -357,6 +380,19 @@ import Foundation
         // 没给就保持 nil，由界面沿用用户输入的密码。
         let secret = result["sessionSecret"] as? String
         sessionSecret = (secret?.isEmpty == false) ? secret : nil
+        // 设备自报的账号名：拿到就**立刻重建定位快照**——打开链读的是快照里的
+        // `preferredSMBUser`，晚一步重建，这次会话里的结果就还是按「不知道账号」
+        // 去认挂载（飞牛的表单账号是空串，登录前这里是 nil）。
+        if let account = result["signedInAccount"] as? String, !account.isEmpty,
+           account != deviceAccount {
+            deviceAccount = account
+            locatorSnapshot = Self.makeLocator(sourceID: source.id, config: config,
+                                               deviceAccount: account)
+        }
+        // 设备侧共享表的条数：只在诊断里用，跟打开链判定无关。
+        if let count = result["smbShareCount"] as? Int {
+            deviceSmbShareCount = count
+        }
         // 网页兑底地址：核心给了才存，每次会话刷新覆盖。
         if let web = result["webFileURL"] as? String, let url = URL(string: web),
            url.scheme == "http" || url.scheme == "https" {
@@ -1171,8 +1207,19 @@ import Foundation
         //   局域网 IP 挂着**同一个共享同一个账号**时，旧实现会照着域名再挂一次
         //   （公网下更慢，还可能弹系统认证框），而文件其实早就在 `/Volumes` 下可读。
         //   认亲规则与群晖同一处 `SMBMountCandidate.matching` —— 调用点不许自己写 `host ==`。
+        let localMounts = (try? SMBMountCandidate.discover()) ?? []
         if let local = NASResultOpening.localMountedTarget(
-            for: row, locator: snapshot, smbMounts: (try? SMBMountCandidate.discover()) ?? []) {
+            for: row, locator: snapshot, smbMounts: localMounts,
+            // 走到这里必然是 fnOS（上面那道 guard 放行的）：它没有账号证据，
+            // 网页出口只是站点首页，所以允许「只按共享名认」这一档。
+            allowShareNameOnly: true) {
+            return .mountedFile(local)
+        }
+        // ★ 第二条：设备侧共享表按**账号可见性**过滤（实测一台 14 个共享的机器只回 1 个），
+        //   没覆盖这条路径时，退回「按本机挂载的共享名认」——判据见
+        //   `mountedShareMatchingPathSegment`。不加这一条，共享表看不全的账号
+        //   双击结果只能开飞牛登录页（2026-10-29 真机）。
+        if let local = NASResultOpening.mountedShareMatchingPathSegment(for: row, smbMounts: localMounts) {
             return .mountedFile(local)
         }
         if case .smbLocation(let smb) = row.openTarget,

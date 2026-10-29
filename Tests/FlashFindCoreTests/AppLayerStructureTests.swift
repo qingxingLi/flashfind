@@ -1122,6 +1122,34 @@ final class AppLayerStructureTests: XCTestCase {
                       "不许再垫白色底块 —— 深色模式下是块白贴纸")
     }
 
+    /// ★★ 右键菜单只有**一份**，而且不按品牌分叉。
+    ///
+    /// 2026-10-29 用户报障：「飞牛、群晖、openlist 三个的右键菜单不一样，飞牛的有下载，
+    /// 其他的两个没有……建议都统一一样的，又可以下载又可以在 finder 中打开」。
+    /// 当时两份菜单各自在窗口文件里手写、又各自用 `hasWebOpenTarget` 与
+    /// `supportsDirectDownload` 分叉，于是长出三种菜单。
+    ///
+    /// 现在菜单内容由 Core 的 `ResultMenuPlan` 决定（`ResultMenuPlanTests` 钉住
+    /// 「三家一样」），窗口只画一遍。这条守的是**别再手写第二份**。
+    func testResultContextMenuHasASingleDefinition() throws {
+        for file in ["SearchResultsModule.swift", "PinnedResultsWindow.swift"] {
+            let text = codeOnly(try appSource(file))
+            XCTAssertTrue(text.contains("ResultContextMenu("),
+                          "\(file) 应通过共享的 ResultContextMenu 出菜单")
+            for title in ["下载后打开", "下载到…", "在 Finder 中显示", "复制网页链接"] {
+                XCTAssertFalse(text.contains("\"\(title)\""),
+                               "\(file) 里不该再手写「\(title)」—— 菜单项只有 ResultContextMenu 一处")
+            }
+        }
+        let menu = codeOnly(try appSource("ResultContextMenu.swift"))
+        XCTAssertTrue(menu.contains("ResultMenuPlan.items(for: result)"),
+                      "菜单内容必须来自 Core 的判定，别在视图里重新决定")
+        XCTAssertFalse(menu.contains("supportsDirectDownload"),
+                       "下载项不许再按品牌出现（那正是三种菜单的来源）")
+        XCTAssertFalse(menu.contains("vendor"),
+                       "菜单不许看品牌：三家的菜单必须一字不差")
+    }
+
     /// ★ 这是一条**三步**的向导，而且步数只能由 Core 出。
     ///
     /// 2026-10-28 用户报障：「点击连接后选择搜索位置就结束了，所以这是一个三步的动作，

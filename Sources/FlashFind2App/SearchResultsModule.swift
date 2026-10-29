@@ -246,32 +246,7 @@ struct SearchResultsModule: View {
             // 双击打开。必须写在单击**前面**，否则单击会先把双击吃掉。
             .onTapGesture(count: 2) { model.openCurrentResult(result) }
             .onTapGesture(count: 1) { select(result) }
-            .contextMenu { resultMenu(result) }
-    }
-
-    /// 菜单本身就是「这条结果能做什么」的说明书。
-    /// 打开时检测本机挂载，未挂载则使用网页；复制链接仍保留网页地址。
-    @ViewBuilder private func resultMenu(_ result: SearchResult) -> some View {
-        if result.hasWebOpenTarget {
-            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
-            Divider()
-            Button("复制网页链接", systemImage: "link") { model.copyWebLink(result) }
-            Button("复制站点内路径", systemImage: "doc.on.doc") { model.copy(result) }
-        } else {
-            Button("打开", systemImage: "arrow.up.forward.square") { model.openCurrentResult(result) }
-            Button("在 Finder 中显示", systemImage: "folder") { model.openCurrentResult(result, reveal: true) }
-            Button("快速查看", systemImage: "eye") { model.quickLook(result) }
-            Divider()
-            Button("复制路径", systemImage: "doc.on.doc") { model.copy(result) }
-        }
-        // 下载是右键里的**显式动作**，不进默认打开链（SMB 可达走 SMB，
-        // 不可达走网页；下载耗时且占流量，只该被明确要求）。
-        if model.supportsDirectDownload(result) {
-            Divider()
-            Button("下载后打开", systemImage: "arrow.down.circle") { model.downloadAndOpen(result) }
-            Button("下载到…", systemImage: "square.and.arrow.down") { model.downloadToFolder(result) }
-        }
-        Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
+            .contextMenu { ResultContextMenu(result: result, pinned: false, model: model) }
     }
 
     /// 鼠标点选一条结果。

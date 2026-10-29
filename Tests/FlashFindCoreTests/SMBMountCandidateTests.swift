@@ -119,13 +119,48 @@ final class SMBMountCandidateTests: XCTestCase {
                       "猜错就是打开另一台设备的同名文件，比退回网页糟")
     }
 
-    /// 不知道登录账号时不许凭共享名硬猜。
-    func testMatchingWithoutAnAccountOnlyUsesExactHost() {
-        let ip = candidate(host: "10.20.30.96", share: "home")
-        XCTAssertTrue(SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
-                                                 preferredUser: nil, in: [ip]).isEmpty)
-        XCTAssertTrue(SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
-                                                 preferredUser: "  ", in: [ip]).isEmpty)
+    /// ★★ 账号不知道（飞牛授权码登录）时，按「共享名只挂在一台主机上」认。
+    ///
+    /// 2026-10-29 真机：`/Volumes/共享文档`（`//nasuser@10.60.70.2/共享文档`）
+    /// 明明可读，闪寻里来源填的是 `nas.example.net`，双击结果打开的是飞牛
+    /// **登录网页**。原因是飞牛的表单账号恒为空串 ⇒ 第二档拿不到证据 ⇒
+    /// 直接返回空。这一档只放宽「账号」这一个证据，唯一性判据不动。
+    func testMatchingWithoutAnAccountFallsBackToAnUnambiguousShareName() {
+        let ip = candidate(host: "10.60.70.2", share: "共享文档")
+        let matched = SMBMountCandidate.matching(host: "nas.example.net", shares: ["共享文档"],
+                                                 preferredUser: nil, allowShareNameOnly: true, in: [ip])
+        XCTAssertEqual(matched.map(\.mountRoot.path), [ip.mountRoot.path],
+                       "★ 同名共享只挂在一台主机上 ⇒ 就是它（旧判定这里返回空 ⇒ 开登录网页）")
+        XCTAssertTrue(SMBMountCandidate.matching(host: "nas.example.net", shares: ["共享文档"],
+                                                 preferredUser: "  ", allowShareNameOnly: true,
+                                                 in: [ip]).count == 1,
+                      "空白账号与 nil 同义：都不构成证据")
+    }
+
+    /// ★ 这一档**默认关闭**：群晖 / OpenList 的退路还能用，不该为它们放宽。
+    func testShareNameOnlyTierIsOffByDefault() {
+        let ip = candidate(host: "10.60.70.2", share: "共享文档")
+        XCTAssertTrue(SMBMountCandidate.matching(host: "nas.example.net", shares: ["共享文档"],
+                                                 preferredUser: nil, in: [ip]).isEmpty,
+                      "不显式开口子时，主机对不上就不认（群晖/OpenList 走这条）")
+    }
+
+    /// 账号**对不上**时也走这一档：SMB 登录名与 NAS 表单账号常常不是同一个。
+    func testMatchingWithoutAccountEvidenceIgnoresADifferentMountedUser() {
+        let ip = candidate(host: "10.60.70.2", share: "共享文档")
+        let matched = SMBMountCandidate.matching(host: "nas.example.net", shares: ["共享文档"],
+                                                 preferredUser: "admin1", allowShareNameOnly: true, in: [ip])
+        XCTAssertEqual(matched.count, 1, "账号不同但共享名唯一 ⇒ 仍认这条挂载")
+    }
+
+    /// ★ 唯一性判据不动：同名共享挂在两台主机上 ⇒ 一条都不认，别猜。
+    func testMatchingWithoutAnAccountStillRefusesTwoHosts() {
+        let a = candidate(host: "10.60.70.2", share: "共享文档")
+        let b = SMBMountCandidate.parse(origin: "//bob@10.60.70.19/共享文档", mountPath: "/Volumes/共享文档 1")!
+        XCTAssertTrue(SMBMountCandidate.matching(host: "nas.example.net", shares: ["共享文档"],
+                                                 preferredUser: nil, allowShareNameOnly: true,
+                                                 in: [a, b]).isEmpty,
+                      "猜错就是打开另一台设备的同名文件，比退回网页糟")
     }
 
     /// 主机精确匹配优先，且不受账号影响（多用户挂同一个共享是正常情形）。

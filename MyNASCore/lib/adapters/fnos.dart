@@ -123,6 +123,7 @@ class FnOSAdapter
         DownloadableAdapter,
         SmbShareResolving,
         WebOpenableAdapter,
+        SignedInAccountProviding,
         AuthorizationScopeCatalog {
   FnOSAdapter({required Dio dio}) : _dio = dio;
 
@@ -140,6 +141,13 @@ class FnOSAdapter
   /// 管理员可以起别名 —— 所以必须问，不能拼）。
   final List<({String storagePath, String name})> _smbShares = <({String storagePath, String name})>[];
 
+  /// 本次会话是否**已经问过一次**共享表（问出来是空也算问过）。
+  ///
+  /// 用途只有一个：搜索前兜一次底（见 [_ensureSmbShares]）。会话建立时
+  /// 已经刷过一次，正常不会用到；用到就是「又有某条建立路径忘了刷」，
+  /// 那时宁可在第一次搜索上多花一次往返，也不要整台设备都只能开网页。
+  bool _smbSharesLoaded = false;
+
   /// 会话令牌。**只在内存里**：属会话态，不落盘、不进日志。
   String? _accessToken;
   String? _refreshToken;
@@ -155,6 +163,39 @@ class FnOSAdapter
 
   /// 当前账号 uid。卷根路径 `vol{n}/{uid}` 要用它。
   int? _uid;
+
+  /// 设备侧账号名（`user.info` 的 `userInfo.user`）。
+  ///
+  /// ★ 它存在的唯一理由是**打开链认亲**：飞牛的来源配置里没有账号字段
+  ///   （OAuth 授权码登录），而本机 SMB 挂载带着登录账号。没有它，
+  ///   「这台 Mac 上挂的就是这台 NAS 的这个共享」这条判据永远拿不到证据，
+  ///   双击结果只能打开登录网页（2026-10-29 真机报障）。
+  String? _signedInUser;
+
+  @override
+  String? get signedInAccount => _signedInUser;
+
+  /// 会话一成立就把打开链要用的两样东西备齐：**设备账号** 与 **SMB 共享表**。
+  ///
+  /// ★★ 2026-10-29 真机二次报障（`openFallback` 写着
+  ///   `deviceAccountKnown:false, rowHasSMBTarget:false`）：这两样原来只在
+  ///   `shareRoots()` 里准备，而重启 App 走的是 refresh token 续期
+  ///   （`_restoreFromSavedToken`），**根本不经过 `shareRoots()`**。
+  ///   于是「自动重连成功」之后账号恒 null、共享表恒空，
+  ///   `smbShareFor()` 一律返回 null ⇒ 结果行没有 SMB 目标 ⇒ 开登录网页。
+  ///
+  /// 判据：**会话恢复 ≠ 会话可用**。凡是「只有会话建立那一刻才拿得到」的
+  /// 东西，三条建立路径（授权码登录 / 令牌续期 / 列位置）必须都备，
+  /// 否则就变成「只有第一次连的那一回能用」。
+  ///
+  /// 不抛：共享表只是打开链的一路，列不出来退网页，不能把会话搞坏。
+  /// 取消例外（`_refreshSmbShares` 自己会穿透）。
+  Future<void> _absorbSessionIdentity(Map? userInfo) async {
+    final user = _stringField(userInfo, 'user');
+    // 空串当没拿到：拿空串去比只会得到「谁都不匹配」的假结论。
+    _signedInUser = (user != null && user.isNotEmpty) ? user : null;
+    await _refreshSmbShares();
+  }
 
   /// 第一段生成、第二段要用的 PKCE verifier。
   ///
@@ -344,7 +385,10 @@ class FnOSAdapter
       _uid = _intField(userInfo, 'uid');
       final user = _stringField(userInfo, 'user');
       _identity = 'fnos-${user ?? 'user'}-${DateTime.now().millisecondsSinceEpoch}';
-      _log.i('FnOSAdapter: 登录成功 uid=${_uid ?? '?'}');
+      // 打开链的两样东西随会话一起备（账号 + 共享表），别等 `shareRoots()`。
+      await _absorbSessionIdentity(userInfo);
+      _log.i('FnOSAdapter: login ok uid=${_uid ?? '?'} '
+          'account-known=${_signedInUser != null} smb-shares=${_smbShares.length}');
       return LoginSuccess(identity: _identity!, nickname: user);
     } on AdapterFailure catch (failure) {
       _accessToken = null;
@@ -370,7 +414,13 @@ class FnOSAdapter
       _uid = _intField(userInfo, 'uid');
       final user = _stringField(userInfo, 'user');
       _identity = 'fnos-${user ?? 'user'}-${DateTime.now().millisecondsSinceEpoch}';
-      _log.i('FnOSAdapter: 用已保存的令牌续期成功 uid=${_uid ?? '?'}');
+      // ★★ 续期这条路以前**什么都不备** —— 重启 App 后账号空、共享表空，
+      //   双击结果开登录网页（2026-10-29 真机）。恢复会话就得当新会话办。
+      await _absorbSessionIdentity(userInfo);
+      // 日志用 ASCII 前缀：AOT 快照里的中文不是 UTF-8 明文，出包后按字节
+      // 搜索新代码时中文恒为 0（旧版本就踩过），ASCII 才是可核对的钉子。
+      _log.i('FnOSAdapter: restore-session ok uid=${_uid ?? '?'} '
+          'account-known=${_signedInUser != null} smb-shares=${_smbShares.length}');
       return LoginSuccess(identity: _identity!, nickname: user);
     } on AdapterFailure catch (failure) {
       _log.i('FnOSAdapter: 已保存的令牌续期失败（${failure.message}），退回授权流程');
@@ -507,6 +557,9 @@ class FnOSAdapter
     }
     _uid = uid;
     final user = _stringField(userInfo, 'user');
+    // 账号名交给打开链认 SMB 挂载用（见 `SignedInAccountProviding`）。
+    // 空串当没拿到：拿空串去比只会得到「谁都不匹配」的假结论。
+    _signedInUser = (user != null && user.isNotEmpty) ? user : null;
     if (_identity == null) {
       _identity = 'fnos-${user ?? 'user'}-${DateTime.now().millisecondsSinceEpoch}';
     }
@@ -526,8 +579,10 @@ class FnOSAdapter
         '请先在飞牛网页端确认这个账号能看到哪些文件夹。',
       );
     }
+    // 这里**无条件重取**（不用 `_ensureSmbShares`）：列位置是「设备结构可能变了」
+    // 的时刻，用户也可能刚在网页端加了共享。多一次往返换一次准确，值。
     await _refreshSmbShares();
-    _log.i('FnOSAdapter: 可用卷根 ${roots.length} 个，SMB 共享 ${_smbShares.length} 个');
+    _log.i('FnOSAdapter: roots=${roots.length} smb-shares=${_smbShares.length}');
     return roots;
   }
 
@@ -544,17 +599,22 @@ class FnOSAdapter
         if (list is! List) continue;
         for (final entry in list) {
           if (entry is! Map) continue;
-          final storage = (entry['path'] as String?)?.trim() ?? '';
+          final raw = (entry['path'] as String?)?.trim() ?? '';
+          final storage = _normalizeStorage(raw);
           if (storage.isEmpty) continue;
           // ★ 问不出共享名就**跳过这条共享**，不拿路径末段顶上
           //（2026-10-29 审查）：`shareName` 是管理员起的，可以与目录名不同，
           // 猜错了会去挂载一个错误的共享。跳过 ⇒ 这条路径的打开退网页，
           // 文件管理器兜得住，比打开错位置诚实。
-          final name = await _shareName(storage);
+          // 问名用**设备原样给的**路径（`info` 认的是它自己的坐标），
+          // 只有存进表里比较时才归一化。
+          final name = await _shareName(raw);
           if (name == null || name.isEmpty) continue;
           _smbShares.add((storagePath: storage, name: name));
         }
       }
+      // 只在**成功走完**时置位：中途失败（超时/拒绝）留 false，下次还能再问。
+      _smbSharesLoaded = true;
     } on CoreError catch (error) {
       // 取消不许被「退网页」兜底吞掉：用户已经不在这台设备上了。
       if (error.kind == 'Cancelled') rethrow;
@@ -562,6 +622,29 @@ class FnOSAdapter
     } catch (error) {
       _log.w('FnOSAdapter: 列 SMB 共享失败（打开将退网页）：$error');
     }
+  }
+
+  /// 存储路径归一化：去掉首尾的 `/`。
+  ///
+  /// ★ 2026-10-29 真机：`smbShareFor` 拿「不带前导斜杠」的结果路径去比设备给的
+  ///   共享路径，只要设备那边多一个 `/`（或结尾多一个），前缀就永远对不上，
+  ///   整张共享表等于没有 —— 而症状是「双击打开登录网页」，看上去像匹配算法错了。
+  ///   这条归一化对两边都做一遍，不让标点决定功能。
+  static String _normalizeStorage(String path) {
+    var value = path.trim();
+    while (value.startsWith('/')) {
+      value = value.substring(1);
+    }
+    while (value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  /// 确保共享表问过一次。已问过（哪怕问出来是空表）就直接返回。
+  Future<void> _ensureSmbShares() async {
+    if (_smbSharesLoaded) return;
+    await _refreshSmbShares();
   }
 
   /// 问 `file.share.info` 拿共享名（实测：`shareName: "备份"`）。
@@ -586,11 +669,16 @@ class FnOSAdapter
 
   /// 存储路径 → SMB 共享映射。**最长前缀优先**：共享可能嵌套
   /// （`vol2/1000` 与 `vol2/1000/备份` 都是共享时，后者更精确）。
+  /// 已经解析出几条共享；**还没问过就返回 null**（不是 0）。
+  /// 打开链退网页时，这个数能直接分出「共享表是空的」还是「路径没落在任何共享下」。
+  @override
+  int? get resolvedShareCount => _smbSharesLoaded ? _smbShares.length : null;
+
   @override
   SmbShareMapping? smbShareFor(String logicalPath) {
-    final normalized = logicalPath.startsWith('/')
-        ? logicalPath.substring(1)
-        : logicalPath;
+    // 两侧都归一化（见 `_normalizeStorage`）：设备给的共享路径与结果路径
+    // 只要有一个多了前导/结尾斜杠，前缀比较就永远失败。
+    final normalized = _normalizeStorage(logicalPath);
     if (normalized.isEmpty) return null;
     ({String storagePath, String name})? best;
     var bestLen = -1;
@@ -723,6 +811,9 @@ class FnOSAdapter
     }
 
     await _ensureToken();
+    // 兜底：没有共享表就没有 SMB 目标，整台设备只能开网页（2026-10-29 真机）。
+    // 放在搜索前而不是 `row()` 里，是因为 `row()` 是同步的、拿不了网络。
+    await _ensureSmbShares();
 
     // 逐卷并发（默认 2 路）。并发只改等待方式，不改结果顺序：
     // 合并按 roots 原顺序做，去重也在合并时一次性完成。
@@ -847,9 +938,11 @@ class FnOSAdapter
     _accessTokenExpiresAt = null;
     _identity = null;
     _uid = null;
+    _signedInUser = null;
     _pendingVerifier = null;
     _pendingIssuedAt = null;
     _smbShares.clear();
+    _smbSharesLoaded = false;
     _log.i('FnOSAdapter: 已清除会话状态');
   }
 
@@ -1134,10 +1227,10 @@ class FnOSAdapter
   }
 
   /// 逻辑路径 → 存储侧坐标。两者只差一个前导 `/`：
-  /// `/vol2/1000/工作资料` ↔ `vol2/1000/工作资料`。
+  /// `/vol2/1000/共享文档` ↔ `vol2/1000/共享文档`。
   ///
   /// ★ 之所以让逻辑路径**保留 `vol{n}/{uid}` 前缀**，而不是剥成
-  /// `/工作资料`：搜索结果返回的就是存储侧坐标，保留前缀后
+  /// `/共享文档`：搜索结果返回的就是存储侧坐标，保留前缀后
   /// 「结果 → 逻辑路径」只是补一个斜杠，不需要做前缀裁剪；
   /// 一旦裁剪，`Scope` 判定、SMB 共享名推导都要各写一次换算，
   /// 而任何一处算错的表现都是「搜得到但打不开」。

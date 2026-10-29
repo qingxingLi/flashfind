@@ -43,7 +43,8 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
         return url.host?.lowercased() == host.lowercased()
             && url.path.split(separator: "/").first.map(String.init) == shareName
     }
-    /// 这个来源能用到的挂载：主机精确匹配优先，认不出来时再按「共享名 + 登录账号」认亲。
+    /// 这个来源能用到的挂载：主机精确匹配优先，认不出来时再按「共享名 + 登录账号」认亲，
+    /// 账号也不知道时最后按「共享名只挂在一台主机上」认。
     ///
     /// ## 为什么需要第二档（2026-10-29 真机报障）
     ///
@@ -67,22 +68,48 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
     ///   - host: 来源主机（可能是域名、IP 或 QuickConnect ID）。
     ///   - shares: 本来源已授权的共享名（不带前导斜杠）。
     ///   - preferredUser: 本来源的登录账号（`smbUsername`，缺省时用 DSM 账号）。
+    ///   - allowShareNameOnly: 是否允许最后一档「只按共享名认」。**只有 fnOS 传 true**
+    ///     （它没有账号证据，网页出口又只是个登录页），理由见函数体。
     public static func matching(host: String, shares: Set<String>,
                                 preferredUser: String?,
+                                allowShareNameOnly: Bool = false,
                                 in mounts: [SMBMountCandidate]) -> [SMBMountCandidate] {
         let exact = mounts.filter {
             $0.host.caseInsensitiveCompare(host) == .orderedSame && shares.contains($0.shareName)
         }
         if !exact.isEmpty { return exact }
-        guard let user = preferredUser?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !user.isEmpty else { return [] }
-        let byAccount = mounts.filter {
-            shares.contains($0.shareName)
-                && $0.username?.caseInsensitiveCompare(user) == .orderedSame
+        // 第二档：共享名 + 登录账号。账号对得上时这条证据最强，先走。
+        if let user = preferredUser?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !user.isEmpty {
+            let byAccount = mounts.filter {
+                shares.contains($0.shareName)
+                    && $0.username?.caseInsensitiveCompare(user) == .orderedSame
+            }
+            if !byAccount.isEmpty {
+                let hosts = Set(byAccount.map { $0.host.lowercased() })
+                if hosts.count != 1 { return [] }
+                return byAccount
+            }
         }
-        guard !byAccount.isEmpty else { return [] }
-        let hosts = Set(byAccount.map { $0.host.lowercased() })
-        return hosts.count == 1 ? byAccount : []
+        // 第三档（2026-10-29 真机）：**只按共享名认**，要求这个名字只挂在一台主机上。
+        //
+        // 只有 fnOS 走这一档（`allowShareNameOnly`），因为它的情形是「两条前档
+        // 都拿不到证据，而退路是一条死路」：
+        //   · 飞牛走 OAuth 授权码登录，来源配置里**没有账号**（`username` 恒为空串），
+        //     第二档永远没证据；
+        //   · 它的网页出口只是站点首页（桌面），浏览器没有会话时就是**登录页** ——
+        //     用户点了等于没打开。真机：`/Volumes/共享文档/示例发票.pdf` 明明可读，
+        //     双击打开的是飞牛登录页。
+        // 群晖 / OpenList **不进这一档**：它们的退路（File Station 网页 / WebDAV 已经
+        // 另有「唯一候选」判据）都还能用，为它们放宽只会多出「打开另一台设备上同名
+        // 文件」的风险 —— 用户会以为那是同一个文件而改错。
+        guard allowShareNameOnly else { return [] }
+        // 安全性靠唯一性：一台上不会有两个同名共享；两台都挂同名共享时这里返回空
+        // （宁可退回网页，也不猜是哪一台）。共享名本身是**设备说的**
+        // （飞牛来自 `file.share.info`，不是我们猜的）。
+        let byShare = mounts.filter { shares.contains($0.shareName) }
+        let hosts = Set(byShare.map { $0.host.lowercased() })
+        return hosts.count == 1 ? byShare : []
     }
 
     public static func discover() throws -> [SMBMountCandidate] {

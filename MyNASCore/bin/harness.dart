@@ -151,6 +151,13 @@ Future<void> brandCommand(String cmd,Map<String,dynamic> message,String request,
     if(sessionSecret!=null&&sessionSecret.isNotEmpty)'sessionSecret':sessionSecret,
     // SMB 不可达时的网页兜底（fnOS 的站点首页）。其他品牌没有就不发。
     if(session.webFileURL!=null)'webFileURL':session.webFileURL,
+    // 设备侧账号名（fnOS 的 `userInfo.user`）：打开链拿它认「本机已挂的共享」
+    // 是不是这个来源的（见 Swift 侧 `SMBMountCandidate.matching`）。
+    // 账户信息为空的品牌（授权码登录）没有这个键——不许发空串冒充。
+    if(session.signedInAccount!=null)'signedInAccount':session.signedInAccount,
+    // 已经解析出几条 SMB 共享（还没问过就不发）。纯诊断：打开链退网页时
+    // 上层据此分出「共享表空」还是「路径没落在共享下」。
+    if(session.resolvedSmbShareCount!=null)'smbShareCount':session.resolvedSmbShareCount,
    });
    send(request,sourceID,query,'authState',{'state':'authenticated','isManager':false,'managerUnknown':true});
   case 'listShares':send(request,sourceID,query,'batch',{'shares':await session.shares()});
