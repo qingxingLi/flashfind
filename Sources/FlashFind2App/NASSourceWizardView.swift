@@ -16,6 +16,12 @@ struct NASSourceWizardView: View {
     /// 地址栏焦点。翻到连接信息那一页时自动落在它上面 ——
     /// 第 1 步已经选完来源了，进来就能直接敲地址。
     @FocusState private var addressFocused: Bool
+    /// 授权码框的焦点。
+    ///
+    /// 浏览器一打开，前台就交给浏览器了；用户切回闪寻时最想做的事是 ⌘V。
+    /// 所以「刚打开过浏览器」那一刻要把焦点放到这个框上（见下方 onChange），
+    /// 否则用户得先用鼠标点一下框，粘贴才生效。
+    @FocusState private var authorizeCodeFocused: Bool
     /// 是否把局域网里的电脑、打印机也列出来。
     ///
     /// 默认不列——用户要的是 NAS，混着同事的 Mac 与打印机反而找不到。
@@ -131,6 +137,11 @@ struct NASSourceWizardView: View {
             let expected = PortField.text(for: value)
             if portText != expected { portText = expected }
         }
+        // 刚把浏览器打开、正等用户粘码 → 把焦点放到授权码框上。
+        // 只在这一刻移一次：之后用户点别处、去看状态行，焦点都不该被抢回来。
+        .onChange(of: model.draftAwaitingAuthorizeCode) { waiting in
+            if waiting { authorizeCodeFocused = true }
+        }
         // 连上了就翻到选位置那一页：第 3 步是这条流程的终点。
         // 不翻的话用户按了「连接」之后界面看起来毫无变化（地址栏还在眼前），
         // 要么再按一次、要么以为没连上。
@@ -204,7 +215,7 @@ struct NASSourceWizardView: View {
                 Button { model.addSource() } label: { Label("搜索来源", systemImage: "chevron.left") }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
             }
-            Image(systemName: model.draftSource.vendor.symbol).font(.system(size: 20)).foregroundStyle(.secondary)
+            VendorIcon(vendor: model.draftSource.vendor, size: 20)
             VStack(alignment: .leading, spacing: 2) {
                 Text(isEditing ? "编辑 \(model.draftSource.displayName)" : "添加搜索来源")
                     .font(.headline).lineLimit(1)
@@ -348,7 +359,7 @@ struct NASSourceWizardView: View {
 
     /// 要画成入口的品牌。
     ///
-    /// 通常是 `model.selectableVendors`（群晖 + OpenList，开了实验开关再多个别的）。
+    /// 通常是 `model.selectableVendors`（群晖 / 飞牛 / OpenList，开了实验开关再多个别的）。
     /// 但「附近的设备」里可能选到一台**不在这个列表里**的机器（局域网里有台威联通，
     /// 而实验开关关着）——那一刻 `applyDiscoveredDevice` 已经把品牌换过去了，
     /// 下面的表单也换成了那一套。此时若入口里没有这一项，界面上就没有任何一处
@@ -369,7 +380,13 @@ struct NASSourceWizardView: View {
             // ★ 选完就翻页：这一页的职责到「选好来源」为止。
             go(to: .connection)
         } label: {
-            entryLabel(vendor.symbol, vendor.shortTitle, picked: picked)
+            entryLabel(vendor.shortTitle, picked: picked) {
+                // ★ 品牌标记是**固定白底黑图形**（2026-10-29 用户定稿）：不再跟随深浅色反相，
+                //   所以这里不传 `foregroundStyle` —— 传了也不生效（标记自己填死黑/白）。
+                //   选中态由卡片自己的淡底 + 描边表达，图标本身不参与。
+                //   刻意不给它上 accent 色：图标一旦变蓝，三家又变成「同一套蓝色图标」。
+                VendorIcon(vendor: vendor, size: 28)
+            }
         }
         .buttonStyle(.plain)
         .help(vendor.title)
@@ -378,7 +395,10 @@ struct NASSourceWizardView: View {
 
     private var nearbyEntry: some View {
         Button(action: openNearby) {
-            entryLabel("antenna.radiowaves.left.and.right", "附近的设备", picked: false)
+            entryLabel("附近的设备", picked: false) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 26)).foregroundStyle(Color.secondary)
+            }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("nearby-open")
@@ -389,12 +409,14 @@ struct NASSourceWizardView: View {
     /// **不写第二行说明**：块里只放图标与名字。品牌全称对「群晖 / 群晖 Synology」
     /// 是重复，对 OpenList 更是同一个词写两遍；而这些块的下一次变化是「再加一块」，
     /// 多一行只能靠编一句文案去填，不值得。
-    private func entryLabel(_ symbol: String, _ title: String, picked: Bool) -> some View {
+    ///
+    /// 图标走 `@ViewBuilder` 而不是传一个符号名：正式开放的三个品牌用各自的
+    /// **黑白品牌标记**（`VendorIcon`），「附近的设备」仍是系统符号 ——
+    /// 一个 `String` 参数表达不了这两种东西。
+    private func entryLabel<Icon: View>(_ title: String, picked: Bool,
+                                       @ViewBuilder icon: () -> Icon) -> some View {
         VStack(spacing: 9) {
-            Image(systemName: symbol)
-                .font(.system(size: 26))
-                .foregroundStyle(picked ? Color.accentColor : Color.secondary)
-                .frame(height: 30)
+            icon().frame(height: 30)
             Text(title).font(.callout)
         }
         .frame(maxWidth: .infinity, minHeight: 88)
@@ -498,25 +520,69 @@ struct NASSourceWizardView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     Divider().padding(.vertical, 2)
-                    HStack(alignment: .bottom, spacing: 14) {
-                        fieldRow("账号") {
-                            TextField("nasuser", text: $model.draftSource.username)
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityIdentifier("nas-user")
+                    // 浏览器授权码：**内联在表单里，不弹窗**（2026-10-29 用户改流程）。
+                    //
+                    // 左边「获取授权码」＝点一下就在浏览器打开授权页（地址只能由核心
+                    // 带着 PKCE 挑战去设备上换，见 `requestDraftAuthorizeCode`）；
+                    // 右边粘页面上的那串码；粘好点下面「连接」就直接进第 3 步。
+                    //
+                    // ★ 这里**不是**「授权码可以不填」的可选项：飞牛没有账号密码登录，
+                    //   这个框就是它唯一的凭据入口。摆在账号密码的位置上（同一处
+                    //   `Divider` 之下），用户不会去找第二个地方输入。
+                    if AuthorizeCodeField.isInline(for: model.draftSource.vendor) {
+                        HStack(alignment: .bottom, spacing: 14) {
+                            fieldRow("授权") {
+                                Button {
+                                    model.requestDraftAuthorizeCode()
+                                } label: {
+                                    Label("获取授权码", systemImage: "safari")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .controlSize(.large)
+                                .accessibilityIdentifier("nas-get-authorize-code")
+                            }
+                            .frame(width: 148)
+                            fieldRow("授权码") {
+                                TextField("在浏览器授权后粘贴到这里",
+                                          text: $model.draftAuthorizeCode)
+                                    .textFieldStyle(.roundedBorder)
+                                    .focused($authorizeCodeFocused)
+                                    .accessibilityIdentifier("nas-authorize-code")
+                            }
                         }
-                        fieldRow("密码") {
-                            // 这里**只有**输入框。
-                            //
-                            // 原来下面还挂着一句「将使用本机保存的密码」——
-                            // 那是提示备注，2026-10-24 用户明确要求删掉。
-                            // 删掉它顺带把「依赖 `nativeNASPassword` 的条件视图」这一整类风险消掉了：
-                            // 条件视图会随每次按键增删子视图，导致 SwiftUI 重建整个 VStack、
-                            // 销毁并重建 PlainSecureField——重建瞬间按钮可用性判断读到空值，
-                            // 于是「填了密码却点不了连接」。
-                            // 现在这个位置没有任何条件子视图，按钮可用性只看模型层。
-                            PlainSecureField(text: $model.nativeNASPassword, placeholder: "必填",
-                                            accessibilityID: "nas-password")
-                                .frame(height: 22)
+                    }
+                    // 账号/密码这一排**只对账号密码品牌显示**。
+                    //
+                    // 飞牛（fnOS）官方协议没有账号密码登录（OAuth 授权码 + PKCE，
+                    // 授权页不回跳）。给它摆一个密码框，用户会认认真真输一串
+                    // 永远不起作用的东西，然后以为是自己输错了——这比缺一个框更糟。
+                    //
+                    // ★ 这里是条件视图，但它**不随输入变化**：判定只看品牌，
+                    //   切品牌本来就会清空这两个框（`adoptVendor`）。上面那条
+                    //   「不要放依赖 `nativeNASPassword` 的条件视图」的教训说的是
+                    //   「每次按键增删子视图 ⇒ SwiftUI 重建 PlainSecureField」，
+                    //   与这里不是一回事。
+                    if model.draftSource.vendor.requiresAccountPassword {
+                        HStack(alignment: .bottom, spacing: 14) {
+                            fieldRow("账号") {
+                                TextField("nasuser", text: $model.draftSource.username)
+                                    .textFieldStyle(.roundedBorder)
+                                    .accessibilityIdentifier("nas-user")
+                            }
+                            fieldRow("密码") {
+                                // 这里**只有**输入框。
+                                //
+                                // 原来下面还挂着一句「将使用本机保存的密码」——
+                                // 那是提示备注，2026-10-24 用户明确要求删掉。
+                                // 删掉它顺带把「依赖 `nativeNASPassword` 的条件视图」这一整类风险消掉了：
+                                // 条件视图会随每次按键增删子视图，导致 SwiftUI 重建整个 VStack、
+                                // 销毁并重建 PlainSecureField——重建瞬间按钮可用性判断读到空值，
+                                // 于是「填了密码却点不了连接」。
+                                // 现在这个位置没有任何条件子视图，按钮可用性只看模型层。
+                                PlainSecureField(text: $model.nativeNASPassword, placeholder: "必填",
+                                                accessibilityID: "nas-password")
+                                    .frame(height: 22)
+                            }
                         }
                     }
                     // 【这里不要再放 OTP 输入框。】
@@ -534,8 +600,11 @@ struct NASSourceWizardView: View {
                     }
                     // 关闭时立刻删掉已存的旧凭据，不能只改标记——
                     // 否则用户以为「不保存了」，密码其实还躺在文件里被自动使用。
+                    // 措辞跟着实际存的东西走：飞牛那一格存的是授权换来的续期令牌，
+                    // 不是密码；写「记住密码」会让用户以为还要输密码（他并没有输过）。
                     HStack(spacing: 8) {
-                        Toggle("记住密码", isOn: Binding(
+                        Toggle(model.draftSource.vendor.requiresAccountPassword ? "记住密码" : "记住授权",
+                               isOn: Binding(
                             get: { model.draftSource.rememberPassword },
                             set: { model.setDraftRememberPassword($0) }))
                             .font(.callout)
@@ -808,8 +877,15 @@ private struct NearbyDevicesSheet: View {
 
     private func row(_ device: DiscoveredDevice) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: device.vendorHint?.symbol ?? "server.rack")
-                .frame(width: 18).foregroundStyle(.secondary)
+            // 认出来的品牌跟着换标记；认不出来（无 `vendorHint`）才用一个泛化的机架符号。
+            if let hint = device.vendorHint {
+                // 标记是白底黑图形，颜色不跟 `foregroundStyle`（见 `VendorIcon`）。
+                VendorIcon(vendor: hint, size: 18)
+                    .frame(width: 18)
+            } else {
+                Image(systemName: "server.rack")
+                    .frame(width: 18).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(device.name.isEmpty ? device.host : device.name)
                     .font(.callout).lineLimit(1)

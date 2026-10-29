@@ -132,6 +132,36 @@ final class MyNASProcessBridgeTests: XCTestCase {
         XCTAssertGreaterThan(MyNASProcessBridge.expectedCoreRevision, 0)
     }
 
+    /// 登录应答必须把**终止事件之前**发过的事实一起带回来。
+    ///
+    /// 真实报障（2026-10-29，用户截图「无法打开文件：SMB 连不上，网页入口也没有拿到」）：
+    /// 核心的登录分两条事件 —— 先 `sessionState`（会话、会话密钥、网页入口的地址），
+    /// 再 `authState`（身份通过，它是终止事件）。桥接层只把**终止事件那一行**
+    /// 交出去，于是 `webFileURL` 与 `sessionSecret`（飞牛的 refresh token）
+    /// 在过桥时就没了。表现有两个，都很难从界面反推：
+    ///   * 双击 fnOS 结果 → 没有网页入口可用 ⇒ 一句「打不开」；
+    ///   * 重启闪寻 → 没有 refresh token 可续期 ⇒ 每台飞牛都要重新授权。
+    ///
+    /// 所以这里用真子进程复刻两段式应答，断言「后到的终止事件不许把先到的事实抹掉」。
+    func testLoginKeepsFactsFromEarlierEventsOfTheSameRequest() async throws {
+        let script = """
+        id=$(printf '%s' "$line" | sed -E 's/.*"requestID":"([^"]+)".*/\\1/')
+        printf '{"protocolVersion":1,"coreRevision":10,"requestID":"%s","sourceID":"src","queryID":"none","event":"sessionState","state":"authenticated","sessionPresent":true,"sessionSecret":"rt-abc","webFileURL":"https://nas.local:5666/"}\\n' "$id"
+        printf '{"protocolVersion":1,"coreRevision":10,"requestID":"%s","sourceID":"src","queryID":"none","event":"authState","state":"authenticated","isManager":false}\\n' "$id"
+        """
+        let bridge = MyNASProcessBridge(executable: try fakeCore(script), stateDirectory: scratch)
+        let result = try await bridge.command("login", sourceID: "src",
+                                               fields: ["account": "", "password": ""])
+
+        XCTAssertEqual(result["sessionSecret"] as? String, "rt-abc",
+                       "★ 会话密钥（refresh token）丢了 ⇒ 用户每次启动都要重新授权")
+        XCTAssertEqual(result["webFileURL"] as? String, "https://nas.local:5666/",
+                       "★ 网页入口丢了 ⇒ 双击结果只能报「打不开」")
+        XCTAssertEqual(result["state"] as? String, "authenticated",
+                       "终止事件自己的字段仍以它为准")
+        bridge.shutdown()
+    }
+
     private var scratch: URL!
 
     override func setUpWithError() throws {

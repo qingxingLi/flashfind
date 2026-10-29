@@ -192,6 +192,19 @@ class AdapterFailures {
   static AdapterFailure network([String? detail]) =>
       AdapterFailure(ErrorKind.networkFailure, detail ?? '无法连接到设备');
 
+  /// 连接超时。与 [network] 分开：超时时用户该查的是「网络慢/设备忙」，
+  /// 而连不上该查的是「地址对不对、设备在不在线」。
+  static AdapterFailure timedOut([String? detail]) =>
+      AdapterFailure(ErrorKind.timedOut, detail ?? '连接设备超时');
+
+  /// TLS 握手/证书层失败（NAS 自签证书最常见）。
+  ///
+  /// **不能**报成认证失败：那会让用户去改密码，而真正要处理的是证书信任。
+  static AdapterFailure tlsRejected([String? detail]) => AdapterFailure(
+    ErrorKind.tlsRejected,
+    detail ?? '和设备建立不起加密连接，请检查证书是否受信任',
+  );
+
   static AdapterFailure pathMissing([String? detail]) =>
       AdapterFailure(ErrorKind.pathMissing, detail ?? '该位置不存在或已被移动');
 

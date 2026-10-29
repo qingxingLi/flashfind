@@ -14,30 +14,59 @@ final class NASVendorSupportTests: XCTestCase {
     /// 也不能说成「不支持」。已下线那一档与「从未接入」的区别也要留住——
     /// 后者给人的预期是「等等就有了」，前者是一次已经做完的结论。
     func testAdapterStatusKeepsRetiredSeparateFromNeverPorted() {
-        // 已验证：群晖（原生路径）+ WebDAV（真机跑通）。
-        for vendor in [NASSourceConfig.Vendor.synology, .webdav] {
+        // 已验证：群晖（原生路径）+ WebDAV（真机跑通）+ 飞牛（2026-10-29 转正）。
+        for vendor in [NASSourceConfig.Vendor.synology, .webdav, .fnos] {
             XCTAssertEqual(vendor.adapterStatus, .deviceVerified, "\(vendor.title) 应已真机验证")
         }
         // 已接入但无真机证据。
+        //
+        // 只剩 qnap / ugreen：有适配器，但真机上没跑过。
+        //
+        // ★ 飞牛 2026-10-29 离开这一档：它在用户真实设备上跑通
+        // 浏览器授权码登录 → 列共享 → 原生搜索 → 打开结果（1.1.32–1.1.44 连发版
+        // 全部以它为验证对象），同一轮用户把它从实验性移进正式来源。
+        // 状态与 `selectableVendors` 必须同步 —— 只改一处会得到
+        // 「向导里能选、说明却说没验过」的自相矛盾。
         for vendor in [NASSourceConfig.Vendor.qnap, .ugreen] {
             XCTAssertEqual(vendor.adapterStatus, .portedUnverified, "\(vendor.title) 应为「已接入未验证」")
         }
-        // 接入过、已证伪并下线：不能与「未接入」混为一谈。
-        XCTAssertEqual(NASSourceConfig.Vendor.fnos.adapterStatus, .retired,
-                       "飞牛已从核心下线，不再是「未验证」那一档")
         for vendor in [NASSourceConfig.Vendor.smb, .generic] {
             XCTAssertEqual(vendor.adapterStatus, .notPorted, "\(vendor.title) 应为「未接入」")
         }
+        // 「接入过、已证伪并下线」这一档现在**没有成员**，但枚举项不能删 ——
+        // 它是三态区分的一半，下一个被真机证伪的品牌要有地方落。
+        // 这里锁的是「此刻没人在这一档」：将来谁被塞进来会红，逼着连文案一起改，
+        // 而不是被人悄悄降级成「未验证」蒙过去。
+        for vendor in NASSourceConfig.Vendor.allCases {
+            XCTAssertNotEqual(vendor.adapterStatus, .retired,
+                              "\(vendor.title) 被标成已下线，supportMessage 与选型文案必须同步改回「试过、证伪」口径")
+        }
     }
 
-    /// 已下线的品牌，说明必须说清是**试过、证伪了**，而不是「还没做」。
-    func testRetiredVendorMessageDoesNotSoundLikeWorkInProgress() {
-        let message = NASSourceConfig.Vendor.fnos.supportMessage
-        XCTAssertTrue(message.contains("下线"), "必须明说适配器已下线：\(message)")
-        XCTAssertFalse(message.contains("还没接进闪寻"),
-                       "已下线 ≠ 没接入，说成后者会让人以为等一等就有：\(message)")
-        // 指一条真能走通的路，别只把门关上。
-        XCTAssertTrue(message.contains("WebDAV"), "必须给出可替代的协议：\(message)")
+    /// 飞牛不再是「已下线」，但也不能被说成「支持」——
+    /// 它现在是**正式来源**，文案必须是产品口径（讲能力），而不是验收口径（讲验证过程）。
+    ///
+    /// 这条替换了原先的 `testFnOSIsPortedAgainAndSaysItIsNotPasswordLogin`
+    /// 与更早的 `testRetiredVendorMessageDoesNotSoundLikeWorkInProgress`。
+    /// 那两版分别锁「已下线」与「已接入未验证」的正确措辞；飞牛转正后，
+    /// 如果还留着旧断言，就会把一条正式功能重新说成半成品。
+    func testFnOSIsFullySupportedAndSaysItIsNotPasswordLogin() {
+        let vendor = NASSourceConfig.Vendor.fnos
+        let message = vendor.supportMessage
+        XCTAssertFalse(message.contains("下线"),
+                       "飞牛已接入并验证，不能再告诉用户适配器下线了：\(message)")
+        XCTAssertFalse(message.contains("没在真机上验证过"),
+                       "飞牛已是正式来源，不该再说未验证：\(message)")
+        XCTAssertTrue(message.contains("原生搜索"),
+                      "飞牛有服务端文件名索引，说明里应讲这项能力：\(message)")
+
+        // 飞牛官方协议里没有账号密码换 token 这条路（OAuth 授权码 + PKCE，
+        // 授权页不回跳，code 要用户手动交出）。指引里必须提前讲明，
+        // 否则用户会照着「用 NAS 账号登录」的惯性去填密码然后连不上。
+        XCTAssertTrue(vendor.serviceHint.contains("浏览器"),
+                      "必须说明要开浏览器授权：\(vendor.serviceHint)")
+        XCTAssertTrue(vendor.serviceHint.contains("没有账号密码"),
+                      "必须明说没有密码直连这条路：\(vendor.serviceHint)")
     }
 
     /// 「已接入未验证」的说明必须同时讲清两件事：
@@ -65,43 +94,60 @@ final class NASVendorSupportTests: XCTestCase {
                       "必须说明搜索受限：\(vendor.supportMessage)")
     }
 
-    /// 已验证的品牌里，**原生搜索可用**的恰好是群晖与 OpenList。
+    /// 已验证的品牌里，**原生搜索可用**的恰好是群晖、OpenList、飞牛。
     ///
     /// 2026-10-24 起 OpenList 也进了这一档：它在真实实例（v4.1.10）上
     /// 验过 `/api/fs/search` 的限定目录检索与分页，属「已验证 + 有原生搜索」。
-    /// 断言从「只有群晖」改成「恰好这两个」——成员仍然逐个锁死，
-    /// 不是放宽成「至少一个」，否则将来误加第三个品牌也测不出来。
-    func testNativeSearchVerifiedVendorsAreExactlySynologyAndOpenList() {
+    /// 2026-10-29 飞牛转正：真机跑通 `appcgi.finder.fileSearch` 的整条链路。
+    /// 断言逐项锁死 —— 不是放宽成「至少一个」，否则将来误加第四个品牌也测不出来。
+    func testNativeSearchVerifiedVendorsAreExactlyTheThreeFormalOnes() {
         let actual = Set(NASSourceConfig.Vendor.allCases
             .filter { $0.adapterStatus == .deviceVerified && $0.hasNativeSearch }
             .map(\.rawValue))
-        XCTAssertEqual(actual, ["synology", "openlist"],
+        XCTAssertEqual(actual, ["synology", "fnos", "openlist"],
                        "已验证且有原生搜索的品牌集合变了，需同步核对证据：\(actual.sorted())")
     }
 
     /// 是否能连接由 `hasAdapter` 决定，而不是 `nativelySupported`。
     /// 否则已接入的品牌会被挡在连接按钮外。
     func testConnectGateUsesHasAdapterNotNativeSupport() {
-        for vendor in [NASSourceConfig.Vendor.qnap, .ugreen, .webdav] {
+        // 未真机验证的两家：能连（有适配器），但不是 native。
+        for vendor in [NASSourceConfig.Vendor.qnap, .ugreen] {
             XCTAssertTrue(vendor.hasAdapter, "\(vendor.title) 已接适配器，应允许连接")
             XCTAssertFalse(vendor.nativelySupported, "\(vendor.title) 尚未真机验证，不是 native")
         }
+        // WebDAV 另一回事：真机验证过，但协议没有服务端搜索。
+        XCTAssertTrue(NASSourceConfig.Vendor.webdav.hasAdapter)
+        XCTAssertFalse(NASSourceConfig.Vendor.webdav.nativelySupported,
+                       "已验证 ≠ 有原生搜索")
         XCTAssertFalse(NASSourceConfig.Vendor.generic.hasAdapter)
         XCTAssertFalse(NASSourceConfig.Vendor.smb.hasAdapter)
-        // 已下线 = 没有可用适配器：核心已经不认它，界面放行只会拿到一句失败。
-        XCTAssertFalse(NASSourceConfig.Vendor.fnos.hasAdapter,
-                       "飞牛适配器已下线，不该再算「有适配器」")
-        XCTAssertFalse(ExperimentalSources.vendors(includingExperimental: true).contains(.fnos),
-                       "核心已不认飞牛，打开实验性开关也不该把它摆出来")
+        // ★ 飞牛现在是正式来源：适配器在、真机验证过、有原生搜索。
+        // 这三条一起锁，防止有人把状态改回「未验证」却没动选型列表
+        // （那会让向导里能选、说明却说没验过）。
+        XCTAssertTrue(NASSourceConfig.Vendor.fnos.hasAdapter)
+        XCTAssertTrue(NASSourceConfig.Vendor.fnos.nativelySupported,
+                      "飞牛已真机验证且有服务端搜索，应算 native")
+        // 正式来源**不依赖**实验性开关：关着、开着都在，而且只出现一次
+        // （它已经在 `selectableVendors` 基线里，实验分支不该再追加一遍）。
+        for including in [false, true] {
+            let listed = ExperimentalSources.vendors(includingExperimental: including)
+            XCTAssertTrue(listed.contains(.fnos),
+                          "飞牛已转正，实验开关=\(including) 时都该在选型里")
+            XCTAssertEqual(listed.filter { $0 == .fnos }.count, 1,
+                           "实验开关打开后不该把飞牛重复追加一次")
+        }
     }
 
-    /// 「已接入 + 已验证 + 有原生搜索」的集合恰好是群晖与 OpenList。
+    /// 「已接入 + 已验证 + 有原生搜索」的集合恰好是群晖、OpenList、飞牛。
     ///
     /// 其余一律不得出现在这里：WebDAV 已验证但无服务端搜索，
-    /// qnap / ugreen 未真机验证，fnos 已下线，smb / generic 未接入。
-    func testNativelySupportedVendorsAreExactlySynologyAndOpenList() {
+    /// qnap / ugreen 未真机验证，smb / generic 未接入。
+    /// 这正是 `hasNativeSearch` 与 `adapterStatus` 必须分开的理由 ——
+    /// 只看前者会把 WebDAV 说成原生搜索可用，只看后者又说不出它没有。
+    func testNativelySupportedVendorsAreExactlyTheThreeFormalOnes() {
         XCTAssertEqual(NASSourceConfig.Vendor.allCases.filter(\.nativelySupported),
-                       [.synology, .openlist])
+                       [.synology, .fnos, .openlist])
     }
 
     func testOnlySynologyIsNativelySupported() {
@@ -111,12 +157,35 @@ final class NASVendorSupportTests: XCTestCase {
         XCTAssertFalse(NASSourceConfig.Vendor.generic.nativelySupported)
     }
 
-    /// 选型开放「群晖 + OpenList」。其余品牌**撤下选型不等于删除** ——
+    /// 选型开放「群晖 + 飞牛 + OpenList」。其余品牌**撤下选型不等于删除** ——
     /// 枚举仍完整，旧配置仍能解码，以后要再开放也不用重建模型。
-    func testWizardOffersSynologyAndOpenList() {
-        XCTAssertEqual(NASSourceConfig.Vendor.selectableVendors, [.synology, .openlist])
+    ///
+    /// 顺序即界面上卡片的顺序（群晖 / 飞牛 / OpenList / 附近的设备）：
+    /// 用户 2026-10-29 要求把飞牛从实验性移进正式来源，顺带说明了它该排在
+    /// 两个「原生支持」的老成员之间。
+    func testWizardOffersTheThreeFormalVendors() {
+        XCTAssertEqual(NASSourceConfig.Vendor.selectableVendors, [.synology, .fnos, .openlist])
         XCTAssertEqual(NASSourceConfig.Vendor.allCases.count, 8,
                        "撤下选型不该删枚举项，否则已保存的旧配置会解不出来")
+    }
+
+    /// 正式开放的三家各有一枚**自己的**品牌标记，其余品牌没有（界面回落 SF Symbol）。
+    ///
+    /// 「哪家该有专属标记」是产品判断，所以锁在 Core：漏配一枚时界面会静默显示
+    /// 一个通用硬盘符号 —— 那种缺失没人会报告，只会觉得「图标没做」。
+    /// 图形本身画在 App 层（`VendorMarkView`），只能靠截图验。
+    func testFormalVendorsEachHaveTheirOwnMark() {
+        XCTAssertEqual(NASSourceConfig.Vendor.selectableVendors.compactMap(\.mark),
+                       [.synology, .fnos, .openlist],
+                       "正式开放的三家必须有专属标记，顺序与卡片一致")
+
+        // 反过来锁一遍：进了正式列表却没标记 = 卡片上会是个泛化符号。
+        for vendor in NASSourceConfig.Vendor.selectableVendors {
+            XCTAssertNotNil(vendor.mark, "\(vendor.title) 在正式列表里，却没有品牌标记")
+        }
+        // 标记不许两家共用一张图（共用等于没做区分）。
+        let marks = NASSourceConfig.Vendor.allCases.compactMap(\.mark)
+        XCTAssertEqual(Set(marks).count, marks.count, "两个品牌共用了同一个标记")
     }
 
     /// 群晖在界面上显示的两段文案里，不能再出现「真机 / 已接入 / 上游 / 移植 / 校准」

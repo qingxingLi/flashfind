@@ -1,25 +1,11 @@
 import AppKit
 import FlashFindCore
 
-/// 添加 / 编辑 NAS 来源的向导：填地址账号 → 连接（可能确认证书）→ 登录 → 选搜索位置 → 保存。
-///
-/// 从 AppModel 里切出来的理由和前几轮一样：这块的状态与方法都只围绕「向导这一次会话」，
-/// 做成闭包注入后就能独立于 AppModel 那 20 多个 `@Published` 存在。
-///
-/// ★ 这一轮和前几轮不同：向导的状态本身就带二十个字段，光搬动作不够，
-/// 所以**连状态一起搬了**（`nasSources` / `nativeProviders` / `draftSource` …）。
-/// 界面写的是 `model.xxx`，AppModel 那里保留同名转发属性并桥接
-/// `objectWillChange`——不桥接的话界面完全不刷新，而这种缺陷编译期看不出来。
-///
-/// ★ 搬移原则：**逐字搬，不优化**。这里每一句注释背后都是一次真实故障
-/// （双击连接并行、证书确认后弹回、密码框清空后无法重试、看门狗把按钮锁死……），
-/// 顺手"整理"一句就可能把那道闸删掉。
+/// 管理 NAS 来源向导的草稿、连接与保存；状态变更由 AppModel 桥接到界面。
 @MainActor
 final class NASSourceWizardController: ObservableObject {
 
-    /// 来源配置的落盘位置。**构造注入而非可选闭包**：
-    /// 可选的话漏装配也能编译通过，后果是来源配置永远写不进磁盘，
-    /// 而界面上看不出任何异常——只有重启应用才发现刚加的 NAS 不见了。
+    /// 来源配置的持久化依赖必须在构造时注入。
     private let preferences: any ClientPreferences
 
     init(preferences: any ClientPreferences) {
@@ -39,33 +25,23 @@ final class NASSourceWizardController: ObservableObject {
     /// **不在点「连接」时清**——那时清会落到模型却落不到框里，失败后无法一键重试。
     @Published var nativeNASPassword = ""
     @Published var nativeNASOTP = ""
-    /// 弹动态码输入框的那扇门。
-    ///
-    /// 由 AppModel 注入（`promptForOTP`）：弹窗要 `NSApp.activate` 才能在不进程序坞的
-    /// 辅助型应用里前置，那是 AppModel 已经踩过并锁住的行为（见
-    /// `testOTPPromptActivatesAppBeforeRunModal`）。向导**不自己再造一个弹窗**，
-    /// 否则两条登录路径（向导 / 详情页「重新登录…」）会各弹各的、文案与行为走样。
-    /// - Parameter failure: `nil` / `.required` = 还没填过码；`.rejected` = 刚填的被拒，
-    ///   弹窗要用「动态码输入错误」的标题与正文（用户 2026-10-26 明确要求）。
+    /// 与重新登录共用动态码弹窗；failure 区分首次输入与被拒重试。
     var otpPrompter: ((String, OTPFailure?) -> String?)?
     /// 上一次因「设备要动态码」而失败的状态文本。弹窗被取消时补提示要用：
     /// 取消之后界面上只剩这一行，它必须仍然说清刚才到底怎么了。
     private var otpFailureStatus = ""
+
+    /// 一次性浏览器授权码只用于当前连接，不写入来源配置。
+    @Published var draftAuthorizeCode = ""
+    /// 浏览器授权后用于将焦点移回授权码输入框。
+    @Published var draftAwaitingAuthorizeCode = false
     /// 添加/编辑向导的草稿。只有点「保存」才写入正式配置。
     @Published var draftSource = NASSourceConfig()
     @Published var draftStatus = ""
-    /// 上一次连接失败是否值得提示「改用明文 HTTP 重试」。
-    ///
-    /// 判据在 `PlainHTTPRetryOffer.shouldOffer`（可单测）。界面据此显示一个按钮，
-    /// 点它才会真的把协议改成明文——**降级仍由用户决定**，闪寻不自动换。
+    /// 明文重试仅由用户主动确认，不能自动降级。
     @Published var draftOffersPlainHTTPRetry = false
     @Published var draftBusy = false
-    /// 草稿正在等上一轮「取消」的收尾落定，还没收养到活会话。
-    ///
-    /// ★ 这段时间里「已连接 / 可勾选 / 可保存」都**还不成立**：
-    ///   此刻活会话的范围正要被改回已保存值，草稿里那份是马上失效的快照。
-    ///   不挡住的话，用户点下去改的是一个马上会被覆盖的草稿
-    ///   （点「保存」就会写出「配置 A、实际搜 B」的来源）。
+    /// 等待上轮取消的范围回滚完成，期间不可编辑或保存。
     @Published private(set) var draftSettling = false
     @Published var draftAvailableShares: [String] = []
     @Published var draftConnected = false
@@ -73,53 +49,19 @@ final class NASSourceWizardController: ObservableObject {
     func setDraftStatus(_ message: String) { draftStatus = message }
     @Published var nasTrustCandidate: NASTrustCandidate?
 
-    /// 当前连接握手中暂存的凭据。
-    ///
-    /// 为什么必须有它：连接是「填密码 → 点连接 → 可能先要确认证书 → 再登录」，
-    /// 而密码输入框在进入证书确认时就从界面上消失了。如果密码只存在输入框里，
-    /// 这一步就把它清空了，用户会陷入「点了信任 → 程序说请填密码 → 但输入框看不见」
-    /// 的死路。OTP 同理：它在 performConnect 里被重新读取时早已清空，实际根本传不到 DSM。
-    ///
-    /// 安全约束：**只存在于内存**，不写 UserDefaults、不写磁盘、不写日志，
-    /// 且在任何终态（成功 / 失败 / 取消 / 来源切换）后立即销毁。
+    /// 凭据仅在握手期间暂存于内存，所有终态都要清理。
     private var pendingCredential: PendingCredential?
-    /// 草稿里那个可操作的登录会话，**带上它是谁建的**。
-    ///
-    /// 以前这里只是一个 `NASSearchProvider?`：能拿到引用，却没有地方记
-    /// 「这个实例是本次向导新建的，还是从连接管理器借来的活会话」。
-    /// 编辑一个已连接的来源时，五条离开路径（取消 / 返回 / 切换来源 / 断开 / 提交）
-    /// 都按「我建的」处理，无条件断开 —— 用户点一下「取消」就把正在用的来源注销了。
-    /// 详见 `DraftSession`。
-    /// 上一次「取消 / 返回 / 切来源」的收尾任务。
-    ///
-    /// ★ 之前这里是 `Task { … }` 不保存引用：收尾一旦开始就没有人能等它，
-    ///   于是「取消后立刻重新编辑同一台来源」时，新草稿会照着一份**即将失效**
-    ///   的范围快照复制（见 `editSource` 里的 `hasPendingTeardown` 分支）。
-    ///   保存引用不是为了能取消它，而是为了让下一草稿能**等它落定**。
+    /// 等待上一轮草稿收尾，避免新草稿复制即将回滚的范围。
     private var draftTeardownTask: Task<Void, Never>?
     private var draftSession: DraftSession = .none
 
-    /// 草稿代次：每次「取消 / 切换来源 / 重开编辑 / 提交完成」都 +1。
-    ///
-    /// ★ 提交与收养都有 `await`（等绑定、等上一轮收尾）。等待期间用户完全可以
-    ///   取消、切到别的来源、或重开同一台 —— 那时旧回调手里的 provider 与范围
-    ///   都属于**上一轮**。落下去就是拿旧草稿的结论盖到新草稿上。
-    ///   所以每个 `await` 之后都要先核对代次，再动状态。
+    /// 防止等待期间失效的旧草稿回调覆盖当前状态。
     private var draftGeneration = 0
 
-    /// 进入编辑时该来源的主机与账号。
-    ///
-    /// 凭据条目只按来源 ID 存，不含主机与账号。用户把 `.96` 改成 `.88`
-    /// （或换账号）之后，条目 key 没变、里面还是旧密码——不拦住就会
-    /// 把 A 机器的密码发给 B 机器。保存时会清凭据，但「保存前就点连接」这条路上
-    /// 也必须有同样的保护。
+    /// 地址或账号变更后不能向新目标发送旧凭据。
     private var draftOriginalEndpoint: (host: String, username: String)?
 
-    /// 一次连接尝试的序号。只有最新那次能写状态。
-    ///
-    /// 没有它就有两个后果：① 用户点「连接」后立刻改地址/取消，在飞的旧尝试
-    /// 返回时仍会覆盖状态；② 「连接」按钮的繁忙标记是在异步流程里才置位的，
-    /// 双击能同时起两条 discover→login 流程，互相冲掉会话与证书确认。
+    /// 仅允许最新连接尝试写入状态，并阻止双击并发连接。
     private let attemptGate = ConnectionAttemptGate()
     /// 来源配置的落盘 key。AppModel 载入配置时也用它，避免两处各写一份字面量。
     static let sourcesStorageKey = "ff2.nasSources.v1"
@@ -128,6 +70,9 @@ final class NASSourceWizardController: ObservableObject {
     struct PendingCredential {
         let password: String
         let otp: String?
+        /// 飞牛两段授权的第二段：用户从浏览器授权页抄回来的一次性码。
+        /// 只在「重新带着 code 连接」时非空。
+        var authorizeCode: String? = nil
     }
 
     // MARK: - 宿主注入的入口
@@ -150,22 +95,11 @@ final class NASSourceWizardController: ObservableObject {
     var attachAutoReconnect: (NASSearchProvider) -> Void = { _ in }
     /// 清掉核心里某个 sourceID 的旧会话（否则回 SourceExists）。
     var resetCore: (String) async -> Void = { _ in }
-    /// 保存成功后确保 NAS 总开关是开的（R01）。
-    ///
-    /// 不开的话会出现最迷惑的一种状态：来源卡片写着「已连接」，
-    /// 搜索却一个 NAS 来源都不请求 —— 用户只会以为是 NAS 没搜到东西。
+    /// 保存来源后开启 NAS 搜索，使已连接来源参与搜索。
     var ensureNASSearchEnabled: () -> Void = {}
-    /// 逐来源「连接意图」登记表。
-    ///
-    /// **与 AppModel 共用同一个实例**：用户在来源卡片上点「断开」时，
-    /// AppModel 会推进该来源的代次，这里所有在飞的连接尝试立刻作废 ——
-    /// 迟到的成功不许 install（install 会发布 Provider 变化，上层随即
-    /// 整体重建搜索协调器，把其它来源在飞的查询一起取消）。
+    /// 与 AppModel 共用连接意图，用户断开时令在途连接失效。
     var connectIntent = SourceConnectIntent()
-    /// 把**已登录**的 Provider 交给连接管理器（R02）。
-    ///
-    /// 必须是闭包而不是直接写 `nativeProviders[id]`：管理器才是 Provider 的
-    /// 唯一持有者，写界面字典会被下一次 rebuild 用空白实例覆盖。
+    /// 由连接管理器持有已登录的 Provider。
     var installProvider: (NASSearchProvider) -> Void = { _ in }
 
     // MARK: - 承接注入的同名入口
@@ -232,10 +166,7 @@ final class NASSourceWizardController: ObservableObject {
         }
     }
 
-    /// 把管理器里那个活会话借进草稿（界面选项与已选位置都取自同一个实例）。
-    ///
-    /// ★ 抽成方法是因为**借的时机**不再只有一处：上一轮收尾还在飞时，
-    ///   这一步必须排在收尾之后（见 `editSource`）。写成方法，两条路用的是同一份语义。
+    /// 等收尾完成后借用活会话，并用同一实例更新可选和已选范围。
     private func adoptLiveSession(_ live: NASSearchProvider, sourceID: String, generation: Int) {
         // ★ 忙碌只能由**自己这一轮**解除。
         //
@@ -262,12 +193,7 @@ final class NASSourceWizardController: ObservableObject {
         draftConnected = true
     }
 
-    /// 把草稿写入正式配置。同 ID 覆盖。
-    ///
-    /// - Parameter rebuildProviders: 是否顺带重建 Provider 字典。
-    ///   `commitDraft` 传 `false`：它手里已经有一个**已登录**的 provider，
-    ///   先重建会凭空多造一个——新造的没人用，已登录的那个则被搁置，
-    ///   等于白白浪费一次登录，还得靠后面的重建重新接回来。
+    /// 保存草稿；已有登录会话时可跳过重建 Provider。
     @discardableResult
     func saveDraft(rebuildProviders: Bool = true) -> Bool {
         // 必填项**必须在这里判掉**：`commitDraft` 要先把范围绑定等出结果才落盘，
@@ -307,17 +233,9 @@ final class NASSourceWizardController: ObservableObject {
         identityChangedForCredentialReset = false
         return true
     }
-    /// 保存前的必填校验（地址、账号）。返回要在状态栏显示的那句话。
-    ///
-    /// 抽出来是因为**保存的入口不止一个**：`saveDraft` 直接用它；
-    /// `commitDraft` 要在发起异步绑定**之前**就用它判一次——那是唯一一个
-    /// 「用户点完还得等网络」的入口，晚一步报错等于让人白等。
+    /// 使用 Core 校验品牌对应的必填项。
     private func draftValidationMessage() -> String? {
-        var draft = draftSource
-        draft.normalizeHost()
-        if draft.hostName.isEmpty { return "请填写 NAS 地址" }
-        if draft.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写 NAS 账号" }
-        return nil
+        draftSource.saveBlockingReason
     }
 
     /// 本次保存是否因为身份变更而清掉了钥匙串凭据（用于给出准确提示）。
@@ -332,11 +250,7 @@ final class NASSourceWizardController: ObservableObject {
         "你正在用管理员账号搜索。管理员能看到这台 NAS 上的全部共享，因此闪寻能搜到的范围不受「你被授予了哪些目录」限制。如果这台机器上有你不希望被搜到的内容，请改用一个只授权了目标目录的普通账号。"
     }
 
-    /// 草稿的「主机 + 账号」是否相对**进入编辑时**发生了变化。
-    ///
-    /// 新增来源没有原始身份，永远算未变化。编辑已有来源时，
-    /// 只要地址或账号被改过，钥匙串里的旧密码就不再属于这个目标——
-    /// 要么让用户重输，要么这次连接就当作「没有可用密码」。
+    /// 编辑时地址或账号变更后不能继续使用原凭据。
     var draftIdentityChanged: Bool {
         guard let original = draftOriginalEndpoint else { return false }
         return original.host != draftSource.hostName || original.username != draftSource.username
@@ -357,7 +271,8 @@ final class NASSourceWizardController: ObservableObject {
                                       hasPort: draftSource.hasEffectivePort,
                                       username: draftSource.username,
                                       hasTypedPassword: !nativeNASPassword.isEmpty,
-                                      hasStoredPassword: canRequestStoredPasswordForDraft)
+                                      hasStoredPassword: canRequestStoredPasswordForDraft,
+                                      requiresCredential: draftSource.vendor.requiresAccountPassword)
     }
 
     /// 按钮不可用时说明缺什么。灰按钮不解释自己最容易被当成程序坏了。
@@ -367,7 +282,8 @@ final class NASSourceWizardController: ObservableObject {
                                           hasPort: draftSource.hasEffectivePort,
                                           username: draftSource.username,
                                           hasTypedPassword: !nativeNASPassword.isEmpty,
-                                          hasStoredPassword: canRequestStoredPasswordForDraft)
+                                          hasStoredPassword: canRequestStoredPasswordForDraft,
+                                          requiresCredential: draftSource.vendor.requiresAccountPassword)
     }
 
     /// 地址或账号改动过 → 旧的钥匙串密码不能用，按钮旁要说清楚原因。
@@ -416,15 +332,7 @@ final class NASSourceWizardController: ObservableObject {
     /// 当前品牌是否允许填连接路径。只有 WebDAV（见 `Vendor.allowsBasePath`）。
     var draftAllowsBasePath: Bool { draftSource.vendor.allowsBasePath }
 
-    /// 设置连接路径。
-    ///
-    /// **只有在能解析出结果时才写模型**：用户在 `/dav` 的输入过程中，
-    /// `/` 单独出现时解析结果是「等价于没填」，此时若把 `nil` 写进去，
-    /// 输入框会被同步回空串、把他刚敲的字符擦掉——表现为「打不进去」。
-    /// 视图那边同样保留自己的文本（见 `NASSourceWizardView.basePathText`）。
-    ///
-    /// 兜底：非 WebDAV 品牌一律不写（`effectiveBasePath` 也会挡，但少留一份
-    /// 界面无法解释的残留值更省事）。
+    /// 仅支持路径的品牌写入；空路径或单个斜杠表示站点根。
     func setDraftBasePath(_ text: String) {
         guard draftSource.vendor.allowsBasePath else { return }
         let parsed = BasePathField.parse(text)
@@ -433,12 +341,7 @@ final class NASSourceWizardController: ObservableObject {
         if draftSource.basePath != value { draftSource.basePath = value }
     }
 
-    /// 切换品牌。**必须把明文 HTTP 的选择清回「按品牌默认」**。
-    ///
-    /// `usePlainHTTP` 是显式值，一旦写过就会盖住新品牌的默认值：
-    /// 用户在飞牛（默认明文）上开过这个开关，再切到群晖时它会一直生效，
-    /// 于是「https 的设备被按 http 连」——界面看不出任何异常，只是连不上。
-    /// 复位逻辑在 `NASSourceConfig.adoptVendor`，那里可以单独测。
+    /// 切换品牌时取消旧连接，并恢复新品牌的默认协议。
     func setDraftVendor(_ vendor: NASSourceConfig.Vendor) {
         guard draftSource.vendor != vendor else { return }
         // 换类型等于放弃当前这次连接：已建立的会话、待确认的证书都属于原类型。
@@ -446,16 +349,7 @@ final class NASSourceWizardController: ObservableObject {
         draftSource.adoptVendor(vendor)
     }
 
-    /// 从「附近的设备」里选中一台。
-    ///
-    /// 只**预填**地址与端口，不自动发起连接：接下来还要填账号密码，而且用户
-    /// 可能只是想先核对一眼这个地址对不对。下一步由他自己点「连接」。
-    ///
-    /// ## 顺序不能反
-    ///
-    /// **先切品牌、再写地址**。`adoptVendor` 会清空 host / port / username
-    /// （换类型等于换一种服务，旧字段留着只会误导），反过来写就会被它清掉，
-    /// 表现为「点了一台设备，地址栏还是空的」。
+    /// 先切换品牌再预填地址和端口；连接由用户发起。
     func applyDiscoveredDevice(_ device: DiscoveredDevice) {
         if let vendor = device.vendorHint, draftSource.vendor != vendor {
             setDraftVendor(vendor)
@@ -480,12 +374,7 @@ final class NASSourceWizardController: ObservableObject {
     /// 当前品牌是否允许用户选协议。群晖不给选（见 `Vendor.allowsPlainHTTPChoice`）。
     var draftAllowsPlainHTTPChoice: Bool { draftSource.vendor.allowsPlainHTTPChoice }
 
-    /// 开关「使用明文 HTTP」。
-    ///
-    /// 这个开关是**必需的**：WebDAV 的默认协议是 https，但真实设备里有
-    /// 只开明文 HTTP 的（已真机验证的飞牛 5005 就是），且 WebDAV 的
-    /// 端口是用户自己填的，客户端无从猜测。没有这个开关，这类设备
-    /// 在界面上就没有任何可用的接入方式。
+    /// 只允许支持协议选择的品牌使用明文 HTTP。
     func setDraftPlainHTTP(_ value: Bool) {
         // 兜底：群晖走证书固定，明文过不了核心的 `UnsafeEndpoint` 校验。
         // 视图本就不给群晖显示这个开关，这里防的是「配置里残留了显式值」
@@ -507,19 +396,7 @@ final class NASSourceWizardController: ObservableObject {
         preferences.set(data, forKey: Self.sourcesStorageKey)
     }
 
-    /// 给**已保存**的来源改名（设置页详情里的「名称」）。
-    ///
-    /// 名字是纯展示字段：`sourceID` 由 `id` 派生、钥匙串条目按 `sourceID` 存、
-    /// 核心会话也按 `sourceID` 建 —— 三处都不看名字。所以这里刻意只做三件事：
-    /// 改配置、落盘、把新名字告诉还活着的那台 Provider。
-    ///
-    /// 三条**不做**的，每一条都对应一个具体后果：
-    /// - 不 `rebuildNativeProviders()`：`NASConnectionManager.rebuild` 会把「配置变了」的
-    ///   来源 disconnect 再换成未登录实例 —— 改个名字 NAS 就掉线，还要重新输密码；
-    /// - 不 `invalidate()`：那会清空当前结果列表，改名字不该把用户搜出来的东西清掉；
-    /// - 不 `changedQuery()`：改名不是新查询，重搜一遍纯属浪费。
-    ///
-    /// 名字的规范化在 Core（`NASSourceRename`）：空白即默认名、换行折成空格。
+    /// 名称仅供展示；不重建 Provider 或重新搜索，以保留现有连接和结果。
     func renameSource(_ id: String, to rawName: String) {
         guard let index = nasSources.firstIndex(where: { $0.id == id }) else { return }
         guard NASSourceRename.isRename(stored: nasSources[index].name, to: rawName) else { return }
@@ -554,16 +431,7 @@ final class NASSourceWizardController: ObservableObject {
     }
     // MARK: - 向导连接流程：探测端口 → 确认证书 → 登录 → 选共享
 
-    /// 探测可达的 DSM 入口端口并登录。
-    ///
-    /// 端口由用户显式填写：自签名证书的 NAS 在标准 URLSession 下无法完成探测
-    /// （TLS 阶段就失败，会把 5001 这种真正可达的端口判成不通），自动探测在这里
-    /// 只会制造假失败。`probePort` 仅用于**给出精确错误提示**（区分「端口不通」
-    /// 与「证书不受信」），不再参与连接决策。
-    /// 关闭搜索 provider 时连带清掉向导手里那个待提交的实例。
-    ///
-    /// 只置 nil、不 disconnect：与原来 `closeSearchProviders` 的行为一致
-    /// （断开由调用方各自负责，这里不抢）。
+    /// 释放待提交会话的引用；断开由调用方负责。
     func discardPendingProvider() { draftSession = .none }
 
     func connectDraft() {
@@ -581,6 +449,8 @@ final class NASSourceWizardController: ObservableObject {
         }
         var config = draftSource
         config.normalizeHost()
+        // 新的一次连接开始：上一轮「等用户粘码」的焦点请求到此为止。
+        draftAwaitingAuthorizeCode = false
         // 端口一律用「有效端口」判定：地址里写了 `192.0.2.96:5001` 也算数。
         // 之前这里用的是只看端口字段的 `hasPort`，而按钮用的是 `hasEffectivePort`，
         // 两处判定不一致 → 按钮是亮的、点下去却被这里拦下并 return，
@@ -590,56 +460,43 @@ final class NASSourceWizardController: ObservableObject {
             draftStatus = "请填写端口，或把端口直接写在地址里（如 192.0.2.96:5001）"
             return
         }
-        guard !config.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { draftStatus = "请填写 NAS 账号"; return }
+        // 账号只有「账号密码」这一档才必填。飞牛（fnOS）没有账号密码登录，
+        // 拦在这里等于让一个本来能连的品牌永远连不上，而且提示还在教用户填一串用不上的东西。
+        if config.vendor.requiresAccountPassword,
+           config.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draftStatus = "请填写 NAS 账号"
+            return
+        }
         draftSource = config
-        // 已经有适配器的品牌（含「已接入但未在真机验证」的四个）都**放行连接** ——
-        // 未验证不等于不能用，而且真机结果正是校准适配器唯一的数据来源。
-        // 只有连适配器都还没有的品牌才拦下来，并说明原因。
-        //
-        // 注意措辞：这不是「闪寻只支持群晖」，而是「这个品牌的适配器还没移植过来」。
-        // MyNAS 上游 lib/nas_adapters/ 下这些实现是现成的，移植后即可使用。
+        // 允许已接入但未验证的品牌连接；没有适配器时说明原因。
         guard config.vendor.hasAdapter else {
             draftStatus = config.vendor.supportMessage
             return
         }
-        // 密码来源二选一：本次输入的，或本机保存的。
-        // 已知来源以前者优先（用户可能刚改了密码）；已保存来源后者优先——
-        // 否则每次编辑都要把密码重新敲一遍，正是用户反馈的「很麻烦」。
-        // 但**地址或账号改过之后就不许用钥匙串里的**：那把密码属于原来的目标。
-        //
-        // ★ 取值规则本身住在 Core（`NASCredentialPick`），因为它藏过一个死循环：
-        // 钥匙串那条路若把动态码丢了 ⇒ 重连不带码 ⇒ 服务端再回 402 ⇒ 又弹一次 OTP。
-        // 「手输密码」那条路带码、「钥匙串」那条路不带码，于是现象像「只有空密码才死循环」，
-        // 实际是两路的差别。规则搬进 Core 后有单元测试守着，不再靠人工点一遍才发现。
+        // 地址或账号变化后不使用旧凭据；密码与动态码由 NASCredentialPick 统一选择。
         let storedPassword: String? = (nativeNASPassword.isEmpty && config.rememberPassword && !draftIdentityChanged)
             ? SecureStorage.read(account: config.credentialAccount,
                                  identity: config.credentialIdentity, allowInteraction: true)
             : nil
-        guard let picked = NASCredentialPick.pick(typedPassword: nativeNASPassword,
-                                                  storedPassword: storedPassword,
-                                                  otp: nativeNASOTP) else {
-            draftStatus = draftIdentityChanged ? "地址或账号已改动，请重新输入密码"
-                : (CredentialStore.currentProblem?.summary ?? "请输入密码")
-            return
+        // 浏览器授权使用续期令牌，不走账号密码校验。
+        let credential: PendingCredential
+        if config.vendor.requiresAccountPassword {
+            guard let picked = NASCredentialPick.pick(typedPassword: nativeNASPassword,
+                                                      storedPassword: storedPassword,
+                                                      otp: nativeNASOTP) else {
+                draftStatus = draftIdentityChanged ? "地址或账号已改动，请重新输入密码"
+                    : (CredentialStore.currentProblem?.summary ?? "请输入密码")
+                return
+            }
+            credential = PendingCredential(password: picked.password, otp: picked.otp)
+        } else {
+            // 无续期令牌时请求浏览器授权；空授权码转为 nil。
+            credential = PendingCredential(password: storedPassword ?? "", otp: nil,
+                                           authorizeCode: AuthorizeCodeField.optional(draftAuthorizeCode))
         }
-        let credential = PendingCredential(password: picked.password, otp: picked.otp)
-        // 密码**留在框里**，凭据同时暂存进内存供「确认证书」之后继续登录。
-        //
-        // 曾经的做法是点「连接」就立刻清空（意图是不把密码留在界面上），
-        // 但密码框此刻往往还是第一响应者，`SecureFieldEcho.shouldWrite`
-        // 在编辑中不回写——清空只落在模型、落不到框里。连接一旦失败：
-        //
-        //   框里有圆点、模型是空 → 「连接」判「请输入密码」→ 只能删掉重敲
-        //
-        // 用户撞上的正是这个（429 限流后无法一键重试）。
-        // 改为失败后原样保留：显示与模型一致，改个配置就能再点连接；
-        // 密码只在**连接成功**后由成功路径统一清掉。
+        // 失败时保留输入供重试，握手期间暂存凭据供确认证书后使用。
         pendingCredential = credential
-        // **同步**占位，这一步不能挪进异步流程。
-        // 之前 draftBusy 是在 performConnect 里置位的，中间存在一个窗口期：
-        // 用户双击时第二次点击读到的 draftBusy 仍是 false，
-        // 于是两条 discover→login 流程同时在跑，互相覆盖会话与证书确认，
-        // 表现就是「偶发登录失败 / 证书弹两次 / 连上又断」。
+        // 同步占位，防止双击启动并发连接。
         let attempt = beginAttempt()
         Task { await performConnect(config: config, credential: credential, attempt: attempt) }
     }
@@ -653,14 +510,7 @@ final class NASSourceWizardController: ObservableObject {
         draftBusy = true
         // 新的一次尝试开始，上一次的失败提示立刻失效（否则按钮会指着一次早已过去的失败）。
         draftOffersPlainHTTPRetry = false
-        // 兜底看门狗：任何一次连接尝试都不该把「连接中」锁死。
-        //
-        // 之前没有这层保护：若某次 `await` 因底层进程异常、管道半开等原因
-        // 永远不返回，那条路径上的 `defer { draftBusy = false }` 就永远不会执行，
-        // `draftBusy` 一直是 true ——「连接」按钮永久变灰，用户只能重启应用。
-        //
-        // 只在**这次尝试仍是当前尝试、且仍在 busy**时才复位：
-        // 已经正常结束（成功或失败都会把 draftBusy 置回 false）的不受影响。
+        // 看门狗只解除当前仍在进行的尝试，避免异常时按钮永久锁定。
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 90_000_000_000)   // 90 秒
             guard let self, self.isCurrentAttempt(attempt), self.draftBusy else { return }
@@ -677,22 +527,8 @@ final class NASSourceWizardController: ObservableObject {
     /// 本次连接尝试的连接意图凭证（`performConnect` / `confirmDraftTrust` 里登记）。
     private var connectToken: SourceConnectIntent.Token?
 
-    /// 这次连接尝试现在还有效吗。
-    ///
-    /// 两件事一起判：
-    ///   1. 仍是**当前尝试**（`attemptGate`：取消 / 重连 / 改配置都会让旧尝试失效）；
-    ///   2. 连接意图**没被作废** —— 用户在来源卡片上点了这台 NAS 的「断开」时，
-    ///      AppModel 会让该来源的代次 +1，这里立刻为 false。
-    ///
-    /// 每一个 `await` 之后、以及 install / 状态回写之前都必须过这一关：
-    /// 过期连接不许 install、不许回写状态（install 会发布 Provider 变化 →
-    /// 上层整体重建协调器 → 其它来源在飞的查询被一起取消）。
-    ///
-    /// 这里**只核对代次**，不比对配置指纹：向导的 `draftSource` 在连接过程中
-    /// 会被自己写回（端口兜底、`scopes` 回填、证书确认时改写端口），拿它当
-    /// 「配置有没有变」的基准只会把正常流程自己判成过期。配置变化由
-    /// `attemptGate`（取消/重连）负责；AppModel 的静默自动连接那条路才是
-    /// 拿「已保存配置」当基准、可以安全比对指纹的地方。
+    /// 过期尝试或被用户断开的来源不得安装 Provider 或回写状态。
+    /// 草稿会在连接中自动更新，故此处只核对尝试与连接意图代次。
     private func attemptStillValid(_ attempt: Int) -> Bool {
         guard isCurrentAttempt(attempt) else { return false }
         guard let token = connectToken else { return true }
@@ -707,12 +543,7 @@ final class NASSourceWizardController: ObservableObject {
         return token
     }
 
-    /// 建 Provider 的唯一入口：超时预算、挂载服务、自动重连，三件套一次装齐。
-    ///
-    /// 证书确认那条路曾经自己 `NASSearchProvider(bridge:…)` 了一个，漏装
-    /// `mountService`：结果是这台 NAS **能搜、点开却报「尚未连接共享」**，
-    /// 而证书正常的另一台一切正常——差别只在走了哪条连接路径。
-    /// 只要还留着第二处手写构造，这个洞就会再开一次，所以两条路都走这里。
+    /// 所有连接路径统一装配超时、挂载服务和自动重连。
     private func makeProvider(_ bridge: any MyNASBridgeTransport,
                               config: NASSourceConfig, port: Int) -> NASSearchProvider {
         let provider = NASSearchProvider(bridge: bridge, config: config, port: port)
@@ -750,24 +581,35 @@ final class NASSourceWizardController: ObservableObject {
         effective.port = effective.effectivePort
         draftSource = effective
         do {
-            // 同上：discover 之前先清掉同 sourceID 的旧来源，否则回 SourceExists。
-            await resetCoreSource(effective.sourceID)
-            guard attemptStillValid(attempt) else { clearPendingCredential(); return }
+            // 同一端点继续 PKCE 授权时不得重置或重新发现，否则 verifier 会丢失。
+            let resumingAuthorization = credential.authorizeCode != nil
+                && pendingAuthorizationEndpoint.map {
+                    $0.host == effective.hostName && $0.port == effective.port
+                } == true
+            if !resumingAuthorization {
+                // 同上：discover 之前先清掉同 sourceID 的旧来源，否则回 SourceExists。
+                await resetCoreSource(effective.sourceID)
+                // 旧挑战对应的会话已经被清掉，标记必须一起失效。
+                pendingAuthorizationEndpoint = nil
+                guard attemptStillValid(attempt) else { clearPendingCredential(); return }
+            }
             let provider = makeProvider(sharedBridge, config: effective, port: effective.port)
 
-            let discovered = try await provider.discover()
-            // 探测期间用户取消、点了断开、或发起了新一次连接 → 本次作废，
-            // 不弹证书对话框、不覆盖状态，也不留着那份暂存凭据。
-            guard attemptStillValid(attempt) else { clearPendingCredential(); return }
-            if let candidate = discovered["candidate"] as? [String: Any],
-               let candidateID = candidate["candidateID"] as? String, let digest = candidate["sha256"] as? String {
-                nasTrustCandidate = NASTrustCandidate(candidateID: candidateID, sha256: digest,
-                                                      host: effective.hostName, port: effective.port,
-                                                      expired: candidate["expired"] as? Bool ?? false)
-                draftStatus = "请核对证书指纹，确认后再登录"
-                // 凭据留在 pendingCredential 里，等用户确认证书后继续。
-                // 不能在这里销毁——界面上的密码框此时是隐藏的，用户没法再输一次。
-                return
+            if !resumingAuthorization {
+                let discovered = try await provider.discover()
+                // 探测期间用户取消、点了断开、或发起了新一次连接 → 本次作废，
+                // 不弹证书对话框、不覆盖状态，也不留着那份暂存凭据。
+                guard attemptStillValid(attempt) else { clearPendingCredential(); return }
+                if let candidate = discovered["candidate"] as? [String: Any],
+                   let candidateID = candidate["candidateID"] as? String, let digest = candidate["sha256"] as? String {
+                    nasTrustCandidate = NASTrustCandidate(candidateID: candidateID, sha256: digest,
+                                                          host: effective.hostName, port: effective.port,
+                                                          expired: candidate["expired"] as? Bool ?? false)
+                    draftStatus = "请核对证书指纹，确认后再登录"
+                    // 凭据留在 pendingCredential 里，等用户确认证书后继续。
+                    // 不能在这里销毁——界面上的密码框此时是隐藏的，用户没法再输一次。
+                    return
+                }
             }
             await finishLogin(config: effective, provider: provider, credential: credential, attempt: attempt)
         } catch {
@@ -785,23 +627,14 @@ final class NASSourceWizardController: ObservableObject {
     /// 三处各写一遍必然会漏掉其中一处，被丢掉的往往正是原因。
     private func finishFailedAttempt(error: Error, config: NASSourceConfig,
                                      prefix: String, reason: String) {
+        // 这次连接已经结束（不管哪种失败），核心里那条待换令牌的挑战不再可信：
+        // 下一次必须完整走一遍 discover，不能凭旧标记跳过它。
+        pendingAuthorizationEndpoint = nil
         let flash = error as? FlashFindError
         var apiCode: Int?
         var isCoreFailure = false
         if case let .coreFailure(_, _, code)? = flash { isCoreFailure = true; apiCode = code }
-        // ★ 设备要求动态口令 → 直接弹输入框，填完自动接着连。
-        //
-        // 这一条换过三版，每一版都是同一个现象改头换面：
-        //   1. 输入框是视图私有的 `@State`，**没有任何路径会打开它**
-        //      → 状态行说「请填写 OTP」，界面上没有能填的地方；
-        //   2. 改成模型持有折叠开关，失败时自动展开
-        //      → 但用户得自己回表单点第二次「连接」；
-        //   3. 现在：**弹窗**问码，拿到就自动续连，与详情页「重新登录…」
-        //      那条路走同一扇门（`otpPrompter`）。
-        // 判据不变：失败里到底是不是 OTP，由 Core 的 `otpFailure` 说了算。
-        // ★ 但必须带上是**哪一种**：`.rejected` 要在弹框里直说「动态码输入错误」，
-        // 否则用户码填错一次，看到的仍是「这台设备需要两步验证」——他会以为
-        // 码根本没发出去（2026-10-26 报障原话）。
+        // Core 判定动态码失败类型；被拒时弹窗需明确提示输入错误。
         let otp = ConnectionFailureText.otpFailure(error)
         let offer = PlainHTTPRetryOffer.shouldOffer(
             allowsPlainHTTPChoice: config.vendor.allowsPlainHTTPChoice,
@@ -823,22 +656,7 @@ final class NASSourceWizardController: ObservableObject {
         if !offer { clearPendingCredential() }
     }
 
-    /// 设备要动态码 → 弹窗问码 → 拿到就自动接着连。
-    ///
-    /// ## 为什么弹窗要放到一个独立的 Task 里
-    ///
-    /// 失败收尾是 `performConnect` 的最后一步，而弹窗是**模态**的（同步阻塞主线程）。
-    /// 就地弹会把这次连接尝试的 `defer`、状态刷新全卡在半路；放进 Task 则是在
-    /// 本次尝试彻底结束（按钮已解锁、`draftBusy` 已复位）之后才问用户。
-    ///
-    /// ## 为什么拿到码之后走 `connectDraft()` 而不是把码塞进 `pendingCredential`
-    ///
-    /// `connectDraft()` 里已经把「密码从框里来还是从本机存的那把来」、
-    /// 「改过地址/账号就不许沿用旧密码」这类判定写全了；再抄一遍必然会漏一条，
-    /// 而漏的那条往往是安全相关的。密码此刻仍在框里（连接失败不清框，
-    /// 详见 `connectDraft` 的注释），所以这条路对「手输密码」与「已保存密码」都成立。
-    /// - Parameter failure: 上一次为什么失败。`.rejected` 让弹框直说「动态码输入错误」，
-    ///   而不是把码错说成「这台设备需要两步验证」。
+    /// 在独立任务中弹出动态码对话框，避免阻塞连接收尾；复用连接流程校验凭据。
     private func promptForOTPThenReconnect(sourceName: String, failure: OTPFailure?) {
         Task { [weak self] in
             guard let self else { return }
@@ -877,6 +695,55 @@ final class NASSourceWizardController: ObservableObject {
     /// 销毁暂存凭据。任何终态都必须调用，避免密码在内存里多留一刻。
     private func clearPendingCredential() { pendingCredential = nil }
 
+    /// 同一端点保留 PKCE 会话；终态或端点变更时清除。
+    private var pendingAuthorizationEndpoint: (host: String, port: Int)?
+
+    /// 等待授权码不是连接失败。
+    private enum LoginOutcome {
+        case connected
+        /// 浏览器已打开，表单里那一格在等用户粘码。界面不该显示任何失败文案。
+        case awaitingAuthorizeCode
+    }
+
+    /// 授权码复用连接流程，保留证书确认与 PKCE 会话。
+    func requestDraftAuthorizeCode() {
+        guard AuthorizeCodeField.isInline(for: draftSource.vendor) else { return }
+        connectDraft()
+    }
+
+    /// 浏览器授权后等待用户在表单粘贴一次性授权码，再继续登录。
+    private func loginHandlingAuthorization(config: NASSourceConfig,
+                                            provider: NASSearchProvider,
+                                            credential: PendingCredential,
+                                            attempt: Int) async throws -> LoginOutcome {
+        try Task.checkCancellation()
+        do {
+            try await provider.login(account: config.username,
+                                     password: credential.password,
+                                     otp: credential.otp,
+                                     authorizeCode: credential.authorizeCode)
+            return .connected
+        } catch FlashFindError.authorizationRequired(let url, let validFor, let rejected, _) {
+            // 这次尝试已被取消/取代：浏览器都不该开，用户已经不在这个流程里了。
+            guard attemptStillValid(attempt) else { return .awaitingAuthorizeCode }
+            // 上一串码（被拒的、或刚用过的）不能留在框里：下次点「连接」还会拿它
+            // 去撞同一个拒绝，而用户以为自己刚粘的是新的。
+            draftAuthorizeCode = ""
+            // 先聚焦再开浏览器：`NSWorkspace.open` 会把前台交给浏览器，
+            // 焦点状态是给用户切回来那一刻用的。
+            draftAwaitingAuthorizeCode = true
+            // 记下这次挑战对应的端点：核心那个会话里现在存着 PKCE verifier，
+            // 下一轮带码连接必须复用它（见 `performConnect` 的 resumed 分支）。
+            pendingAuthorizationEndpoint = (config.hostName, config.port)
+            draftStatus = ConnectionFailureText.authorizeInlinePrompt(
+                sourceName: config.displayName, rejected: rejected, validFor: validFor)
+            // 打开浏览器只能在这里做：Core 不依赖 AppKit。返回值不看 ——
+            // 开不出来（没有默认浏览器）时，「获取授权码」按钮就在旁边，用户点它即可。
+            NSWorkspace.shared.open(url)
+            return .awaitingAuthorizeCode
+        }
+    }
+
     /// 登录 → 列共享 → 绑定搜索位置。
     ///
     /// 「确认证书」与「连接」两条路径都汇到这里，因此共用**同一个** Provider 实例。
@@ -886,7 +753,17 @@ final class NASSourceWizardController: ObservableObject {
                              credential: PendingCredential, attempt: Int) async {
         guard attemptStillValid(attempt) else { clearPendingCredential(); return }
         do {
-            try await provider.login(account: config.username, password: credential.password, otp: credential.otp)
+            let outcome = try await loginHandlingAuthorization(config: config, provider: provider,
+                                                               credential: credential, attempt: attempt)
+            guard outcome == .connected else {
+                // 等用户粘授权码。**这不是失败**：状态行已经写成「去粘码」，
+                // 这里绝不能覆盖它，也不能把 draftConnected 之类置成任何终态。
+                // 下一次点「连接」是全新一轮，会带上框里那串码。
+                clearPendingCredential()
+                return
+            }
+            // 登录成功：核心里那个会话已经带着令牌了，它不再是「待换令牌的挑战」。
+            pendingAuthorizationEndpoint = nil
             // 登录请求已发出，本地这份凭据没有用途了。
             // 注意：这里只是不再需要它，并**不代表可以丢弃**——
             // 下面保存到本机凭据文件时还要用，所以用局部常量留住，而不是提前清空。
@@ -935,14 +812,22 @@ final class NASSourceWizardController: ObservableObject {
             // 清空动作放在成功路径而不是点连接时——见 connectDraft 里的说明。
             nativeNASPassword = ""
             nativeNASOTP = ""
+            // 码已经换成令牌了，留在框里只会让用户以为下次还得用它。
+            draftAuthorizeCode = ""
+            draftAwaitingAuthorizeCode = false
             var credentialSaveFailed = false
             if effective.rememberPassword {
-                // 必须用 credential.password。
-                // 不能裸写 `password`：那会解析到旧索引服务那个同名属性，
-                // 存进凭据的一直是空串或无关值——
-                // 表现为「明明勾了保存密码，每次还是得重输」。
-                let secret = credential.password
+                // ★ 核心给了「下次登录所需的那串东西」时存它，而不是用户刚敲的密码。
+                //
+                // 飞牛（fnOS）没有密码，那串东西是 OAuth 换来的 refresh token；
+                // 存空串的后果是「界面显示已记住、下次照样连不上」，用户无从判断。
+                // 账密品牌 `sessionSecret` 恒为 nil，行为与以前完全一致。
+                // 判定在 Core（`NASCredentialSave`），可单测。
                 do {
+                    guard let secret = NASCredentialSave.pick(sessionSecret: provider.sessionSecret,
+                                                              typedPassword: credential.password) else {
+                        throw FlashFindError.message("核心没有返回可保存的凭据")
+                    }
                     try await Task.detached {
                         try SecureStorage.save(secret, account: effective.credentialAccount,
                                                identity: effective.credentialIdentity,
@@ -973,26 +858,7 @@ final class NASSourceWizardController: ObservableObject {
         }
     }
 
-    /// 把底层错误翻译成用户能理解的一句话，并区分「网络不通」与「证书不受信」。
-    ///
-    /// 这两种失败在原始报错里长得很像（都是 `NSURLErrorDomain`），
-    /// 但用户要做的处理完全不同：前者去查网络/地址，后者去核对证书。
-
-    /// 证书确认。确认后需要重新登录（凭据不跨会话保留）。
-    /// 确认证书并**接着完成登录**。
-    ///
-    /// 之前这里是两件事：确认证书后丢掉会话，让用户再输一次密码点「连接」。
-    /// 实测表现为「点信任并继续 → 又弹回请核对证书」，因为新 Provider 的
-    /// sourceID 与确认时那一个不同，pin 记不上，等于白确认一次。
-    ///
-    /// 现在把「确认 → 登录 → 列共享」做成一条链，中间不丢状态。
-    /// 断开 Dart 进程里该来源的旧会话。
-    ///
-    /// 核心按 sourceID 维护 `sources`，一个 sourceID 只能存在一份。
-    /// 任何「重新连接 / 再次 discover / 确认证书」之前都必须先清掉旧的，
-    /// 否则核心直接回 `SourceExists`——表现为用户什么都没改却连不上。
-    ///
-    /// 失败不阻塞后续流程：清不掉时让后续命令自己报错，避免这里造出第二个故障。
+    /// 清理核心中同一 sourceID 的旧会话，避免重新连接时出现 SourceExists。
     private func resetCoreSource(_ sourceID: String) async {
         await resetCore(sourceID)
     }
@@ -1061,13 +927,7 @@ final class NASSourceWizardController: ObservableObject {
         draftStatus = "已取消，请确认此 NAS 的地址后再试"
     }
 
-    /// 预览构建里可以直接停在「选择搜索位置」这一步：`FF_UI_WIZARD=1`
-    /// （可选 `FF_UI_WIZARD_SHARES=<个数>`，默认 9；或 `whole` = 只有一个「全部目录」）。
-    ///
-    /// 与 `FF_UI_SETTINGS` / `FF_UI_QUICKPICK_TAB` 同一路数：没有它，这一屏的截图
-    /// 只能靠真连一台 NAS 再手点过去，改动前后没法各截一张来比。
-    /// 造出来的只是**排版用的草稿**，不发任何请求；正常启动（`isPreview == false`）
-    /// 读不到这个变量，一步都不会走。
+    /// 预览包用 FF_UI_WIZARD 和 FF_UI_WIZARD_SHARES 构造位置选择，不连接设备。
     func loadPreviewWizardDraftIfRequested() {
         guard AppEnvironment.isPreview,
               ProcessInfo.processInfo.environment["FF_UI_WIZARD"] == "1" else { return }
@@ -1096,15 +956,7 @@ final class NASSourceWizardController: ObservableObject {
     /// 正常启动恒为假。置真时勾选只改界面、不向任何设备发请求（预览包里没有会话）。
     private var previewDraftLoaded = false
 
-    /// 预览钩子：造几台「已保存」的来源，好让**设置页的来源详情**能截图。
-    ///
-    /// 详情页里的那几块（名称输入框、搜索位置、账号、移除）在没有真机的机器上
-    /// 完全进不去——来源列表是空的。所以这里按 `FF_UI_SOURCES=N` 造 N 台，
-    /// 第一台带名字「客厅 NAS」并选了五个位置，其余留空（用默认类型名），
-    /// 这样一张图里就能同时看到「改过名」与「没改名」两种行。
-    ///
-    /// 只在预览包里生效（第一句就 guard），正常启动造不出来；
-    /// 造出来的东西也**不会落盘**（`persistSources` 在预览包里直接返回）。
+    /// 仅预览包使用 FF_UI_SOURCES 构造来源，不连接设备或持久化。
     func loadPreviewSavedSourcesIfRequested() {
         guard AppEnvironment.isPreview, !previewSavedSourcesLoaded else { return }
         guard let raw = ProcessInfo.processInfo.environment["FF_UI_SOURCES"],
@@ -1158,10 +1010,7 @@ final class NASSourceWizardController: ObservableObject {
         applyDraftScopes(ScopeBulkSelection.clearAll())
     }
 
-    /// 三个入口（勾一个 / 全选 / 取消全选）共用的准入门。
-    ///
-    /// 不满足时把原因写进状态栏并返回 false —— 三个入口的文案必须一致，
-    /// 各写一遍迟早出现「点这颗说请先连接、点那颗什么都不说」。
+    /// 三个范围选择入口共用准入；借来的活会话也允许编辑。
     private func mayEditDraftScopes() -> Bool {
         // ★ 判定依据是「草稿里有没有可操作的会话」，而**不是**「有没有本次新连的会话」。
         // 用「本次新连的会话非空」那种写法时，编辑一个已连接的来源永远进不来：
@@ -1176,13 +1025,7 @@ final class NASSourceWizardController: ObservableObject {
         return true
     }
 
-    /// 把一份新的勾选集合提交出去。
-    ///
-    /// 两个防护：
-    /// 1. `defer` 必须写在 Task **内部**。写在外面的话，函数创建完 Task 就返回、
-    ///    立刻把 `draftBusy` 复位，用户可以连点多个共享；
-    /// 2. 用递增序号丢弃过期响应——即使两个请求都在飞，最终生效的也是用户**最后点**的那个，
-    ///    而不是碰巧**最后返回**的那个。
+    /// 串行提交范围变更，并用序号丢弃过期响应。
     private func applyDraftScopes(_ scopes: [String]) {
         // 界面立刻反映用户刚点的这一下，不等底层往返。
         draftSource.scopes = scopes
@@ -1261,12 +1104,7 @@ final class NASSourceWizardController: ObservableObject {
         }
     }
 
-    /// 保存并把向导已建立的会话接入搜索。
-    /// - Returns: 是否真的保存成功。
-    ///
-    /// ★ 调用方**必须**用这个结果决定要不要关窗口、要不要说「已保存」。
-    ///   之前是 `commitDraft(); close()`：绑定失败时窗口照样关、界面照样当成功，
-    ///   留下的却是一台「配置写着 A、实际搜 B」的来源。
+    /// 绑定成功后保存；调用方必须根据返回值决定是否关闭向导。
     @discardableResult
     func commitDraft() async -> Bool {
         // 上一轮收尾还没落定时不许保存：此刻草稿里的范围还不一定是活会话真在用的那份。
@@ -1285,25 +1123,12 @@ final class NASSourceWizardController: ObservableObject {
         if let message = draftValidationMessage() { draftStatus = message; return false }
         let session = draftSession
         let target = draftSource.scopes
-        // ★ 出发前把**整份草稿**拍下来。
-        //
-        // 只记 `target`（范围）是不够的：落盘走的是 `saveDraft()`，它读的是
-        // 此刻可变的 `draftSource`。绑定要等一次网络往返，往返期间用户照样能改
-        // 勾选、改账号（勾选不会推进代次，所以代次守卫抓不到）。旧写法于是
-        // 变成「绑 B、存 C、搜 B」——保存下来的是一份用户从没确认过的值。
-        // 往返结束后必须确认「现在这份」仍是出发时的那一份才准落盘。
+        // 绑定返回后需核对整份草稿，避免保存等待期间被修改的配置。
         let committedDraft = draftSource
         // ★ 本轮代次必须在**任何 await 之前**认领。
         let generation = draftGeneration
         if let provider = session.provider {
-            // ★ 断开守卫：用户可能在向导开着的时候，在来源卡片上点了这台
-            // NAS 的「断开」。那次连接已经作废 —— 这里绝不能把它的实例 install 回来：
-            // install 会发布 Provider 变化，上层随即整体重建搜索协调器，
-            // 把其它来源在飞的查询一起取消（就是用户看到的「断开一台，全部断开」）。
-            // 过期连接也不去给核心发 disconnect：那会误伤此刻可能已经建立的新会话。
-            //
-            // 只对「本次新建」的会话成立：借来的活会话不参与连接意图，
-            // 拿它去对 `connectToken` 只会误判成过期、把好好的编辑丢掉。
+            // 仅检查新建会话的连接意图；过期时不安装或断开可能已被替换的会话。
             if session.disconnectsOnTeardown,
                let token = connectToken, !connectIntent.isCurrent(token) {
                 draftSession = .none
@@ -1311,13 +1136,7 @@ final class NASSourceWizardController: ObservableObject {
                 draftStatus = "已断开，需要时请重新连接"
                 return false
             }
-            // ★ 顺序：先拿到「范围绑定」的结果，再落盘。
-            //
-            // 反过来的旧写法（先 `saveDraft` 再 `Task { _ = try? await … }`）把这一次
-            // 提交拆成了「先斩后奏」：配置已经写进磁盘、状态已经显示旧范围、
-            // 搜索已按旧范围发出，绑定那次请求才刚出发；而 `false` 与 `throw`
-            // 都被丢掉 ⇒ 绑定失败时界面照样说「已保存」，只有搜索在悄悄用旧范围。
-            // 那不叫修好，那叫把「配置与实际不一致」推迟成静默不一致。
+            // 先确认范围绑定，再保存；失败不能显示保存成功。
             draftBusy = true
             defer { if draftGeneration == generation { draftBusy = false } }
             if let failure = await session.bindScopesForCommit(target) {
@@ -1342,13 +1161,7 @@ final class NASSourceWizardController: ObservableObject {
         // 已登录的那个则被搁置成孤儿（既没被使用，也没被断开）。
         guard saveDraft(rebuildProviders: false) else { return false }
         if let provider = session.provider {
-            // ★ 只有本次新建的会话需要交给管理器（R02）。
-            // 写字典的版本会被随后的 rebuild 用「配置相等」的空白实例顶掉，
-            // 保存完立刻变未连接——而核心里那次登录其实已经成功了。
-            //
-            // 借来的会话**不 install**：它本来就在管理器的表里，
-            // 再 install 一次会发布一次 Provider 变化，等于让所有来源重建一遍
-            // 搜索协调器、把别的来源在飞的查询一起取消。
+            // 仅安装新建会话；借用的会话已由管理器持有。
             if session.disconnectsOnTeardown { installProvider(provider) }
             setSourceStatus(draftSource.id) {
                 $0.health = provider.ready ? .ready : .offline
@@ -1409,22 +1222,10 @@ final class NASSourceWizardController: ObservableObject {
         draftStatus = "已断开"
     }
 
-    /// 离开当前草稿输入（切换来源、重新开始添加）时，把这次输入留下的一切收回。
-    ///
-    /// 真实现象：用户在密码框里敲了密码，点「返回」再进另一台 NAS，
-    /// 密码框里还是上一次的密码——`nativeNASPassword` 是模型状态，
-    /// 视图重建后会把它读回输入框。同一个密码框在不同来源之间「串味」，
-    /// 既不安全，也让人以为程序记错了目标。
-    ///
-    /// 实现直接复用 `cancelDraft`：断开在飞的连接、销毁暂存凭据、清空输入框，
-    /// 调用方随后设置新的 `draftSource` 即可。
+    /// 切换或离开草稿时复用取消流程，清理凭据与在途连接。
     private func endDraftInput() { cancelDraft() }
 
-    /// 取消整个添加/编辑流程，把这次连接留下的一切都收回。
-    ///
-    /// 之前「取消」只是 `window.close()`：后台的 discover/login Task 照跑，
-    /// 几秒后还会回来改状态；已建立的 DSM 会话、暂存的内存密码也一直留着。
-    /// 关闭窗口 / 点取消 / 重新开始添加 / 切换 NAS 类型都必须走这里。
+    /// 取消在途操作、清除凭据，并按会话所有权断开或回滚范围。
     func cancelDraft() {
         // 递增序号 → 所有在飞的连接尝试回来时都会被判为过期，不再写任何状态。
         // 这里是「取消」而不是「再连一次」，所以用 invalidate 而不是 next：
@@ -1436,24 +1237,13 @@ final class NASSourceWizardController: ObservableObject {
         //   它们手里的 provider 与范围都属于上一轮，不许再落到界面上。
         draftGeneration += 1
         draftSettling = false
-        // ★ 交还会话 —— 这里是「取消」与「提交」的分水岭。
-        //   · 本次向导新建的：断开（核心里那份会话没人认领了）；
-        //   · 借来的活会话：**只放引用，绝不断开**，并把范围回滚到已保存的配置。
-        //     借的那一个是用户正在用的连接，取消编辑不该让它掉线；
-        //     而编辑期间每点一下勾选都直接改了活会话的范围，不回滚就会出现
-        //     「界面退回去了、搜索还在用新范围」。
+        // 新建会话要断开；借用的会话保留连接并回滚到已保存范围。
         let session = draftSession
         draftSession = .none
         if let provider = session.provider {
             let sourceID = session.provider?.config.id ?? draftSource.id
             let persisted = nasSources.first { $0.id == sourceID }?.scopes ?? []
-            // ★ 归属票号必须在**这里同步**拿到，不能等 Task 起来再取。
-            //
-            // 「取消」是同步返回的：按钮点了、界面已经退回去了，收尾 Task 才被调度。
-            // 这中间用户完全可以立刻重新点开同一台来源并勾一个位置。
-            // 若票号在 Task 内部才取，晚出发的旧收尾取到的是「最新」那个序号，
-            // 于是它反而成了归属者 —— 拿上一轮的已保存值盖掉用户刚勾的位置。
-            // 同步认领后，任何后发生的编辑都会把序号推过去，旧收尾因此让位。
+            // 同步认领收尾，防止旧回滚覆盖后续编辑。
             let ticket = provider.beginTeardown()
             draftTeardownTask = Task { [weak self] in
                 defer { provider.endTeardown() }
@@ -1464,6 +1254,11 @@ final class NASSourceWizardController: ObservableObject {
         clearPendingCredential()
         nativeNASPassword = ""
         nativeNASOTP = ""
+        // 授权码是一次性输入，与密码同理：离开这次编辑就不该留在界面上。
+        draftAuthorizeCode = ""
+        draftAwaitingAuthorizeCode = false
+        // 核心里那条待换令牌的挑战属于这次编辑，取消后不再复用。
+        pendingAuthorizationEndpoint = nil
         nasTrustCandidate = nil
         draftAvailableShares = []
         draftConnected = false
@@ -1476,19 +1271,7 @@ final class NASSourceWizardController: ObservableObject {
         clearPendingCredential()
     }
 
-    /// 用本机保存的密码重连，不打扰用户。
-    /// 打开重连向导（需要用户输密码）。
-    ///
-    /// 注意：这个方法**不做任何连接**，只是把来源载进编辑草稿。
-    /// 之前它叫 `reconnect()`，被「刷新状态 / 测试所有 NAS 连接 / 重新连接」三个按钮共用，
-    /// 结果那几个按钮都只是在反复装载草稿、什么都没连接——是名副其实的假动作。
-    /// 现在三个入口语义明确分开，见 `refreshStatuses()` 与 `reconnectUsingStoredCredential(_:)`。
-    /// 打开「重新连接」向导。
-    ///
-    /// - Parameter reason: **为什么还要输一次密码**，由 `ReconnectEntryState` 判定后传入。
-    ///   之前这里写死了一句「请输入密码以重新连接」：本机凭据文件里就存着密码时
-    ///   也这么说，用户于是以为必须重输。
-    ///   现在这句话必须来自「到底有没有已保存的密码」的判定，不许在这里另写一套。
+    /// 打开已有来源的重连向导；reason 由凭据判定提供，此处不发起连接。
     func openReconnectWizard(_ id: String, reason: String) {
         guard nasSources.contains(where: { $0.id == id }) else { return }
         editSource(id)

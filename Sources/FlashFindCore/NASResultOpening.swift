@@ -1,35 +1,4 @@
 import Foundation
-import Darwin
-
-/// WebDAV 的远端目录与本机挂载点；不把它混入 SMB 共享候选。
-public struct WebDAVMountCandidate: Sendable {
-    public let endpoint: URL
-    public let mountRoot: URL
-
-    public static func parse(origin: String, mountPath: String) -> Self? {
-        guard var components = URLComponents(string: origin),
-              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              components.host?.isEmpty == false, components.query == nil, components.fragment == nil,
-              mountPath.hasPrefix("/"), mountPath != "/" else { return nil }
-        components.user = nil; components.password = nil
-        guard let endpoint = components.url else { return nil }
-        return Self(endpoint: endpoint, mountRoot: URL(fileURLWithPath: mountPath))
-    }
-
-    public static func discover() -> [Self] {
-        var entries: UnsafeMutablePointer<statfs>?
-        let count = getmntinfo(&entries, MNT_NOWAIT)
-        guard count > 0, let entries else { return [] }
-        return (0..<Int(count)).compactMap { index in
-            var entry = entries[index]
-            let type = withUnsafePointer(to: &entry.f_fstypename) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
-            guard type == "webdav" else { return nil }
-            let origin = withUnsafePointer(to: &entry.f_mntfromname) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
-            let path = withUnsafePointer(to: &entry.f_mntonname) { String(cString: UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self)) }
-            return parse(origin: origin, mountPath: path)
-        }
-    }
-}
 
 /// 打开时核验挂载；失去挂载或文件已不存在时保留网页出口，不发起自动挂载。
 public enum NASResultOpening {
@@ -58,9 +27,21 @@ public enum NASResultOpening {
         }
     }
 
+    /// 超时兜底只映射路径，不访问可能阻塞的网络卷；文件是否存在由打开动作确认。
+    public static func unverifiedFallbackTarget(for row: SearchResult, vendor: NASSourceConfig.Vendor,
+                                                origin: WebOrigin, locator: NASLocator,
+                                                smbMounts: [SMBMountCandidate],
+                                                webDAVMounts: [WebDAVMountCandidate]) throws -> SearchOpenTarget {
+        try target(for: row, vendor: vendor, origin: origin, locator: locator,
+                   smbMounts: smbMounts, webDAVMounts: webDAVMounts, verify: false)
+    }
+
+    /// - Parameter verify: 是否核验文件真实存在（含符号链接逃逸检查）。
+    ///   传 `false` 只做语义映射，见 `unverifiedFallbackTarget` 的说明。
     public static func target(for row: SearchResult, vendor: NASSourceConfig.Vendor,
                               origin: WebOrigin, locator: NASLocator,
-                              smbMounts: [SMBMountCandidate], webDAVMounts: [WebDAVMountCandidate]) throws -> SearchOpenTarget {
+                              smbMounts: [SMBMountCandidate], webDAVMounts: [WebDAVMountCandidate],
+                              verify: Bool = true) throws -> SearchOpenTarget {
         guard row.sourceID == locator.sourceID, locator.contains(path: row.path),
               row.path.hasPrefix("/"), RelativePath.isSafe(String(row.path.dropFirst())) else {
             throw FlashFindError.message("目标不在此来源的授权目录中，请重新搜索")
@@ -73,12 +54,11 @@ public enum NASResultOpening {
                   fallback.query == nil, fallback.fragment == nil else {
                 throw FlashFindError.message("没有有效的网页打开地址，请重新搜索")
             }
-            // 同站点的 /dav 才对应 OpenList 逻辑路径；同主机 SMB 完全不参与。
-            for mount in webDAVMounts where origin.admits(mount.endpoint) {
-                let path = mount.endpoint.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                guard path == "dav" || path.hasPrefix("dav/") else { continue }
-                let remoteRoot = String(path.dropFirst(3))
-                if let local = localFile(row.path, remoteRoot: remoteRoot, mountRoot: mount.mountRoot) {
+            // OpenList 只认 WebDAV 挂载；来源域名与挂载地址可以不同。
+            for mount in WebDAVMountCandidate.matching(origin: origin, preferredUser: locator.preferredSMBUser,
+                                                       in: webDAVMounts) where mount.isDAVEndpoint {
+                if let local = localFile(row.path, remoteRoot: mount.logicalRoot,
+                                         mountRoot: mount.mountRoot, verify: verify) {
                     return .mountedFile(local)
                 }
             }
@@ -87,11 +67,15 @@ public enum NASResultOpening {
             guard let share = row.path.split(separator: "/").first.map(String.init) else {
                 throw FlashFindError.message("无效的共享路径")
             }
-            let mounts = smbMounts.sorted {
-                ($0.username == locator.preferredSMBUser ? 0 : 1) < ($1.username == locator.preferredSMBUser ? 0 : 1)
-            }
-            for mount in mounts where mount.host.lowercased() == locator.host.lowercased() && mount.shareName == share {
-                if let local = localFile(row.path, remoteRoot: "/" + share, mountRoot: mount.mountRoot) {
+            // 匹配规则允许来源域名与挂载地址不同，再优先选当前账号。
+            let mounts = SMBMountCandidate.matching(host: locator.host, shares: [share],
+                                                    preferredUser: locator.preferredSMBUser,
+                                                    in: smbMounts)
+                .sorted {
+                    ($0.username == locator.preferredSMBUser ? 0 : 1) < ($1.username == locator.preferredSMBUser ? 0 : 1)
+                }
+            for mount in mounts {
+                if let local = localFile(row.path, remoteRoot: "/" + share, mountRoot: mount.mountRoot, verify: verify) {
                     return .mountedFile(local)
                 }
             }
@@ -103,15 +87,59 @@ public enum NASResultOpening {
                               URLQueryItem(name: "launchParam", value: "openfile=" + path)]
             guard let fallback = url.url else { throw FlashFindError.message("无法生成网页打开地址") }
             return .webURL(fallback)
+        case .fnos:
+            // 飞牛的设备路径不能直接映射到挂载点，只使用核心返回的共享名和相对路径。
+            return localMountedTarget(for: row, locator: locator, smbMounts: smbMounts, verify: verify)
+                .map { .mountedFile($0) } ?? row.openTarget
         default:
             return row.openTarget
         }
     }
 
-    private static func localFile(_ path: String, remoteRoot: String, mountRoot: URL) -> URL? {
+    /// 飞牛设备路径不对应挂载目录；仅按结果提供的共享名和相对路径定位。
+    public static func localMountedTarget(for row: SearchResult, locator: NASLocator,
+                                          smbMounts: [SMBMountCandidate],
+                                          verify: Bool = true) -> URL? {
+        guard case .smbLocation(let smb) = row.openTarget else { return nil }
+        let parts = smb.path.split(separator: "/").map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let share = parts[0]
+        let inside = Array(parts.dropFirst())
+        let mounts = SMBMountCandidate.matching(host: locator.host, shares: [share],
+                                                preferredUser: locator.preferredSMBUser,
+                                                in: smbMounts)
+        for mount in mounts {
+            if let local = localFile(segments: inside, mountRoot: mount.mountRoot, verify: verify) {
+                return local
+            }
+        }
+        return nil
+    }
+
+    /// 按「相对段」拼接挂载点（飞牛那种路径坐标与挂载点结构无关的情形）。
+    private static func localFile(segments: [String], mountRoot: URL, verify: Bool = true) -> URL? {
+        guard !segments.isEmpty,
+              segments.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+              RelativePath.isSafe(segments.joined(separator: "/")) else { return nil }
+        let file = segments.reduce(mountRoot) { $0.appendingPathComponent($1) }
+        guard verify else { return file }
+        let root = mountRoot.resolvingSymlinksInPath().standardizedFileURL
+        let target = file.resolvingSymlinksInPath().standardizedFileURL
+        guard target.path.hasPrefix(root.path + "/"),
+              FileManager.default.fileExists(atPath: target.path) else { return nil }
+        return target
+    }
+
+    private static func localFile(_ path: String, remoteRoot: String, mountRoot: URL,
+                                  verify: Bool = true) -> URL? {
         guard remoteRoot.isEmpty || path == remoteRoot || path.hasPrefix(remoteRoot + "/") else { return nil }
         let inside = remoteRoot.isEmpty ? String(path.dropFirst()) : RelativePath.relative(path, under: remoteRoot)
         guard inside.isEmpty || RelativePath.isSafe(inside) else { return nil }
+        // 路径归属与 `..` 已在上面用纯字符串判完；不核验时不能再碰文件系统 ——
+        // 网络卷的 stat 可能等上百秒，而这里正是超时兜底那条路。
+        guard verify else {
+            return inside.isEmpty ? mountRoot : mountRoot.appendingPathComponent(inside)
+        }
         let root = mountRoot.resolvingSymlinksInPath().standardizedFileURL
         let target = (inside.isEmpty ? root : root.appendingPathComponent(inside)).resolvingSymlinksInPath().standardizedFileURL
         guard target.path == root.path || target.path.hasPrefix(root.path + "/"),
@@ -123,16 +151,21 @@ public enum NASResultOpening {
 extension NASSearchProvider {
     public func preferredOpenTarget(_ row: SearchResult) async throws -> SearchOpenTarget {
         let vendor = config.vendor
+        // 飞牛在 verifiedOpenTarget 中处理挂载和回退。
         guard vendor == .synology || vendor == .openlist else { return row.openTarget }
         guard let origin = webOrigin else { throw FlashFindError.message("来源地址无效") }
         let snapshot = locatorSnapshot
-        let fallback = try NASResultOpening.target(for: row, vendor: vendor, origin: origin, locator: snapshot,
-                                                   smbMounts: [], webDAVMounts: [])
-        // 实机网络卷的 stat 曾等待 127 秒；两秒内核验不完就使用网页。
+        // `getmntinfo` 只读内核里的挂载表（本机实测 0.0ms），两段共用一次。
+        let smbMounts = vendor == .synology ? (try? SMBMountCandidate.discover()) ?? [] : []
+        let davMounts = vendor == .openlist ? WebDAVMountCandidate.discover() : []
+        // 网络卷核验可能超时，兜底先保留已匹配的挂载路径。
+        let fallback = try NASResultOpening.unverifiedFallbackTarget(
+            for: row, vendor: vendor, origin: origin, locator: snapshot,
+            smbMounts: smbMounts, webDAVMounts: davMounts)
+        // 实机网络卷的 stat 曾等待 127 秒；两秒内核验不完就用上面的兜底。
         return try await NASResultOpening.checkMounts(fallback: fallback) {
             try NASResultOpening.target(for: row, vendor: vendor, origin: origin, locator: snapshot,
-                                        smbMounts: vendor == .synology ? (try? SMBMountCandidate.discover()) ?? [] : [],
-                                        webDAVMounts: vendor == .openlist ? WebDAVMountCandidate.discover() : [])
+                                        smbMounts: smbMounts, webDAVMounts: davMounts)
         }
     }
 }

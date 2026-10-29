@@ -73,6 +73,33 @@ class BrandSession {
 
   bool get isAuthenticated => adapter.sessionIdentity != null;
 
+  /// 下次可直接续期的凭据；没有密码的品牌才有（见 `SessionSecretProviding`）。
+  ///
+  /// 只在**登录成功后**读一次，随 `sessionState` 一起交上去，由 Swift 侧
+  /// 存进本机凭据槽位。账密品牌这里恒为 null —— 它们的密码由界面自己保管，
+  /// 适配器不该把它再抄一份出来。
+  String? get sessionSecret {
+    // 先落到 `Object` 再判：直接对着 `NasBrandAdapter` 做 `is` 时，CFE 不给
+    // 提升到「两个不相交接口的交集」类型，访问成员会报「getter 未定义」。
+    final Object a = adapter;
+    return a is SessionSecretProviding ? a.sessionSecret : null;
+  }
+
+  /// 网页打开的兜底地址（fnOS 的站点首页 —— 桌面）。
+  ///
+  /// 只在 SMB 判定不可达时由 Swift 使用（双击结果 → 445 探测失败 → 开浏览器）。
+  /// 每个会话一个入口即可，不含路径级定位（桌面不接受任何定位参数，
+  /// 见 `webURLFor` 的说明）。
+  String? get webFileURL {
+    final Object a = adapter;
+    if (a is! WebOpenableAdapter) return null;
+    try {
+      return a.webURLFor('').toString();
+    } on CoreError {
+      return null;
+    }
+  }
+
   /// 品牌自报的能力。**诚实性由适配器负责**：未在真机验证的能力必须是 false。
   Map<String, Object?> capabilities() => {
     'nativeSearch': adapter.capabilities.nativeSearch,
@@ -86,10 +113,29 @@ class BrandSession {
     'notes': adapter.capabilities.notes,
   };
 
-  Future<void> login(String account, String password, String? otp) async {
+  /// 登录。
+  ///
+  /// ★ 这里**不做** `adapter.logout()`（2026-10-29 审查发现的阻断缺陷）：
+  /// 飞牛的两段授权之间隔着用户操作，第一段生成的 PKCE verifier 存在
+  /// 适配器实例上；用户粘授权码回来说的是**另一次** login —— 先 logout 会把
+  /// verifier 清掉，第二段永远报「授权流程已过期」。旧会话的清理由适配器的
+  /// `login` 自己负责（换令牌前先清旧态）；用户显式断开才走 `disconnect()`。
+  Future<void> login(
+    String account,
+    String password,
+    String? otp, {
+    String? authorizeCode,
+    List<String>? optionalScopes,
+  }) async {
     cancel();
-    await adapter.logout();
     _epoch++;
+    // 飞牛这类 OAuth 品牌允许用户在授权前追加勾选额外权限：如果适配器支持
+    //（`AuthorizationScopeCatalog`），把界面选中的可选 scope 交给它，
+    // 由它拼进授权地址。不支持的品牌忽略。
+    final Object scopeChoosing = adapter;
+    if (optionalScopes != null && scopeChoosing is AuthorizationScopeCatalog) {
+      scopeChoosing.requestedOptionalScopes = optionalScopes;
+    }
     // ★ 给「整个登录过程」一个总预算。
     //
     // 为什么需要：穷举式适配器会按顺序试多个候选端点，而每个端点各吃一次
@@ -106,6 +152,7 @@ class BrandSession {
         username: account,
         password: password,
         otpCode: otp,
+        authorizeCode: authorizeCode,
       );
       switch (outcome) {
         case LoginSuccess():
@@ -118,6 +165,21 @@ class BrandSession {
           throw AdapterFailure(
             rejected ? ErrorKind.otpRejected : ErrorKind.needsOTP,
             rejected ? '动态验证码没有被接受，请重新填写$suffix' : '该账号需要动态验证码$suffix',
+          );
+        case LoginNeedsAuthorizeCode(:final authorizationUrl, :final validFor, :final rejected):
+          // ★ 这不是失败，是登录流程的第一段（飞牛这种 OAuth 品牌）。
+          // 抛一个**独立类型**而不是 AdapterFailure：调用方要拿到的是那个
+          // 授权地址，让它去开浏览器；压成一句错误文案，地址就丢了，
+          // 用户会看到「登录失败」而不知道该去哪里授权。
+          // 权限清单一并带给界面：弹窗要告知用户「闪寻只需要哪几项」，
+          // 其余的让用户勾选后再重新产出授权地址。
+          throw LoginChallengeRequired(
+            authorizationUrl: authorizationUrl,
+            validFor: validFor,
+            rejected: rejected,
+            scopes: scopeChoosing is AuthorizationScopeCatalog
+                ? [for (final s in scopeChoosing.authorizationScopes) s.toJson()]
+                : null,
           );
         case LoginRejected(:final reason, :final apiCode):
           throw AdapterFailure(ErrorKind.authenticationFailed, reason, apiCode: apiCode);
@@ -199,14 +261,37 @@ class BrandSession {
 
   /// 一条结果的「点开之后去哪」。
   ///
-  /// 只有三种答案：SMB 位置、网页地址、没有。**不许返回一个猜的地址** ——
-  /// 用户点下去才失败，比一开始就说「打不开」更糟。
+  /// 只有三种答案：SMB 位置、网页地址，都没有就是「打不开」。
+  /// **不许返回一个猜的地址** —— 用户点下去才失败，比一开始就说「打不开」更糟。
+  ///
+  /// 优先顺序（2026-10-29 用户定）：**SMB > 网页**。下载不在这里 ——
+  /// 它是右键菜单里的显式动作（`download` 命令），不是默认打开方式；
+  /// 双击/回车的语义是「就地打开」，下载耗时且占流量，只该被显式要求。
+  ///
+  /// SMB 分两种：
+  /// * 实现了 `SmbShareResolving` 的品牌（fnOS）：共享名来自
+  ///   `file.share.list`/`file.share.info` 的映射，解析不出（路径不在任何
+  ///   共享前缀下）退网页 —— 文件管理器能看到全部路径，这条路兜得住。
+  /// * 其余暴露 SMB 的品牌（群晖等）：卷根就是共享名，沿用旧拼法。
   OpenTarget? _openTargetFor({
     required String path,
     required String owningRoot,
     required List<String> segments,
   }) {
-    if (adapter.exposesSMBShares && smbHost.isNotEmpty && owningRoot.isNotEmpty) {
+    // ★ 先落 `Object` 再判接口：Dart 对 `NasBrandAdapter` 类型的变量
+    //   不做交叉类型提升，直接 `adapter is SmbShareResolving` 之后
+    //   变量类型不会变，访问不了接口成员。
+    final Object a = adapter;
+    if (a is SmbShareResolving) {
+      if (smbHost.isNotEmpty) {
+        final mapping = a.smbShareFor(path);
+        if (mapping != null) {
+          return SMBLocation(smbHost, mapping.shareName, mapping.relativeSegments);
+        }
+      }
+      // 解析不出（路径不在任何共享前缀下）→ 落到网页兜底，不走旧拼法：
+      // 这个品牌的卷根不是共享名，旧拼法只会造出假目标。
+    } else if (adapter.exposesSMBShares && smbHost.isNotEmpty && owningRoot.isNotEmpty) {
       return SMBLocation(
         smbHost,
         owningRoot.startsWith('/') ? owningRoot.substring(1) : owningRoot,
@@ -258,12 +343,35 @@ class BrandSession {
       'sourceName': sourceName,
       'sourceType': 'nas',
       'isOnline': true,
-      // SMB 行恒为 false：能不能打开要等 Swift 侧核对挂载与文件是否存在。
-      // 网页行给 true：地址已经由适配器用**已核验的 origin** 拼好，点开就能到，
-      // 不存在「先挂载再看在不在」这一步。
+      // SMB 行恒为 false：能不能打开要等 Swift 侧核对挂载（含 445 可达性）
+      // 与文件是否存在；SMB 不可达时 Swift 退网页（sessionState 的 webFileURL）。
+      // 网页行给 true：地址已由适配器用**已核验的 origin** 拼好，点开就能到。
+      // 下载不是 canOpen 的事——它是右键菜单里的显式动作。
       'canOpen': open is WebLocation,
       if (open != null) 'openTarget': open.toJson(),
     };
+  }
+
+  /// 下载一条结果到本机临时目录（RemoteDownload 打开链的执行端）。
+  ///
+  /// 只有实现了 `DownloadableAdapter` 的品牌才有这条路；范围校验与
+  /// `list` 同一条纪律：不在授权范围内的路径，一步都不许往下走。
+  Future<DownloadedArtifact> download(
+    String path,
+    Cancellation token,
+  ) async {
+    scope.check(path);
+    if (!scopeReady) throw const CoreError('NeedsAuth');
+    token.check();
+    // ★ 先落成 Object 再判类型：Dart 对 `NasBrandAdapter` 类型的变量
+    //   不做接口提升（SessionSecretProviding 那里踩过同一个坑）。
+    final Object downloadable = adapter;
+    if (downloadable is! DownloadableAdapter) {
+      throw const CoreError('DownloadUnsupported');
+    }
+    final artifact = await downloadable.downloadToTemp(path, token);
+    token.check();
+    return artifact;
   }
 
   Future<List<Map<String, Object?>>> list(
@@ -436,4 +544,45 @@ class BrandSession {
   /// 品牌会话没有异步任务，因此没有需要清理的远端对象。
   /// 保留这个 getter 是为了让 harness 能用同一段代码收尾两种来源。
   bool get supportsTaskCleanup => false;
+}
+
+/// 登录需要用户去浏览器授权 —— **不是失败，是流程的第一段**。
+///
+/// 为什么要有独立类型，而不是塞进 `AdapterFailure`：
+/// `AdapterFailure` 只有 kind + 一句文案，授权地址这个**唯一有用的东西**
+/// 会在翻译成 `CoreError` 时被丢掉（`CoreError.reason` 是给人看的短句，
+/// 往里塞 400 字符的 URL 既不合适、也会被诊断文件记下来）。
+/// 所以单独抛，由 harness 直接换成一条 `authChallenge` 事件发给界面。
+///
+/// 形状对齐：Swift 侧收到后应当展示 `authorizationUrl`（用户在浏览器里
+/// 登录并点授权），再把页面上显示的一次性 code 通过下一次 `login` 命令的
+/// `authorizeCode` 字段交回来。
+class LoginChallengeRequired implements Exception {
+  final Uri authorizationUrl;
+  final Duration validFor;
+
+  /// 上一轮提交的 code 被拒绝了（而不是第一次要授权）。
+  final bool rejected;
+
+  /// 授权页权限清单（每项 `{id,label,required}`）。
+  /// 适配器不提供（账密品牌）时为 null，界面按无清单渲染。
+  final List<Map<String, Object?>>? scopes;
+
+  const LoginChallengeRequired({
+    required this.authorizationUrl,
+    required this.validFor,
+    this.rejected = false,
+    this.scopes,
+  });
+
+  Map<String, Object?> toJson() => {
+    'kind': 'authorizeCode',
+    'authorizationUrl': authorizationUrl.toString(),
+    'validForMs': validFor.inMilliseconds,
+    'rejected': rejected,
+    if (scopes != null) 'scopes': scopes,
+  };
+
+  @override
+  String toString() => 'LoginChallengeRequired(rejected=$rejected)';
 }

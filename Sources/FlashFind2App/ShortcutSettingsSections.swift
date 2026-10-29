@@ -38,11 +38,11 @@ struct ShortcutSettingRow: View {
 
         if model.isRecordingShortcut {
             Label("按下组合键，Esc 取消", systemImage: "keyboard")
-                .font(.callout).foregroundStyle(.secondary)
+                .ffFont(.settingsBody).foregroundStyle(.secondary)
         }
         if !model.shortcutStatus.isEmpty {
             Label(model.shortcutStatus, systemImage: model.shortcutAvailable ? "info.circle" : "exclamationmark.circle")
-                .font(.callout).foregroundStyle(model.shortcutAvailable ? Color.secondary : Color.orange)
+                .ffFont(.settingsBody).foregroundStyle(model.shortcutAvailable ? Color.secondary : Color.orange)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("shortcut-status")
         }

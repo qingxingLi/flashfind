@@ -82,3 +82,44 @@ final class NASCredentialPickTests: XCTestCase {
         XCTAssertNil(picked?.otp, "空串动态码等于没码")
     }
 }
+
+// MARK: - 连接成功后该存哪一串（fnOS 的续期令牌）
+
+/// 凭据槽位的语义是「下次登录所需的那一串东西」，不是「密码」。
+///
+/// 飞牛没有密码 —— 槽位里必须存 OAuth 换来的 refresh token。
+/// 判错方向的代价不是「多输一次密码」，而是**每次启动都要重新授权一遍**，
+/// 而且界面一路显示「已记住」，用户无从判断是没存上还是被清了。
+final class NASCredentialSaveTests: XCTestCase {
+
+    /// 核心交上来的续期令牌**优先于**用户输入的密码。
+    ///
+    /// 对飞牛来说「用户输入的密码」根本不存在（密码框是隐藏的），
+    /// 唯一正确的那一串就是核心给的令牌。
+    func testSessionSecretWinsOverTypedPassword() {
+        XCTAssertEqual(NASCredentialSave.pick(sessionSecret: "refresh-token",
+                                              typedPassword: "typed"),
+                       "refresh-token")
+    }
+
+    /// 账密品牌：核心不给令牌（恒 nil），行为必须与以前完全一致 —— 存密码。
+    func testPasswordBrandsKeepSavingTheTypedPassword() {
+        XCTAssertEqual(NASCredentialSave.pick(sessionSecret: nil, typedPassword: "typed"),
+                       "typed", "账密品牌的保存行为不许被这次改动波及")
+    }
+
+    /// 空串的令牌不算数：存空串 = 「界面显示已记住、下次照样连不上」。
+    func testEmptySessionSecretFallsThroughToPassword() {
+        XCTAssertEqual(NASCredentialSave.pick(sessionSecret: "", typedPassword: "typed"),
+                       "typed")
+        XCTAssertEqual(NASCredentialSave.pick(sessionSecret: "   ", typedPassword: "typed"),
+                       "typed", "纯空白也不算一串凭据")
+    }
+
+    /// 两者都空 ⇒ 返回 nil。调用方必须如实报「没存上」，
+    /// 不能存一个空串假装成功。
+    func testNothingToSaveMeansNilNotAnEmptyString() {
+        XCTAssertNil(NASCredentialSave.pick(sessionSecret: nil, typedPassword: ""))
+        XCTAssertNil(NASCredentialSave.pick(sessionSecret: "", typedPassword: ""))
+    }
+}

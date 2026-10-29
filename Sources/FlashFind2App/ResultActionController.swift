@@ -45,6 +45,17 @@ final class ResultActionController: ObservableObject {
     /// 让浮窗收起。定位到访达后必须让位，否则浮窗还压在访达上面。
     var onHidePanel: () -> Void = {}
 
+    // MARK: - 下载（fnOS 右键动作）
+
+    /// 打开链的默认路径是 SMB（可达时）/网页（不可达时），**下载只出现在
+    /// 右键菜单里**（2026-10-29 用户定）：它耗时且占流量，只该被显式要求。
+    /// 下载走核心的 `download` 命令（zip 包 → 解包 → 本地临时文件）。
+    var downloadToTemp: (SearchResult) async throws -> URL = { _ in
+        throw FlashFindError.message("这个来源不支持下载")
+    }
+    /// 这条结果的来源是否提供下载动作（fnOS 是目前唯一实现的品牌）。
+    var supportsDownloadRow: (SearchResult) -> Bool = { _ in false }
+
     // MARK: - 动作
 
     /// - Parameter resolve: 取「这一行还能怎么操作」的入口。默认是当前结果列表
@@ -101,6 +112,75 @@ final class ResultActionController: ObservableObject {
             } catch {
                 let banner = OpenFailureText.banner(error)
                 failure = Failure(message: banner.message, smbURL: banner.smbURL)
+                onStatus("")
+            }
+        }
+    }
+
+    // MARK: - 下载动作
+
+    /// 右键「下载后打开」：下载到临时目录（核心解包）→ 交系统默认程序打开。
+    func downloadAndOpen(_ result: SearchResult) {
+        guard !AppEnvironment.isPreview else { onStatus("UI 预览 · 文件操作已隔离"); return }
+        guard let row = resolveRow(result) else {
+            onStatus("搜索或权限已变化，请重新选择结果"); return
+        }
+        onStatus("正在从 NAS 下载…")
+        Task {
+            do {
+                let url = try await downloadToTemp(row)
+                onStatus("")
+                if NSWorkspace.shared.open(url) {
+                    onHidePanel()
+                } else {
+                    onStatus("系统无法打开此文件，请检查文件权限和关联应用")
+                }
+            } catch {
+                failure = Failure(message: OpenFailureText.banner(error).message)
+                onStatus("")
+            }
+        }
+    }
+
+    /// 右键「下载到…」：弹保存框选位置，下载完成后在访达里显示。
+    func downloadToFolder(_ result: SearchResult) {
+        guard !AppEnvironment.isPreview else { onStatus("UI 预览 · 文件操作已隔离"); return }
+        guard let row = resolveRow(result) else {
+            onStatus("搜索或权限已变化，请重新选择结果"); return
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = row.name
+        // 同步阻塞是刻意的：保存框必须先定下目的地，后台任务才知道往哪写。
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        onStatus("正在从 NAS 下载…")
+        Task {
+            do {
+                let local = try await downloadToTemp(row)
+                let fm = FileManager.default
+                // ★ 顺序不能反（2026-10-29 审查）：原先「先删目标、再复制」，
+                // 复制一旦失败（空间不足、目标目录只读、外接盘掉线），
+                // 用户原来那个文件已经没了。改成先在同目录把新内容备好，
+                // 再原子替换 —— 任何一步失败，目标位置都还是原来那份。
+                let staging = dest.deletingLastPathComponent().appendingPathComponent(
+                    ".\(dest.lastPathComponent).ffdl-\(UUID().uuidString.prefix(8))")
+                try fm.copyItem(at: local, to: staging)
+                do {
+                    if fm.fileExists(atPath: dest.path) {
+                        _ = try fm.replaceItemAt(dest, withItemAt: staging)
+                    } else {
+                        try fm.moveItem(at: staging, to: dest)
+                    }
+                } catch {
+                    // 替换失败：清掉半成品，原文件保持不动，把错误照原样报上去。
+                    try? fm.removeItem(at: staging)
+                    throw error
+                }
+                onStatus("")
+                // 与「在访达中显示」同一教训：走 Launch Services，不抢焦点。
+                NSWorkspace.shared.activateFileViewerSelecting([dest])
+                onHidePanel()
+            } catch {
+                failure = Failure(message: OpenFailureText.banner(error).message)
                 onStatus("")
             }
         }

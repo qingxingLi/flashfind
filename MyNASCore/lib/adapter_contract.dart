@@ -68,6 +68,39 @@ class LoginRejected extends LoginOutcome {
   const LoginRejected(this.reason, {this.apiCode});
 }
 
+/// 需要用户到浏览器里完成授权，再把页面给出的一次性 code 交回来。
+///
+/// ── 为什么不能复用 [LoginNeedsOTP] ────────────────────────────────
+/// 两者都是「一次登录要用户补一样东西」，但对**界面**的要求完全不同：
+///   · OTP 是随密码一起发的 6 位数字，界面给一个输入框就够；
+///   · 这里要先给用户一个地址（浏览器打开、登录、点授权），
+///     再把页面上显示的一串 code 粘回来。
+/// 混用一个类型，界面就只能对着一个授权地址要 6 位验证码 ——
+/// 飞牛（fnOS）正是这种：官方协议**没有账号密码登录**，
+/// 只有 OAuth 2.0 Authorization Code + PKCE，而且授权页**不回跳**
+/// （授权地址里没有 `redirect_uri`），code 只能由用户手动交出。
+///
+/// 这也不是失败：它是登录流程的第一段，调用方应当把 [authorizationUrl]
+/// 交给用户，拿到 code 后**再调一次** `login(authorizeCode: …)`。
+class LoginNeedsAuthorizeCode extends LoginOutcome {
+  /// 用户在浏览器里打开的授权地址。已含 `code_challenge`，原样展示，不要改写。
+  final Uri authorizationUrl;
+
+  /// 这个地址的有效期。飞牛实测 5 分钟（官方文档写明的是一次性 code 的有效期）。
+  final Duration validFor;
+
+  /// 是不是「已经提交过 code 但被拒绝」——与 [LoginNeedsOTP.rejected] 同理：
+  /// 服务端对「没给」和「给错了」常常回同一个错误，只有发起方知道自己这次
+  /// 带没带 code，不区分就会让用户输错一次之后仍然只看到「请去授权」。
+  final bool rejected;
+
+  const LoginNeedsAuthorizeCode({
+    required this.authorizationUrl,
+    this.validFor = const Duration(minutes: 5),
+    this.rejected = false,
+  });
+}
+
 /// 一次搜索里「**这一个根没搜通**」的记录。
 ///
 /// ★ 为什么要单独一个类，而不是让适配器抛异常或静默吞掉：
@@ -124,10 +157,20 @@ abstract class NasBrandAdapter {
   /// 所以要求每个品牌显式回答。
   bool get exposesSMBShares;
 
+  /// `authorizeCode`：OAuth 授权码（只有走授权码流程的品牌用）。
+  ///
+  /// 为什么单独一个参数而不是复用 `otpCode`：两者的**来源**不同 ——
+  /// 动态码由设备算出来（TOTP）或短信发来，授权码由用户在浏览器里
+  /// 授权后从页面上抄下来。混用会让适配器分不清「用户填的这 6 位」
+  /// 到底该当作 TOTP 还是授权码，而这两种校验路径完全不同。
+  ///
+  /// 品牌适配器的实现**必须接受这两个额外参数**（可以不用），
+  /// 否则 `implements` 的签名对不上。
   Future<LoginOutcome> login({
     required String username,
     required String password,
     String? otpCode,
+    String? authorizeCode,
   });
 
   /// 列出可授权的共享根。返回空列表是合法结果（设备没有共享）。
@@ -173,6 +216,129 @@ abstract class WebOpenableAdapter {
   /// 把逻辑路径换成浏览器地址。路径里的中文、空格、`%`、`#`、`?`
   /// 都必须按 RFC 3986 逐段百分号编码，不能靠字符串拼接。
   Uri webURLFor(String logicalPath);
+}
+
+/// 「结果可以下载到本机打开」的适配器实现这个接口。
+///
+/// ── 为什么需要它 ────────────────────────────────────────────────
+/// 飞牛（fnOS）的文件既没有已验证的 SMB 共享名映射（445 不可达，`link`
+/// 字段语义未验证），也没有网页直链。唯一**端到端量过**的打开路径是
+/// 下载：`multiple-download` 拿临时 token → GET 拉 zip 包（**单文件也打包**，
+/// 2026-10-29 实测）→ 客户端解包 → 交系统打开。这是它的「能打开」，
+/// 不是降级方案。
+///
+/// 实现者必须做到：
+///   * 落盘位置是 `Directory.systemTemp` 下的新建目录，不碰用户目录；
+///   * 解包用 `zip_extract.dart`，条目名不可信（zip-slip 防护在那边）；
+///   * 失败抛 `CoreError('DownloadFailed', detail:…)`，不许静默返回空。
+abstract class DownloadableAdapter {
+  /// 把一条**存储侧**路径（如 `/vol2/1000/备份/a.pdf`）下载并解包，
+  /// 返回可直接交给 `NSWorkspace.open` 的本地路径。
+  ///
+  /// 单文件 zip → 返回解出的那个文件；目录 zip → 返回解出的目录本身。
+  Future<DownloadedArtifact> downloadToTemp(String logicalPath, Cancellation cancel);
+}
+
+/// 一次成功下载的产物。
+class DownloadedArtifact {
+  /// 本地文件或目录的绝对路径（临时目录内）。
+  final String localPath;
+  /// 远端条目的名字（结果行自己的 name），用于诊断与界面提示。
+  final String name;
+  /// 解包后的大小（字节）。目录或未知时为 null——不拿 0 冒充。
+  final int? byteSize;
+  const DownloadedArtifact({required this.localPath, required this.name, this.byteSize});
+}
+
+/// 能把逻辑路径解析成「SMB 共享名 + 相对段」的适配器实现这个接口。
+///
+/// ── 为什么需要它 ────────────────────────────────────────────────
+/// 群晖那类设备的卷根就是 SMB 共享名（`/video/…` → `smb://主机/video/…`），
+/// `BrandSession` 拿卷根首段拼就行。飞牛（fnOS）不是：它的 SMB 共享是
+/// **任意文件夹**（`file.share.list` 返回 `path: vol2/1000/备份` 这样的
+/// 存储路径），共享名要靠 `file.share.info` 单独问（2026-10-29 实测返回
+/// `shareName: "备份"`）。拿卷根首段（`vol2`）当共享名必然弹出
+/// 「连接不上」——那是个假目标。
+///
+/// 实现者必须做到：
+///   * 共享名单**只在会话建立时**取一次（`shareRoots()`），不许每行都发请求；
+///   * 解析不出（路径不在任何共享前缀之下，或 `file.share.info` 没问出）
+///     返回 null，**不许猜**（2026-10-29 审查：拿路径末段当共享名，
+///     管理员起了别名就会打开错误的共享）；
+///   * 共享名以 `file.share.info` 的 `shareName` 为准。
+abstract class SmbShareResolving {
+  /// 逻辑路径（`/vol2/1000/备份/sub/x.pdf`）→ 共享名 `备份` + 相对段
+  /// `[sub, x.pdf]`。不在任何共享前缀下时返回 null。
+  SmbShareMapping? smbShareFor(String logicalPath);
+}
+
+/// 一次成功解析的 SMB 映射。
+class SmbShareMapping {
+  /// SMB 共享名（`file.share.info` 的 `shareName`）。
+  final String shareName;
+  /// 去掉共享前缀后的相对路径段（已经不含空段）。
+  final List<String> relativeSegments;
+  const SmbShareMapping({required this.shareName, required this.relativeSegments});
+}
+
+
+/// 「登录不靠密码、靠一串可续期的令牌」的适配器实现这个接口。
+///
+/// ── 为什么需要它 ────────────────────────────────────────────────
+/// 闪寻把「下次还能连上」所需的东西存在本机凭据文件里，只有一个槽位。
+/// 账密品牌的槽位里放密码；飞牛（fnOS）没有密码 —— 它走 OAuth 授权码，
+/// 换来的是 access + refresh 两枚令牌。若不为它留一条回传通道，就会出现
+/// 两种都不可接受的结果：
+///   * 每次启动 App 都要用户再去浏览器授权一遍；
+///   * 或者槽位里存了个空串，界面显示「已记住」，下次照样连不上。
+///
+/// 所以槽位的语义是「**下次登录所需的那一串东西**」：账密品牌是密码，
+/// 这里则是 refresh token。由适配器自己回答那串东西是什么，
+/// 上层只负责原样保管、原样回传（回传走 `login(password:)`）。
+///
+/// 做成**标记接口**而不是往 `NasBrandAdapter` 里加抽象成员：
+/// 四个账密适配器是 `implements`，抽象类里的默认实现不会被继承，
+/// 加进去等于逼它们各写一行「我返回 null」——除了噪声没有任何收益。
+abstract class SessionSecretProviding {
+  /// 下次可直接续期的凭据；拿不到时返回 null（比如还没登录）。
+  String? get sessionSecret;
+}
+
+/// 授权页上的一项权限。
+class AuthorizationScopeOption {
+  /// 授权协议里的 scope 标识（如 `trim.file.read`）。
+  final String id;
+
+  /// 给用户看的中文说明（弹窗里逐项展示的就是它）。
+  final String label;
+
+  /// 是否为闪寻运行所必需。必需项在界面上锁定勾选；可选项默认不申请。
+  final bool required;
+
+  const AuthorizationScopeOption({
+    required this.id,
+    required this.label,
+    required this.required,
+  });
+
+  Map<String, Object?> toJson() => {'id': id, 'label': label, 'required': required};
+}
+
+/// 授权页权限可由用户增减的品牌实现这个接口（目前只有飞牛 fnOS）。
+///
+/// ── 为什么做成可选接口 ────────────────────────────────────────
+/// 账密品牌没有「授权页」，权限跟着账号走；把这个形状塞进
+/// `NasBrandAdapter` 等于逼每个适配器都实现一套无意义的空表。
+/// 与 `SessionSecretProviding` 同一理由：`implements` 继承不了默认实现，
+/// 标记接口让不相关的品牌一行不改。
+abstract class AuthorizationScopeCatalog {
+  /// 完整清单（必需项在前）。界面弹窗逐项展示；必需项锁定勾选，
+  /// 可选项默认不勾 —— **不申请就不出现在授权页**，而不是授权后再解释。
+  List<AuthorizationScopeOption> get authorizationScopes;
+
+  /// 界面勾选的可选 scope。登录（第一段）前由 `BrandSession` 写入；
+  /// 授权地址按「必需 + 已勾选可选」拼 scope 参数。
+  set requestedOptionalScopes(List<String> ids);
 }
 
 /// 品牌能力声明。**这是给界面看的，必须诚实**：

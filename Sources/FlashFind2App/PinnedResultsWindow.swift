@@ -113,12 +113,12 @@ struct PinnedResultsView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             Text(snapshot.title)
-                .font(.system(size: 13, weight: .medium))
+                .ffFont(.pinnedTitle)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
             Text(snapshot.countText(matching: rows.count))
-                .font(.system(size: 11).monospacedDigit())
+                .ffFont(.pinnedCount).monospacedDigit()
                 .foregroundStyle(.secondary)
                 .fixedSize()
             Button(action: close) {
@@ -148,7 +148,7 @@ struct PinnedResultsView: View {
             // 高度固定之后这里要**自己居中**：窗口不再跟着行数缩，文字若还贴着顶，
             // 底下就是一大片空玻璃，看起来像没画完。
             Text("这一批结果里没有符合当前筛选的文件")
-                .font(.system(size: 12))
+                .ffFont(.pinnedEmpty)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.vertical, SearchModuleLayout.pinnedListPadding)
@@ -202,6 +202,13 @@ struct PinnedResultsView: View {
             Button("快速查看", systemImage: "eye") { model.quickLookPinned(result) }
             Divider()
             Button("复制路径", systemImage: "doc.on.doc") { model.copyPinned(result) }
+        }
+        // 与主结果窗同一条口径：下载是显式动作，不进默认打开链。
+        // 钉住窗里的行是**快照**，下载前会经 resolve 重新核来源与权限。
+        if model.supportsDirectDownload(result) {
+            Divider()
+            Button("下载后打开", systemImage: "arrow.down.circle") { model.downloadAndOpen(result) }
+            Button("下载到…", systemImage: "square.and.arrow.down") { model.downloadToFolder(result) }
         }
         Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
     }

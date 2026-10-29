@@ -509,22 +509,27 @@ Future<void> contractTests() async {
     return DraftAdapter(vendor, dio);
   }
 
-  // fnos 不在这里：它已确定为「与真实设备协议不符」而下线，见 retiredVendors。
-  const vendors = ['qnap', 'ugreen', 'webdav'];
+  // fnos 2026-10-29 重新接回注册表（`portedUnverified`，真机契约已量过、SMB 打开链待验）。
+  // 当前**没有**任何下线品牌，所以「下线品牌」那条用例改成守机制本身。
+  const vendors = ['qnap', 'ugreen', 'webdav', 'fnos'];
 
-  await check('注册表认在册品牌，不认已下线的 fnos', () async {
+  await check('注册表认在册品牌，不认别的品牌', () async {
     for (final vendor in vendors) {
       expectTrue(hasBrandAdapter(vendor), '注册表应包含 $vendor');
     }
     expectTrue(!hasBrandAdapter('synology'), '群晖不走品牌注册表');
     expectTrue(!hasBrandAdapter('generic'), 'generic 没有适配器');
-    expectTrue(!hasBrandAdapter('fnos'), 'fnos 已下线，不再接受注册');
   });
 
-  await check('下线品牌给的是「为什么」，不是「还没接入」', () async {
-    final reason = unsupportedVendorReason('fnos');
-    expectTrue(reason.contains('下线'), '要说明是下线，而不是没接过：实际 $reason');
-    expectTrue(!reason.contains('还没有接入'), '接过又下线，不能说成没接过：$reason');
+  await check('在册品牌都不在下线表里（下线＝既要摘注册也要进表）', () async {
+    for (final vendor in vendors) {
+      expectTrue(!retiredVendors.contains(vendor), '$vendor 在册却还留在下线表');
+    }
+    // 机制本身要能说清「为什么」：对没接入的品牌不能说成「下线过」。
+    final reason = unsupportedVendorReason('generic');
+    expectTrue(reason.contains('还没有接入') || reason.contains('未接入'),
+        '没接过的品牌要给「没接入」，不是「下线」：实际 $reason');
+    expectTrue(!reason.contains('下线'), '没接过就不能说下线：$reason');
   });
 
   await check('标 stable 必须有真机证据，两档不得重叠', () async {
@@ -609,7 +614,12 @@ Future<void> contractTests() async {
   await check('会话层给整次登录一个总预算（穷举适配器不得把超时乘端点数）', () async {
     // 上面那条用例量到的是**适配器裸调**的耗时：fnos 4 个端点 → 4 倍预算。
     // 这里走会话层，验证总预算真的把总耗时压住了。
-    for (final vendor in vendors) {
+    //
+    // fnos 不在这条用例里：它的登录第一段**压根不碰网络**（只生成 PKCE 与
+    // 授权地址），所以「不可达地址上登录必须失败」这个前提对它不成立 ——
+    // 它必然抛 `LoginChallengeRequired`。这条缺陷已被 `test_fnos.dart`
+    // 的两段授权用例覆盖（那段才是它的登录契约）。
+    for (final vendor in vendors.where((v) => v != 'fnos')) {
       final adapter = make(vendor).adapter;
       final session = BrandSession(
         adapter,
@@ -623,10 +633,13 @@ Future<void> contractTests() async {
       } catch (e) {
         if (e is StateError) rethrow;
         expectTrue(e is AdapterFailure, '$vendor 的失败应是 AdapterFailure，实际 $e');
+        // 不可达地址上允许出现的种类只有「连不上」这一类：
+        // TimedOut / NetworkFailure / TLSRejected（自签证书或中间设备拦了握手）。
+        // **绝不能是 AuthenticationFailed** —— 那会让用户跑去改密码。
+        const connectionKinds = {'TimedOut', 'NetworkFailure', 'TLSRejected'};
         expectTrue(
-          (e as AdapterFailure).kind == 'TimedOut' ||
-              e.kind == 'NetworkFailure',
-          '$vendor 失败种类应为 TimedOut/NetworkFailure，实际 ${e.kind}',
+          connectionKinds.contains((e as AdapterFailure).kind),
+          '$vendor 失败种类应为「连不上」，实际 ${e.kind}',
         );
       }
       final elapsed = DateTime.now().difference(started);

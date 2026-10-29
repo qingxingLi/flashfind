@@ -242,6 +242,8 @@ class QnapAdapter implements NasBrandAdapter {
     required String username,
     required String password,
     String? otpCode,
+    // 账密品牌用不到授权码：飞牛那种 OAuth 流程才会传它。
+    String? authorizeCode,
   }) async {
     _cancel?.check();
     _sid = null;
@@ -307,10 +309,27 @@ class QnapAdapter implements NasBrandAdapter {
           apiCode: 301,
         );
       }
+      // ★ 连接层失败不许报成「登录被拒」（2026-10-29）：报 AuthenticationFailed
+      //   的话用户会跑去改密码，而真正的问题是设备连不上。
+      //   只有设备真的回了响应（4xx/5xx）才轮到「不认这次登录」。
+      const connectionTypes = {
+        DioExceptionType.connectionError,
+        DioExceptionType.connectionTimeout,
+        DioExceptionType.sendTimeout,
+        DioExceptionType.receiveTimeout,
+        DioExceptionType.unknown,
+      };
+      if (connectionTypes.contains(e.type)) {
+        throw AdapterFailures.network('无法连接 QNAP 设备（${e.message}）');
+      }
+      // 握手失败＝证书/协议层的问题（NAS 自签证书最常见），也不是「密码不对」。
+      if (e.type == DioExceptionType.badCertificate) {
+        throw AdapterFailures.tlsRejected(
+          '和 QNAP 设备的加密连接没有建立起来（${e.message}），请检查证书是否受信任');
+      }
       return LoginRejected('无法连接 QNAP 设备（${e.message}）');
     }
   }
-
   /// 上游: qnap/api/qnap_api.dart:50-82 —— 登录响应解析（成功 / 2FA / 失败三分支）。
   ///
   /// 读法说明见文件头「有意偏离上游的传输细节」：上游把 `data` 当 Map，

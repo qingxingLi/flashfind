@@ -16,7 +16,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'lib/adapter_contract.dart';
 import 'lib/adapters/webdav.dart';
 import 'lib/dio_compat.dart';
 import 'lib/mock_transport.dart';

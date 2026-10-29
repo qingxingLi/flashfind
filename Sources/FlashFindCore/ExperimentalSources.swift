@@ -30,7 +30,10 @@ public enum ExperimentalSources {
     ///
     /// 打开开关后的追加条件只有一个 —— **有可用适配器**。它同时挡掉两类：
     /// * 从来没接入的（`smb` / `generic`）；
-    /// * 接入过、但已下线（`NASSourceConfig.AdapterStatus.retired`，如飞牛）。
+    /// * 接入过、但已下线（`NASSourceConfig.AdapterStatus.retired`）。
+    ///
+    /// 飞牛曾经落在第二类，2026-10-28 重写并真机量过端点后回到「已接入未验证」，
+    /// 于是自动出现在这一批里 —— 这正是判断按状态而非按品牌名写死的好处。
     ///
     /// 这里刻意**不按品牌名写死**：核心的 `retiredVendors` 以后再添一个，
     /// 界面应当跟着一起消失，而不是等着有人想起来回来改这一行。

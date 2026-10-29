@@ -2,6 +2,7 @@
 //
 // 契约：Swift 侧 `Vendor.rawValue` 必须与这里的字符串一一对应。
 // 新增品牌时**两边一起改**，否则会出现「界面能选、核心不认」的静默失败。
+import 'adapters/fnos.dart';
 import 'adapters/openlist.dart';
 import 'adapters/qnap.dart';
 import 'adapters/ugreen.dart';
@@ -19,19 +20,22 @@ const Set<String> stableVendors = {'webdav', 'openlist'};
 
 /// 已移植但**没有真机证据**的品牌：能跑不代表对，界面必须照
 /// `capabilities.verifiedOnDevice` 说话。
-const Set<String> experimentalVendors = {'qnap', 'ugreen'};
+///
+/// `fnos` 于 2026-10-28 重新加入：旧实现（假设 REST 接口）已删除，
+/// 新实现按官方端点文档 + 对真实设备的直连实测重写（OAuth 授权码 + PKCE、
+/// 逐卷 `appcgi.finder.fileSearch`）。**端点契约是真机上量的，
+/// 但这份 Dart 实现本身还没跑过真机**，所以留在这一档而不是 stableVendors。
+const Set<String> experimentalVendors = {'qnap', 'ugreen', 'fnos'};
 
 /// 走原生 DSM 路径的品牌，不经过本注册表。
 const String synologyVendor = 'synology';
 
-/// 移植过、但已确认与真实设备不符的品牌。
+/// 移植过、但已确认与真实设备不符、且**没有重做**的品牌。
 ///
-/// 旧 REST 实现已删除，**不随公开仓分发**：公开仓采用全新单 commit 历史，
-/// 在那里查不到那份实现。留着一份已知错误的 700 行实现只会让人以为「修修就能用」，
-/// 也会让 analyzer 必须为一份不编译的代码长期开排除。
-/// 留这张名单是为了「为什么用不了」有处可查：
-/// 真实设备确认原生文件搜索使用 WebSocket + HMAC，而不是那份 REST 实现假设的 HTTP。
-const Set<String> retiredVendors = {'fnos'};
+/// 旧的 fnOS REST 实现曾在这里（真实设备确认原生搜索走 WebSocket + HMAC，
+/// 不是那份实现假设的 HTTP）。2026-10-28 按官方文档重写后已移出本名单，
+/// 名单本身保留：下一个被证伪的品牌要有个地方记「为什么用不了」。
+const Set<String> retiredVendors = <String>{};
 
 bool hasBrandAdapter(String vendor) =>
     stableVendors.contains(vendor) || experimentalVendors.contains(vendor);
@@ -65,6 +69,8 @@ NasBrandAdapter createBrandAdapter(
       return WebDavAdapter(dio: dio);
     case 'openlist':
       return OpenListAdapter(dio: dio);
+    case 'fnos':
+      return FnOSAdapter(dio: dio);
     case synologyVendor:
       // 群晖不走这里：它有自己的传输栈（证书固定 + CSRF + 任务模型）。
       throw const CoreError('UnsupportedVendor');

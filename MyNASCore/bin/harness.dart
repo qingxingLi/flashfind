@@ -118,12 +118,40 @@ Future<void> brandCommand(String cmd,Map<String,dynamic> message,String request,
  final session=source.brand!;
  switch(cmd) {
   case 'login':
-   final account=requireString(message,'account'), password=requireString(message,'password'), otp=message['otp'] as String?;
-   message.remove('password'); message.remove('otp');
-   await session.login(account,password,otp);
+   // ★ 这里**不能**再要求 account/password 必填。
+   // 飞牛（fnOS）官方协议没有账号密码登录，只有 OAuth 授权码，
+   // 它的账户信息是空串，真正的凭据是用户从授权页抄回来的 authorizeCode。
+   // 账密品牌（qnap/ugreen/webdav/openlist）自己会因为空密码报
+   // AuthenticationFailed —— 那才是准确的分诊点，协议层不该抢先拒掉。
+   final account=(message['account'] as String?)??'';
+   final password=(message['password'] as String?)??'';
+   final otp=message['otp'] as String?;
+   final authorizeCode=message['authorizeCode'] as String?;
+   // 用户在授权弹窗里勾选的可选 scope（fnOS）。没有这个键就是「只要必需项」。
+   final optionalScopes=(message['optionalScopes'] as List?)?.cast<String>();
+   message.remove('password'); message.remove('otp'); message.remove('authorizeCode'); message.remove('optionalScopes');
+   try {
+    await session.login(account,password,otp,authorizeCode:authorizeCode,optionalScopes:optionalScopes);
+   } on LoginChallengeRequired catch (challenge) {
+    // 需要用户去浏览器授权：**不是失败**，不发 sessionState。
+    // 发出挑战事件后状态停在「等待授权码」，等界面把 code 交回来
+    // 再走一次 login（带 authorizeCode）。
+    send(request,sourceID,query,'authChallenge',challenge.toJson());
+    return;
+   }
    // 品牌协议里没有 is_manager 的等价物。这里如实发 managerUnknown，
    // 而不是拿 false 冒充「普通账号」——那会在界面上误导用户。
-   send(request,sourceID,query,'sessionState',{'state':'authenticated','sessionPresent':true,'csrfPresent':false,'isManager':false,'managerUnknown':true});
+   // `sessionSecret` 只在适配器真有一串「下次登录所需的东西」时才带
+   // （飞牛的 refresh token）。**没有就整个键都不出现**，不要发 null：
+   // 上层据此判断「该存自己的密码」还是「该存这个」。
+   final sessionSecret=session.sessionSecret;
+   send(request,sourceID,query,'sessionState',{
+    'state':'authenticated','sessionPresent':true,'csrfPresent':false,
+    'isManager':false,'managerUnknown':true,
+    if(sessionSecret!=null&&sessionSecret.isNotEmpty)'sessionSecret':sessionSecret,
+    // SMB 不可达时的网页兜底（fnOS 的站点首页）。其他品牌没有就不发。
+    if(session.webFileURL!=null)'webFileURL':session.webFileURL,
+   });
    send(request,sourceID,query,'authState',{'state':'authenticated','isManager':false,'managerUnknown':true});
   case 'listShares':send(request,sourceID,query,'batch',{'shares':await session.shares()});
   case 'selectScope':
@@ -133,6 +161,12 @@ Future<void> brandCommand(String cmd,Map<String,dynamic> message,String request,
    await session.selectScopes(scopes);
    send(request,sourceID,query,'scopeState',{'state':'scopeReady','scopes':session.scope.roots.toList()});
   case 'list':send(request,sourceID,query,'batch',{'files':await session.list(requireString(message,'path'),Cancellation())});
+  case 'download':
+   // RemoteDownload 打开链的执行端（协议 9）。只有实现了
+   // DownloadableAdapter 的品牌认得这条命令（fnOS）；其余品牌由
+   // BrandSession.download 抛 DownloadUnsupported，Swift 侧给出明确文案。
+   final artifact=await session.download(requireString(message,'path'),Cancellation());
+   send(request,sourceID,query,'batch',{'localPath':artifact.localPath,'name':artifact.name,if(artifact.byteSize!=null)'byteSize':artifact.byteSize});
   case 'search':
    requests['$sourceID:$query']=request;
    final out=await session.search(requireString(message,'query'),query,budget:message.containsKey('queryBudgetMs')?queryBudgetOf(message):null,roots:searchRoots(message));

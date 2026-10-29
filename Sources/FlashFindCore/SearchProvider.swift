@@ -160,6 +160,8 @@ public enum NASSearchFailureText {
         "ApiError": "设备返回了一个业务错误",
         "InvalidTrustConfiguration": "证书固定配置不完整或已失效，请在「搜索来源」里删除这个来源后重新添加",
         "ExplicitCertificateConfirmationRequired": "这台设备的证书需要你确认后才能继续，请在连接向导里完成确认",
+        "DownloadFailed": "从 NAS 下载文件没有成功，请稍后重试",
+        "DownloadUnsupported": "这个来源不支持下载打开",
     ]
 
     /// 认得、但**不配用户文案**的种类。

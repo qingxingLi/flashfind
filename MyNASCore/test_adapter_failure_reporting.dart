@@ -160,7 +160,13 @@ Future<void> main() async {
       expect(error['kind'] != 'ProtocolViolation',
           '不可达端口不再报 ProtocolViolation（那是兜底分支在冒充设备问题）',
           '实际 kind=${error['kind']}');
-      expect(error['kind'] == 'AuthenticationFailed', 'kind 是适配器给出的 AuthenticationFailed',
+      // 这条用例验的是**透传**：适配器给的 kind 原样上路，不被兜底分支压成
+      // ProtocolViolation。原先拿 AuthenticationFailed 当样本，等于把
+      // 「连不上被说成密码不对」这个缺陷锁成了契约（2026-10-29 修掉），
+      // 所以样本换成连接类那一档。
+      const connectionKinds = {'NetworkFailure', 'TimedOut', 'TLSRejected'};
+      expect(connectionKinds.contains(error['kind']),
+          'kind 是适配器给出的连接类失败（原样透传，不是兜底冒充）',
           '实际 ${error['kind']}');
       final reason = error['reason'] as String? ?? '';
       expect(reason.contains('WebDAV'), 'reason 里带得回「无法连接 WebDAV 服务」这类可用信息',

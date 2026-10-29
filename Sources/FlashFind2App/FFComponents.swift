@@ -60,7 +60,7 @@ struct FFSettingsSection<Content: View, Trailing: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                Text(title).ffFont(.sectionHeader).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 trailing
             }
@@ -68,7 +68,7 @@ struct FFSettingsSection<Content: View, Trailing: View>: View {
                 .padding(14).frame(maxWidth: .infinity, alignment: .leading)
                 .background { sectionBackground }
             if let footer {
-                Text(footer).font(.caption).foregroundStyle(.secondary)
+                Text(footer).ffFont(.footer).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -118,7 +118,7 @@ struct FFErrorBanner: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(message).font(.callout).fixedSize(horizontal: false, vertical: true)
+            Text(message).ffFont(.stateDetail).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if let action {
                 Button(action.title, action: action.run).controlSize(.small)

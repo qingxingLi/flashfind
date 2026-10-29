@@ -30,6 +30,11 @@ public enum OpenFailureText {
                 // 打开链路目前还抛不到 coreFailure，但一旦 provider 的定位
                 // 改成走核心请求就会到这一步——先堵上。
                 return NASSearchFailureText.describe(kind: kind, apiCode: apiCode, reason: reason)
+            case .authorizationRequired:
+                // 这个 case 属于**登录流程**，打开文件这条链路本身产生不了它。
+                // 真走到这里说明有人把登录错误当打开错误抛了 —— 给一句指向
+                // 正确动作的话，比让 switch 不穷尽或静默要好。
+                return "这台设备需要先在浏览器里完成授权，请回到来源设置重新连接一次"
             }
         }
         return error.localizedDescription

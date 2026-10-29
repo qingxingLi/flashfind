@@ -41,6 +41,18 @@ public extension MyNASBridgeTransport {
     private var pending: [String: CheckedContinuation<[String:Any],Error>] = [:]
     private var commands: [String:String] = [:]
     private var events: [String: ([String:Any])->Void] = [:]
+    /// 一次请求在**终止事件之前**已经发出来的字段（按 requestID 攒）。
+    ///
+    /// 核心的同一次请求会分几条事件吐事实：登录就是先 `sessionState`
+    /// （会话、会话密钥、网页入口），再 `authState`（身份通过）。
+    /// 只有后者是终止事件，于是前者带的字段全被丢掉 —— 2026-10-29 用户报障
+    /// 「无法打开网页入口」正是这条：`webFileURL` 明明发过来了，到 Swift 这边
+    /// 已经是 nil。同一处还把 `sessionSecret`（飞牛的 refresh token）一起丢了，
+    /// 表现是「重启后每台飞牛都要重新授权」。
+    ///
+    /// 所以终止事件不可以只交自己那一行：**此前发过的事实必须一起带上**。
+    /// 合并时以终止事件为准（同一键两边都有时，后说的赢）。
+    private var earlyPayloads: [String: [String:Any]] = [:]
     /// 实际启动的可执行文件。构建期 `swift build` 不会把资源放进产物，
     /// 因此实际路径可能与传入值不同，启动时再定位一次。
     private var resolvedExecutable: URL?
@@ -196,6 +208,7 @@ public extension MyNASBridgeTransport {
     /// 都要做同一件事，但给出去的**原因**不同——原因必须准确，否则用户无从下手。
     private func abortAll(_ error: FlashFindError) {
         let waits=pending;pending.removeAll();events.removeAll();commands.removeAll()
+        earlyPayloads.removeAll()
         // 进程没了，所有看门狗都失去意义，清掉避免它们空转到点。
         for task in watchdogs.values { task.cancel() }
         watchdogs.removeAll()
@@ -241,7 +254,11 @@ public extension MyNASBridgeTransport {
     ///      根的子集。缺它 ⇒ 行为与从前完全一致；带了它而旧核心不认识 ⇒
     ///      旧核心会忽略这个限定，表现为「界面显示了限定位置，设备却仍在
     ///      扫全部共享」——所以必须升号，否则这个失配会静默发生。
-    public static let expectedCoreRevision = 7
+    /// 8 → 9（2026-10-29）：新增 `download` 命令与 `remoteDownload` 打开目标
+    ///      （飞牛打开链）。旧核心收到 `download` 会回 UnsupportedCommand，
+    ///      界面上表现为「打不开」；新核心配旧客户端则飞牛结果 canOpen
+    ///      停在 false。都是可用性降级而非静默错误，但仍然升号对齐。
+    public static let expectedCoreRevision = 10
 
     /// 是否已经核对过修订号（每个核心进程只核对第一条消息）。
     private var didCheckRevision = false
@@ -313,7 +330,7 @@ public extension MyNASBridgeTransport {
         // 把「选共享」新增为 scopeState，而这个白名单还停在旧名字，
         // 于是 continuation 永不恢复——表现是「连接卡住」「选不了文件夹」，
         // 但底层其实早就返回了。
-        let terminal:Set<String> = ["capabilities","trustState","scopeState","searchReturned","disconnected","cancelled","error","certificateTrustRequired"]
+        let terminal:Set<String> = ["capabilities","trustState","scopeState","searchReturned","disconnected","cancelled","error","certificateTrustRequired","authChallenge"]
         let done = event == "terminal" || terminal.contains(event)
             || (event == "authState" && (m["state"] as? String == "authenticated" || m["state"] as? String == "scopeReady"))
             || event == "controlAck"
@@ -322,6 +339,10 @@ public extension MyNASBridgeTransport {
         if done,let c=pending.removeValue(forKey:id) {
             watchdogs.removeValue(forKey:id)?.cancel()
             let command=commands.removeValue(forKey:id);events.removeValue(forKey:id)
+            // 终止事件只带自己那一行；同一个请求此前发过的事实要一起交出去。
+            // 只有 `login` 需要这层合并（见 `earlyPayloads` 的说明）；其余命令
+            // 的前置事件要么没有、要么是 `batch` 那种大块数据，不该攒。
+            let early=earlyPayloads.removeValue(forKey:id) ?? [:]
             if event=="error" || (event=="terminal" && command != "search") {
                 // 核心的失败要**整条**带出来，不能只留 kind。
                 //
@@ -335,7 +356,16 @@ public extension MyNASBridgeTransport {
                 let apiCode = payload?["apiCode"] as? Int
                 c.resume(throwing: FlashFindError.coreFailure(kind: kind, reason: reason, apiCode: apiCode))
             }
-            else { c.resume(returning:m) }
+            else {
+                var merged=early
+                for (key,value) in m { merged[key]=value }
+                c.resume(returning:merged)
+            }
+        }
+        else if !done,commands[id]=="login" {
+            // 登录是唯一「分两段报事实」的命令：`sessionState`（会话、会话密钥、
+            // 网页入口）先到，`authState`（身份通过）才是终止事件。
+            earlyPayloads[id,default:[:]].merge(m) { _,latest in latest }
         }
     }
     public func request(_ command: String,sourceID: String,queryID: String="none",fields:[String:Any]=[:],event:(([String:Any])->Void)?=nil) async throws -> [String:Any] {
@@ -394,6 +424,7 @@ public extension MyNASBridgeTransport {
         pending.removeValue(forKey: id)
         events.removeValue(forKey: id)
         commands.removeValue(forKey: id)
+        earlyPayloads.removeValue(forKey: id)
     }
 
     /// 兜底超时触发：以可读错误结束等待，而不是让界面一直转圈。

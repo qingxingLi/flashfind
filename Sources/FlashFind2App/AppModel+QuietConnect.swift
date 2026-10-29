@@ -117,6 +117,24 @@ extension AppModel {
                                                 token: token, failure: otp)
                 return
             }
+            // ★ 飞牛这类 OAuth 品牌要的是**授权码**，不是动态码（2026-10-29 审查）：
+            // 静默路径原先只接住 OTP，授权挑战被压成一句失败文案后重试
+            // 还是同一条路 —— 用户永远连不上。用户主动点「登录」时就地弹
+            // 授权窗闭环；后台自动连接没人可弹，只提示需要用户操作。
+            if case let .authorizationRequired(url, validFor, rejected, scopes) = error as? FlashFindError {
+                if interactiveOTP {
+                    await retryWithAuthorizeCodeUntilAnswered(
+                        config: config, password: credential.password, token: token,
+                        url: url, validFor: validFor, rejected: rejected, scopes: scopes)
+                } else {
+                    setSourceStatus(config.id) {
+                        $0.health = .needsAttention
+                        $0.message = ConnectionFailureText.authorizationNeededHint
+                        $0.requiredAction = .login
+                    }
+                }
+                return
+            }
             setSourceStatus(config.id) {
                 $0.health = .needsAttention
                 // 同上：走统一的连接失败文案，不裸拼 localizedDescription。
@@ -208,6 +226,112 @@ extension AppModel {
         }
     }
 
+    /// 设备要授权码 → 当场弹授权窗闭环；连不上或被拒时把挑战带回循环。
+    ///
+    /// 与 `retryWithOTPUntilAnswered` 同一形状：码（授权码）是一次性的，
+    /// 不在（也不该在）本机保存；用户就在弹窗前，把问题推回「再点一次登录」
+    /// 等于让他重走刚走完的路。区别只有一点：授权地址会过期（飞牛 5 分钟），
+    /// 重新弹出前要用核心重新产一次地址 —— 所以循环里每次失败后先重新 login
+    /// 拿新挑战，而不是复用旧 URL。
+    private func retryWithAuthorizeCodeUntilAnswered(config: NASSourceConfig, password: String,
+                                                     token: SourceConnectIntent.Token,
+                                                     url: URL, validFor: TimeInterval,
+                                                     rejected: Bool,
+                                                     scopes: [NASAuthorizationScope]) async {
+        var url = url
+        var validFor = validFor
+        var rejected = rejected
+        var scopes = scopes
+        while true {
+            // 用户可能在弹框前后点了「断开」：那条意图已经作废，不许再问、不许再连。
+            guard quietConnectStillValid(token) else { return }
+            setSourceStatus(config.id) {
+                $0.health = .needsAttention
+                $0.message = rejected
+                    ? "上一次的授权码没有被接受，请重新授权"
+                    : "这台设备要在浏览器里完成授权，正在等待你操作"
+                $0.requiredAction = .login
+            }
+            guard let code = await askForAuthorizeCode(config: config, password: password,
+                                                       url: url, validFor: validFor,
+                                                       rejected: rejected, scopes: scopes) else {
+                // 取消：不写「失败」——但必须说清下次怎么把它叫回来。
+                setSourceStatus(config.id) {
+                    $0.health = .needsAttention
+                    $0.message = ConnectionFailureText.authorizationCancelled
+                    $0.requiredAction = .login
+                }
+                return
+            }
+            guard quietConnectStillValid(token) else { return }
+            setSourceStatus(config.id) {
+                $0.health = .connecting
+                $0.message = "正在用授权码连接…"
+                $0.requiredAction = nil
+            }
+            do {
+                _ = try await quietConnectSteps(
+                    config: config,
+                    credential: PendingCredential(password: password, otp: nil, authorizeCode: code),
+                    token: token)
+                return
+            } catch {
+                guard quietConnectStillValid(token) else { return }
+                if case let .authorizationRequired(newURL, newValidFor, newRejected, newScopes) =
+                    error as? FlashFindError {
+                    // 挑战又来了（地址过期 / 服务端要求重新授权）：带新挑战继续问。
+                    url = newURL; validFor = newValidFor; rejected = newRejected; scopes = newScopes
+                    continue
+                }
+                setSourceStatus(config.id) {
+                    $0.health = .needsAttention
+                    $0.message = "连接失败："
+                        + ConnectionFailureText.describe(error, host: config.hostName,
+                                                         port: config.effectivePort)
+                    $0.requiredAction = .login
+                }
+                return
+            }
+        }
+    }
+
+    /// 把授权弹窗挪出本次连接的 async 流程（与 `askForOTP` 同一理由：
+    /// `runModal` 占住主线程跑自己的模态循环，不能卡在连接收尾的半路）。
+    private func askForAuthorizeCode(config: NASSourceConfig, password: String,
+                                     url: URL, validFor: TimeInterval, rejected: Bool,
+                                     scopes: [NASAuthorizationScope]) async -> String? {
+        // 先取出来：弹窗回调是在别的隔离域里跑的，那里读不到 MainActor 上的属性。
+        let bridge = sharedBridge
+        return await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                let code = await promptForAuthorizeCode(sourceName: config.displayName, url: url,
+                                                  validFor: validFor, rejected: rejected,
+                                                  scopes: scopes) { selected in
+                    // 弹窗内勾选了额外权限 ⇒ 现场重新产一次授权地址。
+                    //
+                    // ★ 必须打到**同一个核心来源**：PKCE verifier 存在核心侧的
+                    //   适配器上，新造一个 Swift 侧 provider 只是换了条通道，
+                    //   只要不 reset/discover，核心里那个适配器与它的 verifier
+                    //   都还在。所以这里只发 login（第一段），不碰来源生命周期。
+                    guard let bridge else {
+                        throw FlashFindError.message("连接已中断，请重新点「登录」")
+                    }
+                    let probe = NASSearchProvider(bridge: bridge, config: config, port: config.port)
+                    do {
+                        try await probe.login(account: config.username, password: password,
+                                              otp: nil, authorizeCode: nil,
+                                              optionalScopes: selected)
+                        throw FlashFindError.message("这台设备已经可以直接连接，无需再授权")
+                    } catch let error as FlashFindError {
+                        if case let .authorizationRequired(newURL, _, _, _) = error { return newURL }
+                        throw error
+                    }
+                }
+                continuation.resume(returning: code)
+            }
+        }
+    }
+
     /// 把模态弹窗挪出本次连接的 async 流程。
     ///
     /// `NSAlert.runModal` 会占住主线程跑自己的模态循环。直接在 `quietConnectSteps`
@@ -232,25 +356,32 @@ extension AppModel {
     func quietConnectSteps(config: NASSourceConfig, credential: PendingCredential,
                                    token: SourceConnectIntent.Token) async throws -> Bool {
         guard let sharedBridge else { return false }
-        await resetCoreSource(config.sourceID)
-        guard quietConnectStillValid(token) else { return false }
         let provider = NASSearchProvider(bridge: sharedBridge, config: config, port: config.port)
         provider.queryBudgetMs = max(1, min(120, nativeSearchTimeoutSeconds)) * 1000
         provider.mountService = mountService
         attachAutoReconnect(provider)
         do {
-            let discovered = try await provider.discover()
-            guard quietConnectStillValid(token) else { return false }
-            if discovered["candidate"] != nil {
-                // 证书需要重新确认：把用户带到向导里，不要在后台替他决定。
-                setSourceStatus(config.id) {
-                    $0.health = .needsAttention
-                    $0.message = "证书需要重新确认，请在来源详情里点「继续设置」"
-                    $0.requiredAction = .continueSetup
+            // ★ 带着授权码回来（浏览器授权的第二段）时**绝不能** reset + discover：
+            // 核心侧 discover 会销毁旧适配器重建，而 PKCE verifier 就存在那个
+            // 适配器上 —— 与 `BrandSession.login` 先 logout 是同一类死法。
+            // 第一段已经 discover 过、来源还在核心里，这里直接续接 login。
+            if credential.authorizeCode == nil {
+                await resetCoreSource(config.sourceID)
+                guard quietConnectStillValid(token) else { return false }
+                let discovered = try await provider.discover()
+                guard quietConnectStillValid(token) else { return false }
+                if discovered["candidate"] != nil {
+                    // 证书需要重新确认：把用户带到向导里，不要在后台替他决定。
+                    setSourceStatus(config.id) {
+                        $0.health = .needsAttention
+                        $0.message = "证书需要重新确认，请在来源详情里点「继续设置」"
+                        $0.requiredAction = .continueSetup
+                    }
+                    return false
                 }
-                return false
             }
-            try await provider.login(account: config.username, password: credential.password, otp: credential.otp)
+            try await provider.login(account: config.username, password: credential.password,
+                                     otp: credential.otp, authorizeCode: credential.authorizeCode)
             guard quietConnectStillValid(token) else { return false }
             // 同样不用 `try?`：「读取失败」与「确实没有共享」必须分开。
             // 混在一起的话，用户会看到「该账号看不到任何共享目录」，
@@ -318,7 +449,6 @@ extension AppModel {
             // 这里不要再 rebuild —— 那正是把已登录实例顶掉的动作。
             // 但 `invalidate()` 是全局的：只在确认这次连接仍然有效时才做。
             invalidate()
-            // ★ 连上之后按当前查询重搜一次。
             //
             // 由来（2026-10-26）：位置面板不再按「已连接」过滤候选，于是
             // 「选一台还没连上的 NAS 的位置」会先连再搜。那条路径里位置限定

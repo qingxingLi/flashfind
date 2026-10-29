@@ -46,9 +46,16 @@ extension AppModel {
 
     func preferredOpenTarget(_ result: SearchResult) async throws -> SearchOpenTarget {
         if let sourceID = result.sourceID,
-           let provider = nativeProviders.values.first(where: { $0.source.id == sourceID }),
-           provider.config.vendor == .synology || provider.config.vendor == .openlist {
-            return try await provider.preferredOpenTarget(result)
+           let provider = nativeProviders.values.first(where: { $0.source.id == sourceID }) {
+            // ★ 飞牛这一路**自己带网页兜底**（SMB 不可达 → 文件管理器）：
+            //   目标类型必须原样传出去。包成 `.mountedFile` 的话，
+            //   「在访达中显示」会把一个浏览器地址当本地路径去碰 Finder。
+            if provider.config.vendor == .fnos {
+                return try await provider.verifiedOpenTarget(result)
+            }
+            if provider.config.vendor == .synology || provider.config.vendor == .openlist {
+                return try await provider.preferredOpenTarget(result)
+            }
         }
         if case .webURL = result.openTarget { return result.openTarget }
         return .mountedFile(try await fileURL(result))
@@ -75,6 +82,15 @@ extension AppModel {
     // 以下五个动作的实现在 ResultActionController；这里保留签名是为了调用点零改动
     // （SearchView、菜单、快捷键作用域都直接调 AppModel）。
     func quickLook(_ result: SearchResult) { resultActions.quickLook(result) }
+
+    /// 这条结果的来源是否提供右键「下载」动作（fnOS）。
+    func supportsDirectDownload(_ result: SearchResult) -> Bool {
+        resultActions.supportsDownloadRow(result)
+    }
+    /// 右键「下载后打开」：下载到临时目录并交系统默认程序打开。
+    func downloadAndOpen(_ result: SearchResult) { resultActions.downloadAndOpen(result) }
+    /// 右键「下载到…」：弹保存框选位置，完成后在访达里显示。
+    func downloadToFolder(_ result: SearchResult) { resultActions.downloadToFolder(result) }
     func copyName(_ result: SearchResult) { resultActions.copyName(result) }
     func open(_ result: SearchResult, reveal: Bool = false) { resultActions.open(result, reveal: reveal) }
 

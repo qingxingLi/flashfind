@@ -52,6 +52,12 @@ public enum ConnectionFailureText {
                 // 与 OpenFailureText 同一套中文，两条链路不能说出两种话。
                 if let legacy = legacyWording(for: kind) { return legacy }
                 return NASSearchFailureText.describe(kind: kind, apiCode: apiCode)
+            case let .authorizationRequired(url, _, _, _):
+                // 走到这里说明上层没有单独处理授权态（正常路径应当先接住它、
+                // 给出「打开链接 + 填授权码」的界面）。兜底文案必须**带上地址**：
+                // 只说「需要授权」而不给入口，用户只能干看着。
+                return "这台设备需要在浏览器里完成授权。请打开 \(url.absoluteString)，"
+                    + "登录后把页面上显示的授权码填回闪寻。"
             }
         }
 
@@ -178,6 +184,84 @@ public enum ConnectionFailureText {
     public static func otpRetryHint(buttonTitle: String = "连接") -> String {
         "已跳过。再点一次「\(buttonTitle)」会重新弹出动态码输入框，填上手机验证器或短信中的 6 位数字即可。"
     }
+
+    // MARK: - 浏览器授权（OAuth 授权码）
+
+    /// 授权弹窗的标题。
+    ///
+    /// 与动态码那两条并列，理由相同：标题是用户扫一眼就看到的东西，
+    /// 「请去授权」与「上次的码不对」必须是两个标题。
+    public static let authorizeDialogTitle = "在浏览器里授权这台设备"
+    public static let authorizeRejectedTitle = "授权码没有被接受"
+
+    /// 浏览器授权弹窗里的说明：**授权地址 + 有效期 + code 在哪**。
+    ///
+    /// 三件事缺一不可：
+    ///   * 地址要给全（用户要粘到浏览器里；截断就白搭）；
+    ///   * 有效期要说（飞牛实测 5 分钟，超时后那串 code 交上去必然被拒，
+    ///     而错误信息只会说「没有被接受」，用户会以为是自己抄错了）；
+    ///   * 要说清 code 是**页面上那串**，不是它的登录密码。
+    ///
+    /// ★ 首句说「**已经**在浏览器里打开」，不说「点某个按钮打开」（2026-10-29 用户要求：
+    ///   「点击连接直接弹出浏览器打开这个网页登陆授权就行」）。弹窗出现前 App 层已经
+    ///   自动开过一次浏览器，文案再教用户去点，就变成让他做一件已经做完的事；
+    ///   而真正该做的那一步（把码粘回来）反而被压到第二句。
+    ///   「重新打开」按钮仍然保留 —— 页面被关掉时有路可走。
+    public static func authorizationPromptText(sourceName: String, url: URL,
+                                               validFor: TimeInterval,
+                                               rejected: Bool) -> String {
+        let minutes = max(1, Int((validFor / 60).rounded()))
+        let head = rejected
+            // 「没有被接受」必须整句连着出现：用户输错一次之后，首句就要让他
+            // 知道是刚才那串错了（与动态码被拒同一类要求）。
+            ? "刚才那串授权码没有被接受：「\(sourceName)」没有收下它。请重新授权。"
+            : "「\(sourceName)」的登录要在浏览器里完成，这里没有账号密码可用。"
+        return head
+            + "授权页面已经在浏览器里打开了：登录并同意授权后，页面上会显示一串"
+            // NSAlert 的 informativeText 是纯文本，不吃 Markdown —— 这里不许出现 `**`，
+            // 否则用户看到的就是两个星号。要强调就把动作写进句子的顺序里。
+            + "一次性授权码。请把它粘到下面的输入框里，再点「连接」。"
+            + "页面关掉了就点「重新打开授权页面」。"
+            + "这串码只有 \(minutes) 分钟有效期，过期需要再来一次。\n\n\(url.absoluteString)"
+    }
+
+    /// 向导里「授权码内联在表单上」时的状态行（2026-10-29 用户改流程，不再弹窗）。
+    ///
+    /// 与 `authorizationPromptText` 的分工必须分清楚，**不能互相借用**：
+    ///   * 弹窗那条说「粘到下面的输入框」「页面关掉了就点『重新打开授权页面』」；
+    ///   * 这条说「粘到「授权码」框里，再点「连接」」，获取入口叫「获取授权码」。
+    /// 指路指到一个界面上不存在的控件，是这类文案最常犯的错
+    /// （`otpRetryHint` 就踩过：把用户指去一个已经删掉的折叠区）。
+    ///
+    /// - Parameter rejected: 上一次交的码被设备拒了。此时首句必须直说「没有被接受」，
+    ///   而不是让用户对着同一句「去授权」猜自己刚才那串到底怎么了。
+    public static func authorizeInlinePrompt(sourceName: String, rejected: Bool,
+                                              validFor: TimeInterval) -> String {
+        let minutes = max(1, Int((validFor / 60).rounded()))
+        let head = rejected
+            ? "刚才那串授权码没有被接受：「\(sourceName)」没有收下它，已经重新打开了授权页面。"
+            : "「\(sourceName)」的登录要在浏览器里完成，这里没有账号密码可用。授权页面已经在浏览器打开。"
+        return head
+            // 与弹窗文案同一条纪律：纯文本里不许出现 Markdown 记号，
+            // 要强调就把动作写进句子顺序里。
+            + "登录并同意授权后，把页面上那串一次性授权码粘到「授权码」框里，再点「连接」。"
+            + "这串码只有 \(minutes) 分钟有效期，过期了就点一次「获取授权码」重新拿。"
+    }
+
+    /// 授权弹窗被取消之后，状态行里补的那一句。
+    ///
+    /// 取消不是失败，但界面上必须留一句「下次怎么继续」——
+    /// 否则用户只看到一句「连接失败」，会以为是设备的问题。
+    public static let authorizationCancelled =
+        "已取消授权。这台设备要先在浏览器里完成授权才能连接，再点一次「连接」会重新生成授权地址。"
+
+    /// 后台自动连接撞上「要授权」时，状态行里补的那一句。
+    ///
+    /// 与 `authorizationCancelled` 的区别：那条是用户点了取消，这条**没人可弹**。
+    /// 后台连接发生在开机/定时重试里，弹窗会把一个不在电脑前的人堵住，
+    /// 所以只留一句「需要你点一下」，把「什么时候做」交给用户。
+    public static let authorizationNeededHint =
+        "这台设备要在浏览器里完成授权才能连接。点「登录」会打开授权页面。"
 }
 
 /// 设备到底要的是「还没填过的码」还是「换个码」。

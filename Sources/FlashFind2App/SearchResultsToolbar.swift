@@ -75,7 +75,7 @@ struct SearchResultsToolbar: View {
         let selected = entry.id == selectedTypeID
         return Button { selectType(entry.id) } label: {
             Text(entry.title)
-                .font(.system(size: 12, weight: selected ? .medium : .regular))
+                .ffFont(selected ? .segmentLabelSelected : .segmentLabel)
                 .lineLimit(1)
                 // 「压缩包」三段字在 640pt 宽的窗口里也要放得下。
                 .minimumScaleFactor(0.8)

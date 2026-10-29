@@ -1,5 +1,21 @@
 import Foundation
 
+/// 授权页上的一项权限（fnOS 这类 OAuth 品牌才提供）。
+public struct NASAuthorizationScope: Hashable, Sendable {
+    /// 授权协议里的 scope 标识（如 `trim.file.read`）。
+    public let id: String
+    /// 给用户看的中文说明。
+    public let label: String
+    /// 是否为闪寻运行所必需。必需项锁定勾选；可选项默认不申请。
+    public let required: Bool
+
+    public init(id: String, label: String, required: Bool) {
+        self.id = id
+        self.label = label
+        self.required = required
+    }
+}
+
 public enum FlashFindError: LocalizedError {
     case message(String)
     /// 核心报上来的失败：`kind` 是机器可判别的种类，`reason` 是核心那边
@@ -10,10 +26,28 @@ public enum FlashFindError: LocalizedError {
     /// 这类判断；直接把它换成中文句子会静默改掉这些分支的行为。
     /// 而 `reason` 只用来生成界面文案，两者各走各的。
     case coreFailure(kind: String, reason: String?, apiCode: Int?)
+    /// 需要用户到浏览器完成授权 —— **不是失败，是登录流程的第一段**。
+    ///
+    /// 为什么会有一个专门的 case 而不是复用 `coreFailure`：
+    /// 这里唯一有用的东西是那个 `url`，而 `coreFailure` 只带得动
+    /// kind + 一句文案。混进去的后果是界面只能说「登录失败」，
+    /// 用户不知道该去哪里授权 —— 而飞牛（fnOS）官方协议**没有账号密码登录**，
+    /// 只有这条授权路可走。
+    ///
+    /// `validFor`：这个地址还能用多久（飞牛是一次性 code 5 分钟）。
+    /// `rejected`：上一轮提交的 code 被拒（而不是第一次要授权）——
+    /// 与动态验证码的「还没给 / 给了不对」是同一个区分。
+    /// `scopes`：授权页权限清单（fnOS）。界面用它告知用户「闪寻只需要
+    /// 哪几项」，其余的默认不申请、由用户勾选后再重新产出授权地址。
+    /// 核心没给（账密品牌）时为空数组。
+    case authorizationRequired(url: URL, validFor: TimeInterval, rejected: Bool,
+                               scopes: [NASAuthorizationScope] = [])
     public var errorDescription: String? {
         switch self {
         case let .message(text): return text
         case let .coreFailure(kind, _, _): return kind
+        case let .authorizationRequired(_, _, rejected, _):
+            return rejected ? "授权码没有被接受，请重新授权" : "需要到浏览器里完成授权"
         }
     }
     /// 核心给出的「人话原因」。没有时为 nil，界面按 `kind` 自行生成。

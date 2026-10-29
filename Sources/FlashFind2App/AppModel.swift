@@ -368,6 +368,12 @@ final class AppModel: ObservableObject {
         wizard.otpPrompter = { [weak self] name, failure in
             self?.promptForOTP(sourceName: name, failure: failure)
         }
+        // ★ 飞牛（fnOS）的浏览器授权在**向导里不再弹窗**（2026-10-29 用户改流程）：
+        //   授权码是「连接信息」表单里的一格，浏览器由向导在拿到授权地址时直接打开
+        //   （见 `NASSourceWizardController.loginHandlingAuthorization`）。
+        //   所以这里**没有** `wizard.authorizeCodePrompter` —— 向导不借弹窗。
+        //   弹窗那条路只留给没有任何表单的后台重连（设置页「登录」），
+        //   它走的是 AppModel 自己的 `promptForAuthorizeCode`。
         // 动作要用的三个入口都由宿主提供：解析当前行（要读权限/来源开关）、
         // 解析文件 URL（要读 provider 与挂载绑定）、状态与浮窗收起。
         resultActions.resolveRow = { [weak self] row in self?.currentResult(row) }
@@ -382,6 +388,20 @@ final class AppModel: ObservableObject {
         resultActions.fileURLWithoutMounting = { [weak self] row in
             guard let self else { throw FlashFindError.message("已退出") }
             return try self.fileURLWithoutMounting(row)
+        }
+        resultActions.downloadToTemp = { [weak self] row in
+            guard let self else { throw FlashFindError.message("已退出") }
+            guard let sourceID = row.sourceID,
+                  let provider = self.nativeProviders.values.first(where: { $0.source.id == sourceID }) else {
+                throw FlashFindError.message("此结果来自已下线的搜索来源，无法下载")
+            }
+            return try await NASSearchProvider.downloadRowToTemp(row, bridge: provider.bridge,
+                                                                 sourceID: provider.source.id)
+        }
+        resultActions.supportsDownloadRow = { [weak self] row in
+            guard let self, let sourceID = row.sourceID,
+                  let provider = self.nativeProviders.values.first(where: { $0.source.id == sourceID }) else { return false }
+            return provider.config.vendor == .fnos
         }
         resultActions.onStatus = { [weak self] text in self?.status = text }
         resultActions.onHidePanel = { [weak self] in self?.hideSearch() }

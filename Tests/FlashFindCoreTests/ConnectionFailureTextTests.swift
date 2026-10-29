@@ -244,3 +244,67 @@ final class ConnectionFailureTextTests: XCTestCase {
         XCTAssertEqual(seen.count, 50, "序号重复会让过期尝试复活")
     }
 }
+
+// MARK: - 浏览器授权（fnOS 的 OAuth 授权码）
+
+/// 文案与判定都住 Core：弹窗、状态行、失败兜底三处说的是同一件事。
+final class AuthorizationPromptTextTests: XCTestCase {
+
+    func testPromptNamesTheFlowAndCarriesTheURL() {
+        let url = URL(string: "https://nas.example:5666/signin?client_id=YJNMPJUGA9&code_challenge=abc")!
+        let text = ConnectionFailureText.authorizationPromptText(
+            sourceName: "飞牛 fnOS", url: url, validFor: 300, rejected: false)
+        XCTAssertTrue(text.contains(url.absoluteString), "地址必须完整出现：\(text)")
+        XCTAssertTrue(text.contains("5 分钟"), "有效期必须说（过期被拒只会回「没有被接受」）：\(text)")
+        XCTAssertTrue(text.contains("授权码"), "要说清交回来的是什么：\(text)")
+        // 可以说「没有账号密码可用」（这是实话，还能防用户去找密码），
+        // 但不许教用户去**输入**密码。
+        XCTAssertFalse(text.contains("输入密码"), "不许往密码上引：\(text)")
+    }
+
+    /// 浏览器是**弹窗自己打开**的，文案不许再教用户点一次按钮。
+    ///
+    /// 2026-10-29 用户要求：「点击连接直接弹出浏览器打开这个网页登陆授权就行」。
+    /// 这条判据要能在那句话被写回去时立刻红：只要正文里出现「点『打开授权页面』」
+    /// 就说明又变成「让用户做一件已经做完的事」。
+    /// 同时不许出现 Markdown 星号 —— `NSAlert` 的正文是纯文本，用户会看到两个 `*`。
+    func testPromptSaysBrowserIsAlreadyOpenInsteadOfAskingForAClick() {
+        let url = URL(string: "https://nas.example:5666/signin")!
+        let text = ConnectionFailureText.authorizationPromptText(
+            sourceName: "飞牛 fnOS", url: url, validFor: 300, rejected: false)
+        XCTAssertTrue(text.contains("已经在浏览器里打开"),
+                      "要说清浏览器已经开了，用户才知道下一步是去浏览器：\(text)")
+        XCTAssertFalse(text.contains("点「打开授权页面」"),
+                       "浏览器已自动打开，不能再教用户点那个按钮：\(text)")
+        XCTAssertTrue(text.contains("粘到下面的输入框"), "要指明码粘到哪：\(text)")
+        XCTAssertFalse(text.contains("**"), "NSAlert 正文不认 Markdown，星号会原样显示：\(text)")
+    }
+
+    /// 被拒之后首句必须直说「没有被接受」，而不是重复「请去授权」。
+    /// 与动态码同一类教训：输错一次之后，用户应该知道是刚才那串错了。
+    func testRejectedPromptSaysTheCodeWasNotAccepted() {
+        let url = URL(string: "https://nas.example:5666/signin")!
+        let rejected = ConnectionFailureText.authorizationPromptText(
+            sourceName: "飞牛 fnOS", url: url, validFor: 300, rejected: true)
+        let first = ConnectionFailureText.authorizationPromptText(
+            sourceName: "飞牛 fnOS", url: url, validFor: 300, rejected: false)
+        XCTAssertTrue(rejected.contains("没有被接受"), "首句要直说被拒：\(rejected)")
+        XCTAssertFalse(first.contains("没有被接受"), "还没交过码时不能先认错：\(first)")
+    }
+
+    /// 有效期按分钟换算，不许把秒数直接印给用户看。
+    func testValidityIsRenderedInMinutes() {
+        let url = URL(string: "https://nas.example:5666/signin")!
+        let text = ConnectionFailureText.authorizationPromptText(
+            sourceName: "x", url: url, validFor: 90, rejected: false)
+        XCTAssertTrue(text.contains("2 分钟"), "90 秒应写 2 分钟：\(text)")
+        XCTAssertFalse(text.contains("90"), "不许把秒数漏出来：\(text)")
+    }
+
+    /// 取消授权不是「连接失败」：留给用户的那句话要说清下次怎么继续。
+    func testCancellationTextTellsHowToComeBack() {
+        XCTAssertTrue(ConnectionFailureText.authorizationCancelled.contains("授权"))
+        XCTAssertTrue(ConnectionFailureText.authorizationCancelled.contains("再点一次"),
+                      "要给一条能行动的路：\(ConnectionFailureText.authorizationCancelled)")
+    }
+}

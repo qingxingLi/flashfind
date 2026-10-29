@@ -104,9 +104,11 @@ final class SearchFormatFilterTests: XCTestCase {
 
     func testRankUsesStrippedKeywords() async throws {
         // 拿整串「测试报告 ppt」算相关度的话，没有文件名匹配得上，结果掉到最后一档（4）。
-        // 用剥离后的关键词「测试报告」则是前缀命中（1）。
+        // 用剥离后的关键词「测试报告」则是**同名**命中（0）。
+        // ★ 2026-10-28 改口：以前这里断言 1（前缀），改成 0 是因为
+        //   「同名 = 去掉扩展名后完全相等」，`测试报告.ppt` 的基名正是 `测试报告`。
         let out = try await search("测试报告 ppt", files: [row("测试报告.ppt")])
-        XCTAssertEqual(out.ranks, [1])
+        XCTAssertEqual(out.ranks, [0])
         XCTAssertLessThan(out.ranks[0], 4)
     }
 

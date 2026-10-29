@@ -49,16 +49,19 @@ final class SearchPanelFixedSizeTests: XCTestCase {
 
     // MARK: - 玻璃描边
 
-    /// 浅色外观下外描边必须是**深色**。
+    /// 浅色外观下外描边必须是**深色**，而且要够深。
     ///
     /// 这条是「白底上看不见玻璃」的直接解法：白描边压在白桌面上等于没画。
+    /// ★ 2026-10-29 把下限从 10% 提到 20%：玻璃在白底上折射不出层次，
+    ///   10~12% 压在 #FFFFFF 上只有 #E0E0E0，用户报了第二次「白色背景下不明显」。
+    ///   改了数值就必须改这条下限，否则下一次又会被悄悄调淡。
     func testOuterStrokeIsDarkInLightAppearance() {
         let light = SearchGlassEdge.outer(dark: false)
         XCTAssertEqual(light.red, 0)
         XCTAssertEqual(light.green, 0)
         XCTAssertEqual(light.blue, 0)
-        XCTAssertGreaterThanOrEqual(light.alpha, 0.10,
-                                    "低于 10% 在纯白背景上几乎看不出边界（用户报的就是这个）")
+        XCTAssertGreaterThanOrEqual(light.alpha, 0.20,
+                                    "低于 20% 在纯白背景上几乎看不出边界（用户两次报的就是这个）")
     }
 
     /// 深色外观下反过来：黑边在深玻璃上等于没有。

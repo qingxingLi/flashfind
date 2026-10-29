@@ -80,15 +80,34 @@ final class SearchSidebarTests: XCTestCase {
                      "本机搜索关掉后，「此 Mac」那一行不存在，也不该高亮")
     }
 
-    /// ★ 同一个来源的连续几行算一组，只在组首行写来源名。
+    /// ★★ **每个位置行都要写自己的来源名**（2026-10-29 真实报障）。
     ///
-    /// 一台 NAS 勾五个共享就是五行，每行都写「客厅 NAS · 未连接」只是噪音。
-    /// 「谁和谁算一组」是语义（不是排版），所以判定在 Core、被这条用例钉住。
-    func testSubtitleOnlyOnTheFirstRowOfEachSource() {
+    /// 用户原话：「飞牛位置侧边栏的存储空间 2 不显示设备名称」，截图里
+    /// 「存储空间 1」下面写着「飞牛 fnOS」，「存储空间 2」下面整片空白。
+    ///
+    /// 上一版按「同一个来源只在组首行写一次」处理，理由是去重——真实后果是
+    /// 第二个根看不出属于哪台设备，而且**连「未连接」这个状态也一起丢了**。
+    /// 这条用例钉的是「同源多根，每根都有副标题」，不是「某一行恰好有字」。
+    func testEveryLocationRowShowsItsSourceName() {
         let entries = SearchSidebar.entries(from: items(includeLocal: true, sources: [nas, offline]))
         XCTAssertEqual(entries.map(\.title), ["全部位置", "此 Mac", "Book", "Photo", "Share"])
-        XCTAssertEqual(SearchSidebar.groupStarts(entries), [true, true, true, false, true],
-                       "★ 只有每台来源的第一行、以及「全部位置」「此 Mac」要写副标题")
+
+        let twoRoots = entries.filter { $0.title == "Book" || $0.title == "Photo" }
+        XCTAssertEqual(twoRoots.map(\.subtitle), ["公司 NAS", "公司 NAS"],
+                       "★ 同一台 NAS 的两个根，第二行也必须写着来源名（否则就是用户报的那片空白）")
+        XCTAssertEqual(SearchSidebar.subtitleRows(entries), [false, false, true, true, true],
+                       "★ 只有真正没有副标题的行（「全部位置」「此 Mac」）才不画第二行字")
+
+        // 同源的第二个根在离线时也要能看出它没连上——这正是「组内省略」丢掉的另一件事。
+        let offlineTwoRoots = SearchCommandCatalog.SourceEntry(sourceID: "nas-c",
+                                                              displayName: "书房的 NAS",
+                                                              roots: ["/A0001", "/A0002"],
+                                                              ready: false)
+        let offlineEntries = SearchSidebar.entries(from: items(includeLocal: true,
+                                                              sources: [offlineTwoRoots]))
+        XCTAssertEqual(offlineEntries.filter { $0.subtitle != nil }.map(\.subtitle),
+                       ["书房的 NAS · 未连接", "书房的 NAS · 未连接"],
+                       "★ 状态跟着每一行走：第二行看不出「未连接」＝ 用户点了没反应也不知道为什么")
     }
 
     /// 顺序跟着传进来的候选走（用户在设置里排过序就按排过的来）。

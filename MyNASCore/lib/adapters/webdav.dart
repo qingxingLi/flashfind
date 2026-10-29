@@ -250,6 +250,8 @@ class WebDavAdapter implements NasBrandAdapter {
     required String username,
     required String password,
     String? otpCode,
+    // 账密品牌用不到授权码：飞牛那种 OAuth 流程才会传它。
+    String? authorizeCode,
   }) async {
     _identity = null;
     // 重置认证状态：等价上游每次 connect 里 newClient 的初始 NoAuth 态
@@ -366,6 +368,22 @@ class WebDavAdapter implements NasBrandAdapter {
           '最常见的原因：开着「明文 HTTP」但服务要求加密连接——请关掉这个开关再试。',
           apiCode: 301,
         );
+      }
+      // ★ 连接层失败不许报成「登录被拒」（2026-10-29，与 qnap/ugreen 同一处判据）：
+      //   报成 AuthenticationFailed 会让人去改密码，而真正的问题是地址/服务连不上。
+      const connectionTypes = {
+        DioExceptionType.connectionError,
+        DioExceptionType.connectionTimeout,
+        DioExceptionType.sendTimeout,
+        DioExceptionType.receiveTimeout,
+        DioExceptionType.unknown,
+      };
+      if (connectionTypes.contains(error.type)) {
+        throw AdapterFailures.network('无法连接 WebDAV 服务（${error.message}）');
+      }
+      if (error.type == DioExceptionType.badCertificate) {
+        throw AdapterFailures.tlsRejected(
+          '和 WebDAV 服务的加密连接没有建立起来（${error.message}），请检查证书是否受信任');
       }
       return LoginRejected('无法连接 WebDAV 服务（${error.message}）');
     }

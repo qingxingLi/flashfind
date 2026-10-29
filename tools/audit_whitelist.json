@@ -6,6 +6,41 @@
   ],
   "entries": [
     {
+      "file": "MyNASCore/lib/adapters/fnos.dart",
+      "needle": "_log.d('FnOSAdapter: 已刷新 access token')",
+      "reason": "固定状态文本，不包含令牌或异常对象"
+    },
+    {
+      "file": "MyNASCore/probe_fnos_open.dart",
+      "needle": "token 已拿到（长度 ${access.length}），不打印内容。",
+      "reason": "只输出凭据长度，未输出令牌值"
+    },
+    {
+      "file": "MyNASCore/probe_fnos_open.dart",
+      "needle": "GET 文件（原生 HttpClient，每次领新 token）",
+      "reason": "固定的探针步骤标题，不包含令牌值"
+    },
+    {
+      "file": "MyNASCore/test_fnos.dart",
+      "needle": "续期：用存下的 refresh token 直接恢复会话",
+      "reason": "测试步骤标题是固定文本，不输出令牌值"
+    },
+    {
+      "file": "MyNASCore/test_fnos.dart",
+      "needle": "smbHost: 'nas.local'",
+      "reason": "本地测试夹具使用的示例主机名，不连接该地址"
+    },
+    {
+      "file": "Sources/FlashFindCore/SourceWizardFlow.swift",
+      "needle": "addressPlaceholder: \"192.0.2.96\"",
+      "reason": "输入框占位地址属于 RFC 5737 文档示例网段"
+    },
+    {
+      "file": "tools/red_proof.py",
+      "needle": "唯一权威端」被静默破坏（§1.3.3.1）",
+      "reason": "Python 注释中的文档章节号，不是 IP 地址"
+    },
+    {
       "file": "MyNASCore/test_adapters.dart",
       "needle": "https://nas.local",
       "reason": "测试里的虚构主机名（Dio BaseOptions 与 Logger.safeUrl 的脱敏用例），不是任何人的设备"
@@ -41,7 +76,7 @@
       "reason": "输入框的占位示例，同上：通用文档网段，不是真实设备地址"
     },
     {
-      "file": "Sources/FlashFindCore/NASSourceConfig.swift",
+      "file": "Sources/FlashFindCore/NASConnectionFields.swift",
       "needle": "请填写端口（也可以直接写进地址",
       "reason": "同上：给用户看的示例句式，网段为占位网段"
     },

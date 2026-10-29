@@ -194,6 +194,8 @@ class UGreenAdapter implements NasBrandAdapter {
     required String username,
     required String password,
     String? otpCode,
+    // 账密品牌用不到授权码：飞牛那种 OAuth 流程才会传它。
+    String? authorizeCode,
   }) async {
     _log
       ..i('UGreenApi: 开始登录认证 (UGOS API)')
@@ -299,12 +301,22 @@ class UGreenAdapter implements NasBrandAdapter {
       _cancel?.check(); // 取消不能被吞掉
       _log.e('UGreenApi: 登录失败', e);
       // 上游: :212-223 的连接类失败分支（原文 appL10n.ugreenAuthConnectionTimeout 等）
+      //
+      // ★ 与 qnap 同一条修正（2026-10-29）：连接层/证书层的失败**不能**包成
+      //   LoginRejected —— 那在会话层会变成 AuthenticationFailed，
+      //   用户会去改密码，而真正的问题是设备连不上或证书不认。
       if (e.type == DioExceptionType.connectionTimeout ||
-          e.type == DioExceptionType.receiveTimeout) {
-        return const LoginRejected('连接绿联 NAS 超时，请检查设备地址与网络');
+          e.type == DioExceptionType.receiveTimeout ||
+          e.type == DioExceptionType.sendTimeout) {
+        throw AdapterFailures.timedOut('连接绿联 NAS 超时，请检查设备地址与网络');
       }
-      if (e.type == DioExceptionType.connectionError) {
-        return const LoginRejected('无法连接绿联 NAS，请检查设备是否在线');
+      if (e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.unknown) {
+        throw AdapterFailures.network('无法连接绿联 NAS，请检查设备是否在线');
+      }
+      if (e.type == DioExceptionType.badCertificate) {
+        throw AdapterFailures.tlsRejected(
+          '和绿联 NAS 的加密连接没有建立起来（${e.message}），请检查证书是否受信任');
       }
       return LoginRejected('绿联 NAS 登录请求失败：${e.message}');
     } on Exception catch (e) {

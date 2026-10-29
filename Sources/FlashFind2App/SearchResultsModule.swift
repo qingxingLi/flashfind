@@ -264,6 +264,13 @@ struct SearchResultsModule: View {
             Divider()
             Button("复制路径", systemImage: "doc.on.doc") { model.copy(result) }
         }
+        // 下载是右键里的**显式动作**，不进默认打开链（SMB 可达走 SMB，
+        // 不可达走网页；下载耗时且占流量，只该被明确要求）。
+        if model.supportsDirectDownload(result) {
+            Divider()
+            Button("下载后打开", systemImage: "arrow.down.circle") { model.downloadAndOpen(result) }
+            Button("下载到…", systemImage: "square.and.arrow.down") { model.downloadToFolder(result) }
+        }
         Button("复制文件名", systemImage: "doc.on.clipboard") { model.copyName(result) }
     }
 

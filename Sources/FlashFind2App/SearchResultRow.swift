@@ -72,11 +72,11 @@ struct SearchResultRow: View {
                 .frame(width: SearchLayout.fileIconSize, height: SearchLayout.fileIconSize)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.name).font(.system(size: 14, weight: .medium))
+                Text(result.name).ffFont(.resultName)
                     .foregroundStyle(legacySelection ? Color.white : Color.primary)
                     .lineLimit(1).truncationMode(.middle)
                 if showsFullPath {
-                    Text(pathText).font(.caption)
+                    Text(pathText).ffFont(.resultPath)
                         .foregroundStyle(legacySelection ? Color.white.opacity(0.75) : Color.secondary)
                         .lineLimit(1).truncationMode(.middle)
                 }
@@ -89,7 +89,7 @@ struct SearchResultRow: View {
             // 来源标签靠右，视觉上像 Spotlight 的来源分组。
             HStack(spacing: 4) {
                 Image(systemName: badgeSymbol).font(.system(size: 10))
-                Text(badge).font(.system(size: 11))
+                Text(badge).ffFont(.sourceBadge)
                     .lineLimit(1).truncationMode(.middle)
             }
             .foregroundStyle(legacySelection ? Color.white.opacity(0.75) : Color.secondary)

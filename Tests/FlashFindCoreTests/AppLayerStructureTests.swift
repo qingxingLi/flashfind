@@ -500,12 +500,71 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(settings.contains("if let action = row.action"),
                       "正常行不许出现按钮：只有 action 非空时才画")
         XCTAssertTrue(settings.contains("Button(\"重新登录…\") { model.reconnectSource(source.id) }"),
-                      "详情页必须保留重连入口，且走 reconnectSource 统一判定")
+                      "账号密码品牌的详情页必须保留重连入口，且走 reconnectSource 统一判定")
+        // 飞牛没有账号密码：同一张卡换成「授权 / 浏览器授权 + 重新授权…」，
+        // 走**同一个** `reconnectSource` —— 换个说法可以，入口不许丢。
+        XCTAssertTrue(settings.contains("Button(\"重新授权…\") { model.reconnectSource(source.id) }"),
+                      "浏览器授权品牌的详情页同样要保留重连入口")
+        XCTAssertTrue(settings.contains("if source.vendor.requiresAccountPassword"),
+                      "「账号」这张卡必须按登录方式分叉：飞牛没有账号可展示")
         // 行上的那些生命周期按钮不该回来。
         for removed in ["Button(\"断开\")", "Button(\"重新连接\")", "FFSecondaryButton(\"管理…\")", "Button(\"刷新状态\")"] {
             XCTAssertFalse(settings.contains(removed),
                            "来源行上的生命周期按钮 \(removed) 已按 UI 简化撤下")
         }
+    }
+
+    /// ★ 授权弹窗要把闪寻自己的窗口收起来，结束后**无条件**放回。
+    ///
+    /// 2026-10-29 用户截图：弹窗 + 设置窗 + 向导窗正好把浏览器里的授权页整个挡死，
+    /// 得手动挪开窗口才看得见。「把浏览器叫到前台」不够——`runModal` 的 modal
+    /// session 会把 App 重新激活，闪寻的窗口随即又压回浏览器上方。
+    ///
+    /// 这里锁三件事：收（orderOut）、只收闪寻自己的窗口（层级 ≤ floating，
+    /// 别把弹窗自己或系统窗口收了）、放回（orderFront，且倒序保住原上下顺序）。
+    func testAuthorizationPromptHidesAndRestoresFlashFindWindows() throws {
+        let source = codeOnly(try appSource("AppModel+SourceActions.swift"))
+        XCTAssertTrue(source.contains("hideWindowsBehindAuthorizationAlert(except: alertWindow)"),
+                      "授权弹窗前必须收起闪寻自己的窗口")
+        XCTAssertTrue(source.contains("for window in NSApp.orderedWindows where window !== alertWindow"),
+                      "不许把授权弹窗自己也收起来")
+        XCTAssertTrue(source.contains("window.level.rawValue <= NSWindow.Level.floating.rawValue"),
+                      "只收闪寻自己的窗口：floating 以上是系统窗口（菜单、状态栏面板），不许碰")
+        XCTAssertTrue(source.contains("window.orderOut(nil)"),
+                      "收起用 orderOut：close 会触发窗口关闭策略，把设置窗真的关掉")
+        XCTAssertTrue(source.contains("for window in hiddenBehindAlert.reversed() { window.orderFront(nil) }"),
+                      "弹窗结束后必须把窗口放回去，倒序才能保住原来谁在上面")
+    }
+
+    /// ★ 飞牛的授权码必须**内联在「连接信息」表单里**，向导不许再弹窗。
+    ///
+    /// 2026-10-29 用户改流程，原话：「飞牛的登陆流程更改下 不要弹窗 直接在图示位置
+    /// 生成获取授权码，点击后打开浏览器 然后再粘贴授权码 点击下方链接跳转搜索位置」。
+    ///
+    /// 这条锁的是「流程又退回弹窗」：弹窗那一版还能正常用，功能测试全绿，
+    /// 只有用户点开向导才会发现多了一扇窗、还把浏览器挡在后面。
+    func testWizardCollectsAuthorizeCodeInlineInsteadOfInAPrompt() throws {
+        let view = codeOnly(try appSource("NASSourceWizardView.swift"))
+        XCTAssertTrue(view.contains("AuthorizeCodeField.isInline(for: model.draftSource.vendor)"),
+                      "要不要摆授权码那一行必须问 Core，不许在视图里写 `vendor == .fnos`")
+        XCTAssertTrue(view.contains("$model.draftAuthorizeCode"),
+                      "输入框必须绑到草稿字段，否则用户粘的码传不进连接流程")
+        XCTAssertTrue(view.contains("accessibilityIdentifier(\"nas-authorize-code\")"),
+                      "授权码框要有固定标识（抓界面问题靠它定位）")
+        XCTAssertTrue(view.contains("model.requestDraftAuthorizeCode()"),
+                      "必须有「获取授权码」这个入口，否则用户不知道去哪拿码")
+
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        XCTAssertFalse(controller.contains("authorizeCodePrompter"),
+                       "向导不许再借授权弹窗（用户明确要求不要弹窗）")
+        XCTAssertTrue(controller.contains("authorizeCode: AuthorizeCodeField.optional(draftAuthorizeCode)"),
+                      "表单里那串码必须洗完交给核心（空串要落成 nil）")
+        XCTAssertTrue(controller.contains("NSWorkspace.shared.open(url)"),
+                      "撞上授权态必须直接把浏览器打开，而不是等用户再点一次")
+        XCTAssertTrue(controller.contains("ConnectionFailureText.authorizeInlinePrompt"),
+                      "状态行必须指回表单里那一格，文案住 Core")
+        XCTAssertTrue(controller.contains("guard outcome == .connected else"),
+                      "「等授权码」不是失败：不许走失败收尾去覆盖状态行")
     }
 
     /// ★ 断开的异步收尾完成后必须**主动重发一次** Provider 表。
@@ -523,6 +582,29 @@ final class AppLayerStructureTests: XCTestCase {
                       "断开要经 NASConnectionManager.disconnectOne（单来源入口）")
         XCTAssertTrue(body.contains("self.nativeProviders = self.nativeProviders"),
                       "异步收尾后必须重发 Provider 表，否则界面停留在旧渲染")
+    }
+
+    /// ★ 带授权码回来的那一轮**绝不能** reset 或 discover。
+    ///
+    /// PKCE 的 verifier 存在核心那个会话的适配器实例上：`resetSource` 会删掉它、
+    /// `discover` 会重建它。任一动作之后，设备只回「授权流程已过期」——
+    /// 而用户看着自己刚粘的码完全正确，只会怀疑自己复制错了。
+    ///
+    /// 弹窗那一版里两段 login 在同一轮跑，这件事是**天然成立**的；
+    /// 2026-10-29 改成内联之后，两段之间隔着用户去浏览器的操作（跨两轮
+    /// `connectDraft`），于是就变成必须显式保证的东西 —— 这正是本用例守的点。
+    func testAuthorizeCodeRoundResumesTheSameCoreSession() throws {
+        let controller = codeOnly(try appSource("NASSourceWizardController.swift"))
+        XCTAssertTrue(controller.contains("let resumingAuthorization = credential.authorizeCode != nil"),
+                      "必须显式判出「这是带码回来的第二轮」")
+        XCTAssertTrue(controller.contains("$0.host == effective.hostName && $0.port == effective.port"),
+                      "端点变了（用户改了地址/端口）就不能拿旧 verifier 去换令牌")
+        XCTAssertTrue(controller.contains("if !resumingAuthorization {"),
+                      "resume 分支必须跳过 reset 与 discover 各自那道闸")
+        XCTAssertTrue(controller.contains("pendingAuthorizationEndpoint = (config.hostName, config.port)"),
+                      "发挑战时必须记下端点，否则第二轮判不出该不该复用会话")
+        XCTAssertTrue(controller.contains("pendingAuthorizationEndpoint = nil"),
+                      "成功/失败/取消都必须让标记失效，否则下一轮会跳过 discover 直接登录")
     }
 
     /// ★ OTP 失败时，「重新登录…」必须弹出输入框，再把码传进登录流程。
@@ -979,6 +1061,65 @@ final class AppLayerStructureTests: XCTestCase {
                        "选类型不该再直接铺全部品牌")
         XCTAssertFalse(wizard.contains("supportBadge"),
                        "选项上不该再挂「已验证 / 已接入 · 未验证」这类状态标签")
+    }
+
+    /// ★ 品牌图标只许走 `VendorIcon`（黑白品牌标记），不许各写各的 SF Symbol。
+    ///
+    /// 2026-10-29 用户要求「换成黑白风格的他们自己的主题图标」：向导卡片、页头、
+    /// 设置页来源行、来源详情页四处一起换。四处各写 `Image(systemName: vendor.symbol)`
+    /// 时，漏一处就有一处继续显示泛化的硬盘图标 —— 除了截图没有别的办法发现，
+    /// 而截图只会看主要那两屏。
+    ///
+    /// ★ 定稿形态 = **从原图描出来的轮廓 + 固定白底黑图形**（用户 2026-10-29 提供
+    /// `VendorMarkView.swift`）。所以这里守的是「描摹」与「固定黑白」两件事，
+    /// 而不是上一版的「跟随 foregroundStyle」—— 那一版在深色模式下会把标记反相成白图形，
+    /// 三家标志的负形（DSM 的镂空字母）就看不出来了。
+    /// 搜索框占位文案 = 品牌名「闪寻」（用户 2026-10-29：「搜索文件与文件夹换成品牌名『闪寻』」）。
+    ///
+    /// 这条守两件事，而且**两件必须一起**：
+    /// · 视觉占位只写「闪寻」—— 那框里只放得下两个汉字，全称会把光标挤到很右边；
+    /// · 读屏标签仍是「搜索文件与文件夹」—— 读屏用户听到「闪寻」不知道这框要干什么。
+    /// 只守前者会出现「为了好看把无障碍也改了」，只守后者则文案改不回来。
+    func testSearchFieldPlaceholderIsTheBrandName() throws {
+        let field = codeOnly(try appSource("SearchFieldModule.swift"))
+        XCTAssertTrue(field.contains("TextField(\"闪寻\""),
+                      "占位文案应为品牌名「闪寻」，不是功能描述")
+        XCTAssertFalse(field.contains("TextField(\"搜索文件与文件夹\""),
+                       "占位文案已改品牌名，别又改回全称")
+        XCTAssertTrue(field.contains("accessibilityLabel(\"搜索文件与文件夹\")"),
+                      "读屏标签要保留功能描述：光念「闪寻」说不出这个框干什么")
+    }
+
+    func testVendorIconsGoThroughTheSharedMarkView() throws {
+        for file in ["NASSourceWizardView.swift", "SettingsView.swift"] {
+            let text = codeOnly(try appSource(file))
+            XCTAssertFalse(text.contains("vendor.symbol"),
+                           "\(file) 不该再自己拼 vendor.symbol —— 品牌图标走 VendorIcon")
+            XCTAssertTrue(text.contains("VendorIcon("),
+                          "\(file) 应通过 VendorIcon 画品牌图标")
+        }
+        // 缩放基准取自 Core；图形本身是描出来的闭合轮廓。
+        let mark = codeOnly(try appSource("VendorMarkView.swift"))
+        XCTAssertTrue(mark.contains("VendorMark.designSize"),
+                      "缩放基准只能取自 Core，否则各处的标记会各缩各的")
+        XCTAssertTrue(mark.contains("tracedPath("),
+                      "三家轮廓必须走 `tracedPath`（从用户给的原始截图描出来的闭合多边形）："
+                      + "手绘过三版都不成立 —— 字母糊成一团、牛角像鹿角、环的缺口方向放反")
+        XCTAssertTrue(mark.contains("closeSubpath"),
+                      "描摹出来的轮廓必须闭合，否则 fill 会把缺口补上或漏填")
+        XCTAssertTrue(mark.contains("eoFill"),
+                      "群晖的「DSM」是负形（镂空），必须用 even-odd 填充")
+        // 单色剪影：浅色模式黑、深色模式白，且**不铺底色**（白底贴片在深色界面上像贴纸）。
+        XCTAssertTrue(mark.contains("colorScheme"),
+                      "标记要按深浅色选黑/白：浅色黑图形、深色白图形，不铺白底")
+        XCTAssertTrue(mark.contains(".color(ink)"),
+                      "填充色只能来自 `ink`（黑/白二选一），不许换成跟随 foregroundStyle")
+        XCTAssertFalse(mark.contains("with: .foreground"),
+                      "不许跟随 foregroundStyle —— 被外层染成强调色，三家又变同一套图标")
+        XCTAssertFalse(mark.contains("accentColor"),
+                      "品牌图标不许染强调色：一旦变蓝，三家又变成同一套图标")
+        XCTAssertFalse(mark.contains("background(Color.white)"),
+                      "不许再垫白色底块 —— 深色模式下是块白贴纸")
     }
 
     /// ★ 这是一条**三步**的向导，而且步数只能由 Core 出。
@@ -1668,6 +1809,15 @@ final class AppLayerStructureTests: XCTestCase {
                       "选中底要会滑动（抽屉感就靠这一口气：瞬移看起来像两个列表）")
         XCTAssertTrue(sidebar.contains("select("),
                       "点一行要回调出去，由 AppModel 统一换算成位置限定")
+
+        // ★★ 每一行都写自己的来源名（2026-10-29 报障：飞牛「存储空间 2」下面整片空白）。
+        // 上一版按「同一个来源只在组首行写一次」处理，视图自己维护一张分组表 ⇒
+        // 同源的第二个位置丢掉的不只是重复的设备名，还有它自己的「未连接」状态。
+        // 判定搬进 Core 之后，视图只消费结果；这里守的是「别又搬回去」。
+        XCTAssertTrue(sidebar.contains("SearchSidebar.subtitleRows"),
+                      "★ 副标题该不该画必须问 Core（subtitleRows）：视图自己分组就会重新丢掉同源第二行")
+        XCTAssertFalse(sidebar.contains("groupStarts"),
+                       "「同源只在组首行写一次」已废弃：它会把第二行的来源名与「未连接」一起省掉")
     }
 
     /// ★ 搜索结果区用**跟随鼠标的玻璃遮罩**，不是系统的选中蓝 / 悬停灰。
@@ -2778,8 +2928,13 @@ final class AppLayerStructureTests: XCTestCase {
     /// ★ 分段标题必须走字号阶梯，不再用系统默认那套「只差字重」的排版。
     ///
     /// 用户 「不同等级的标题以不同的文字大小区分，当前也有区分
-    /// 但是不明显」。这里锁两件事：标题真的用了 Core 的 `SettingsTypography`，
+    /// 但是不明显」。这里锁两件事：标题真的用了 Core 的阶梯，
     /// 且字号比正文大一档（否则等于没改）。
+    ///
+    /// 2026-10-28：字号 + 字重 + 字距统一收口到 `.ffFont(.settingsSectionHeader)`，
+    /// 视图里不再直接出现 `SettingsTypography`。所以断言改成检查这个入口，
+    /// 并回到 Core 侧核对它**确实**引用 `SettingsTypography.sectionHeader` 且是半粗——
+    /// 只检查 `.settingsSectionHeader` 这个名字，等于没锁住「字号来自阶梯」这件事。
     func testSectionHeadersUseTheSharedTypographyScale() throws {
         // 2026-10-27：分组表单换成自绘卡片，分段标题从 `sectionHeader(...)` 这个
         // helper 挪进了 `SettingsCard`。字号出处仍然只有一处，换了个地方而已。
@@ -2787,9 +2942,21 @@ final class AppLayerStructureTests: XCTestCase {
         guard let card = braceBlock(after: "struct SettingsCard", in: chrome) else {
             return XCTFail("找不到 SettingsCard")
         }
-        XCTAssertTrue(card.contains("SettingsTypography.sectionHeader"),
-                      "分段标题字号必须来自 Core 的 SettingsTypography")
-        XCTAssertTrue(card.contains(".semibold"),
+        XCTAssertTrue(card.contains(".ffFont(.settingsSectionHeader)"),
+                      "分段标题必须走统一的字体阶梯")
+
+        let core = try clientFile("Sources/FlashFindCore/FlashFindTypography.swift")
+        // 样式常量是 `static let xxx = FlashFindTextStyle(...)`，不是花括号块，
+        // 所以按「从这一项到下一项」切片，而不是 braceBlock。
+        guard let headerStart = core.range(of: "settingsSectionHeader"),
+              let headerEnd = core.range(of: "settingsBody",
+                                         range: headerStart.upperBound..<core.endIndex) else {
+            return XCTFail("Core 侧没有登记 settingsSectionHeader")
+        }
+        let header = String(core[headerStart.lowerBound..<headerEnd.lowerBound])
+        XCTAssertTrue(header.contains("SettingsTypography.sectionHeader"),
+                      "分段标题字号必须来自 SettingsTypography，不许另写一个数")
+        XCTAssertTrue(header.contains("weight: 0.6"),
                       "分段标题保留半粗字重，与正文拉开层次")
 
         // 页面里不许再各写一份标题字号：一处改了另一处没改，同一页会出现两个层级。
@@ -2799,9 +2966,9 @@ final class AppLayerStructureTests: XCTestCase {
                            "\(file) 里的分段标题要交给 SettingsCard，不要自己排字号")
         }
 
-        let core = try clientFile("Sources/FlashFindCore/SettingsTypography.swift")
-        XCTAssertTrue(core.contains("sectionHeader"), "Core 侧必须登记 sectionHeader 这一级")
-        XCTAssertTrue(core.contains("pageTitle") && core.contains("body") && core.contains("caption"),
+        let scale = try clientFile("Sources/FlashFindCore/SettingsTypography.swift")
+        XCTAssertTrue(scale.contains("sectionHeader"), "Core 侧必须登记 sectionHeader 这一级")
+        XCTAssertTrue(scale.contains("pageTitle") && scale.contains("body") && scale.contains("caption"),
                       "字号阶梯要覆盖页面标题 / 正文 / 辅助说明各级")
     }
 
@@ -3213,8 +3380,13 @@ final class AppLayerStructureTests: XCTestCase {
                       "取值必须走 Core 的 NASCredentialPick，两条路共用一个出口")
         XCTAssertFalse(controller.contains("PendingCredential(password: saved, otp: nil)"),
                        "钥匙串那条路不许把动态码写死成 nil —— 那就是死循环的根因")
-        XCTAssertFalse(controller.contains("otp: nil)"),
-                       "凭据构造里不许出现写死 nil 的动态码")
+        // ★ 判据跟着实现改（2026-10-29）：原先还全局禁 `otp: nil)`，那只是因为
+        //   授权品牌那条路当时被包在 `pickForBrowserAuthorization` 里。包装已按
+        //   审查意见删除，授权品牌（fnOS）那条路**本来就该**是 `otp: nil`
+        //   —— 它没有动态码这回事，这不是「忘了带」。
+        //   真正要守的是账密那条路：Core 给了码就必须原样带上。
+        XCTAssertTrue(controller.contains("PendingCredential(password: picked.password, otp: picked.otp)"),
+                      "账密那条路必须把 Core 给出的动态码原样带上")
     }
 
     // MARK: - 空格预览（2026-10-26 用户要求恢复）

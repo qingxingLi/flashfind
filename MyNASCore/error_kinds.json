@@ -7,6 +7,8 @@
     "AuthenticationFailed",
     "Cancelled",
     "DirectoryUnstable",
+    "DownloadFailed",
+    "DownloadUnsupported",
     "EmptyScope",
     "ExplicitCertificateConfirmationRequired",
     "HttpDenied",

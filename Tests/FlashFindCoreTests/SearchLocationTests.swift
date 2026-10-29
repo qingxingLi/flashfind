@@ -339,6 +339,21 @@ final class SearchCommandCatalogTests: XCTestCase {
         XCTAssertEqual(SearchTargetLabel.rootName(""), "")
     }
 
+    /// 飞牛卷根**不许取末段**：`/vol1/1000` 与 `/vol2/1000` 的末段都是 uid。
+    ///
+    /// 真实截图（2026-10-29）：侧边栏里两行都写「1000」，用户分不出点哪个；
+    /// 设置行更直接，写着 `vol1/1000、vol2/1000`。
+    func testFnOSVolumeRootsGetDistinctNames() {
+        XCTAssertEqual(SearchTargetLabel.rootName("/vol1/1000"), "存储空间 1")
+        XCTAssertEqual(SearchTargetLabel.rootName("/vol2/1000"), "存储空间 2")
+        XCTAssertEqual(NASScopeLabel.text(for: "/vol1/1000"), "存储空间 1")
+        XCTAssertEqual(NASSourceRowModel.scopeDisplayName("/vol2/1000"), "存储空间 2")
+        // 不是这个形状的照旧：末段 / 去前导斜杠。
+        XCTAssertEqual(NASScopeLabel.text(for: "/vol1/1000/照片"), "vol1/1000/照片")
+        XCTAssertEqual(SearchTargetLabel.rootName("/vol1/1000/照片"), "照片")
+        XCTAssertEqual(NASScopeLabel.text(for: "/示例共享"), "示例共享")
+    }
+
     /// 位置限定的显示名：不限定时不显示任何东西。
     func testTargetLabel() {
         XCTAssertNil(SearchTargetLabel.label(for: .unrestricted))

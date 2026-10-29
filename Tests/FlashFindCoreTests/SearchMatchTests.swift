@@ -34,8 +34,34 @@ final class SearchMatchTests: XCTestCase {
         XCTAssertEqual(SearchMatchGrade.terms.legacyRank, 2)
         XCTAssertEqual(SearchMatchGrade.pathOnly.legacyRank, 3)
         XCTAssertEqual(SearchMatchGrade.subsequence.legacyRank, 4)
+        XCTAssertEqual(SearchMatchGrade.partial.legacyRank, 4)
         XCTAssertEqual(SearchMatchGrade.typo.legacyRank, 4)
         XCTAssertEqual(SearchMatchGrade.none.legacyRank, 4)
+    }
+
+    // MARK: - 第 1 层「同名」= 去扩展名之后完全相等（2026-10-28 用户定）
+
+    /// 「报告.pdf」搜「报告」是**同名**，不是前缀。
+    ///
+    /// 改口记录：2026-10-28 之前这条断言是 `.prefix`（`rank 1`），
+    /// 用户定下「同名优先」后改为 `.exact`（`rank 0`）。
+    func testSameNameIgnoresExtension() {
+        XCTAssertEqual(grade("报告.pdf", "报告"), .exact)
+        XCTAssertEqual(grade("报告", "报告"), .exact)
+        XCTAssertEqual(grade("报告.txt", "报告"), .exact)
+        XCTAssertEqual(SearchResultRanker.rank(name: "报告.pdf", path: "/共享/报告.pdf", query: "报告"), 0)
+    }
+
+    /// 「含查询词但不等于」不算同名——用户举的例子就是「年度报告」不该跟「报告」同级。
+    func testNameThatMerelyContainsTheQueryIsNotExact() {
+        XCTAssertEqual(grade("年度报告.pdf", "报告"), .terms)
+        XCTAssertEqual(grade("报告说明.pdf", "报告"), .prefix)
+    }
+
+    /// ★ 只剥文件名的扩展名，不剥查询串的：`report.2026` 里的 `.2026` 是名字的一部分。
+    func testQueryIsNeverStrippedOfItsOwnDottedPart() {
+        XCTAssertNotEqual(grade("report.pdf", "report.2026"), .exact,
+                          "剥掉查询串的 `.2026` 会造出「搜 report.2026 命中 report.pdf」的假同名")
     }
 
     // MARK: - 子序列（模糊）
@@ -66,6 +92,44 @@ final class SearchMatchTests: XCTestCase {
     /// 两个字符的查询不做子序列：噪声远大于价值。
     func testTwoCharacterQueryDoesNotFuzzyMatch() {
         XCTAssertEqual(grade("best_seller_report.xlsx", "bs"), .none)
+    }
+
+    // MARK: - 第 3 层「匹配字符多的优先」（2026-10-28 用户定）
+
+    /// 用户原话：「一个文件七个字，我搜四个字这个文件都有，另一个文件只有
+    /// 三个字符合，四个字的排前边」——**命中率高的在前**。
+    func testMoreMatchedCharactersRankHigher() {
+        let full = SearchMatch.evaluate(name: "项目说明报告.pdf", query: "项目报告")
+        let threeOfFour = SearchMatch.evaluate(name: "项目汇报.pdf", query: "项目报告")
+
+        XCTAssertEqual(full.grade, .subsequence, "四个字全中，按顺序但是不连续")
+        XCTAssertEqual(threeOfFour.grade, .partial, "四个字中三个（命中率 0.75）")
+        XCTAssertGreaterThan(full.value, threeOfFour.value)
+    }
+
+    /// 同一命中率时比紧凑：命中的字挨得近的更可信。
+    func testSameCoveragePrefersTighterSpan() {
+        let tight = SearchMatch.evaluate(name: "项目x报告.pdf", query: "项目报告")
+        let loose = SearchMatch.evaluate(name: "项x目x报x告.pdf", query: "项目报告")
+        XCTAssertEqual(tight.grade, .subsequence)
+        XCTAssertEqual(loose.grade, .subsequence)
+        XCTAssertGreaterThan(tight.value, loose.value)
+    }
+
+    /// ★ 半命中的两条准入线（新增档的防噪声闸，不是放宽旧阈值）：
+    /// 命中字符不足 3 个、或命中率低于 0.6，一律不算命中。
+    func testPartialMatchRejectsLowCoverage() {
+        // 4 个字里只中 2 个（2 < 3）
+        XCTAssertEqual(grade("项目总结.pdf", "项目报告"), .none)
+        // 7 个字里中 4 个：0.57 < 0.6
+        XCTAssertEqual(grade("axbxcxd.pdf", "abcdefg"), .none)
+    }
+
+    /// 全命中但摊得太开仍然是**不命中**，不许从半命中那条路混进来。
+    func testSpreadOutFullMatchNeverDegradesToPartial() {
+        let spread = "a" + String(repeating: "x", count: 30) + "b"
+            + String(repeating: "y", count: 30) + "c.pdf"
+        XCTAssertEqual(grade(spread, "abc"), .none)
     }
 
     // MARK: - 容错（打错字）
@@ -105,15 +169,17 @@ final class SearchMatchTests: XCTestCase {
 
     // MARK: - 分值单调性
 
-    /// 分值必须与等级同向：整名 > 前缀 > 词命中 > 子序列 > 容错 > 路径 > 不像。
+    /// 分值必须与等级同向：整名 > 前缀 > 词命中 > 子序列 > 半命中 > 容错 > 路径 > 不像。
     ///
     /// 这条是给排序和「取前 200」用的。四个值一旦乱序，界面上的顺序就会
     /// 出现「前缀命中的文件排在整名命中前面」这种说不通的结果。
+    /// 2026-10-28 加入「半命中」档后区间全部重排（旧区间彼此有重叠）。
     func testScoresAreMonotonicAcrossGrades() {
         let exact = value("report.pdf", "report.pdf")
         let prefix = value("report-2026.pdf", "report")
         let terms = value("2026 annual report.pdf", "annual report")
         let subsequence = value("best_seller_report.xlsx", "bsr")
+        let partial = value("项目汇报.pdf", "项目报告")
         let typo = value("flashfind.pdf", "flazhfind")
         let pathOnly = value("scan001.pdf", "报告", path: "/共享/报告/scan001.pdf")
         let none = value("scan001.pdf", "完全不像")
@@ -122,10 +188,18 @@ final class SearchMatchTests: XCTestCase {
         XCTAssertGreaterThan(exact, prefix)
         XCTAssertGreaterThan(prefix, terms)
         XCTAssertGreaterThan(terms, subsequence)
-        XCTAssertGreaterThan(subsequence, typo)
+        XCTAssertGreaterThan(subsequence, partial)
+        XCTAssertGreaterThan(partial, typo)
         XCTAssertGreaterThan(typo, pathOnly)
         XCTAssertGreaterThan(pathOnly, none)
         XCTAssertEqual(none, 0, accuracy: 0.0001)
+
+        // 区间本身也锁住：任何一档跨到别档里去都要在这里红。
+        XCTAssertGreaterThanOrEqual(subsequence, 0.60)
+        XCTAssertLessThanOrEqual(subsequence, 0.745)
+        XCTAssertGreaterThanOrEqual(partial, 0.46)
+        XCTAssertLessThan(partial, 0.55)
+        XCTAssertLessThanOrEqual(typo, 0.45)
     }
 
     /// 空查询与纯空白：不命中，也不许崩。
@@ -135,8 +209,11 @@ final class SearchMatchTests: XCTestCase {
     }
 
     /// 大小写与变音符号照旧不敏感（这条与 1.1.x 一致）。
+    ///
+    /// 改口记录：2026-10-28 起「去掉扩展名后完全相等」算同名，
+    /// `Résumé.PDF` 搜 `resume` 由 `.prefix` 变成 `.exact`。
     func testCaseAndDiacriticsAreIgnored() {
-        XCTAssertEqual(grade("Résumé.PDF", "resume"), .prefix)
+        XCTAssertEqual(grade("Résumé.PDF", "resume"), .exact)
     }
 
     // MARK: - `SearchResultRanker` 的对外口径

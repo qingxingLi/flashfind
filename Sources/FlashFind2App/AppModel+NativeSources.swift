@@ -184,6 +184,13 @@ extension AppModel {
         get { wizard.nativeNASOTP }
         set { wizard.nativeNASOTP = newValue }
     }
+    /// 浏览器授权码：表单里那一格（2026-10-29 起内联，不再弹窗）。
+    var draftAuthorizeCode: String {
+        get { wizard.draftAuthorizeCode }
+        set { wizard.draftAuthorizeCode = newValue }
+    }
+    /// 刚打开浏览器、正等用户粘码。只用于把焦点移到授权码框，不参与连接判定。
+    var draftAwaitingAuthorizeCode: Bool { wizard.draftAwaitingAuthorizeCode }
     var draftSource: NASSourceConfig {
         get { wizard.draftSource }
         set { wizard.draftSource = newValue }

@@ -43,6 +43,48 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
         return url.host?.lowercased() == host.lowercased()
             && url.path.split(separator: "/").first.map(String.init) == shareName
     }
+    /// 这个来源能用到的挂载：主机精确匹配优先，认不出来时再按「共享名 + 登录账号」认亲。
+    ///
+    /// ## 为什么需要第二档（2026-10-29 真机报障）
+    ///
+    /// 用户来源里填的是**域名**（`nas.example.com`），Finder 里挂的是
+    /// `smb://admin1@10.20.30.96/李青宇`。主机名永远对不上 ⇒ 旧实现一律当成
+    /// 「没挂载」，双击打开浏览器。用户：「群晖登陆域名还是打不开本地的 smb 连接」。
+    ///
+    /// ★ 域名与 IP 之间**没有可靠的换算**，不能拿 DNS 判同一性：同一台机器上实测，
+    ///   该域名被解析成代理的 fake-ip（`198.18.x.x`），反向解析挂载 IP 是 NXDOMAIN。
+    ///   靠 DNS 只会在某些网络里灵、某些网络里静默不灵。
+    ///
+    /// 能用的旁证是「**谁在登录这个共享**」：SMB 的登录账号就是 NAS 账号，用户在同一台
+    /// 设备上两处填的是同一个账号（同一台群晖不会给你两个不同的管理账号名）。
+    /// 于是第二档要求：共享名相同 **且** 登录账号相同，**且命中的挂载只落在一台主机上**。
+    ///
+    /// ★ 为什么必须「唯一一台」：两台 NAS 都用同名管理账号挂着同名共享（`Photo` 这种
+    ///   太常见）时，猜哪台都可能把用户带到**另一台设备上的同名文件**——看到的是别人的
+    ///   照片、或者一个同名但内容不同的文件。那比老老实实打开网页糟得多，所以宁可退回网页。
+    ///
+    /// - Parameters:
+    ///   - host: 来源主机（可能是域名、IP 或 QuickConnect ID）。
+    ///   - shares: 本来源已授权的共享名（不带前导斜杠）。
+    ///   - preferredUser: 本来源的登录账号（`smbUsername`，缺省时用 DSM 账号）。
+    public static func matching(host: String, shares: Set<String>,
+                                preferredUser: String?,
+                                in mounts: [SMBMountCandidate]) -> [SMBMountCandidate] {
+        let exact = mounts.filter {
+            $0.host.caseInsensitiveCompare(host) == .orderedSame && shares.contains($0.shareName)
+        }
+        if !exact.isEmpty { return exact }
+        guard let user = preferredUser?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !user.isEmpty else { return [] }
+        let byAccount = mounts.filter {
+            shares.contains($0.shareName)
+                && $0.username?.caseInsensitiveCompare(user) == .orderedSame
+        }
+        guard !byAccount.isEmpty else { return [] }
+        let hosts = Set(byAccount.map { $0.host.lowercased() })
+        return hosts.count == 1 ? byAccount : []
+    }
+
     public static func discover() throws -> [SMBMountCandidate] {
         var mounts: UnsafeMutablePointer<statfs>?
         let count = getmntinfo(&mounts, MNT_NOWAIT)

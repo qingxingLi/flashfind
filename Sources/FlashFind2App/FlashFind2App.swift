@@ -118,6 +118,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         searchPanel = SearchPanelController(model: model)
         // 预览构建照旧：直接显示搜索浮窗（截图/点验用），不弹引导。
         if AppEnvironment.isPreview {
+            // `FF_UI_APPEARANCE=dark|light`：强制本次运行的外观。
+            // 深色模式**没有别的办法验**：界面全是系统材质，改配色不会让任何用例变红，
+            // 只能截图看；而系统外观是全局的 —— 为了一张图去翻用户整块屏幕不合适。
+            if let raw = ProcessInfo.processInfo.environment["FF_UI_APPEARANCE"] {
+                NSApplication.shared.appearance = NSAppearance(named: raw == "dark" ? .darkAqua : .aqua)
+            }
             searchPanel?.show()
             // `FF_UI_WIZARD=1`：把「添加搜索来源」向导直接停在「选择搜索位置」那一步。
             // `FF_UI_WIZARD_PAGE=1|2|3`：直接停在指定的那一页（不造已连接的草稿），

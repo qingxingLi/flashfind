@@ -446,10 +446,16 @@ public struct SearchTokenBar: Hashable, Sendable {
 /// 搜索根在协议里是路径（DSM 的 `/示例共享`、品牌的 `/存储A`），
 /// 但列表里显示整条路径既长又难读——只取最后一段。
 /// 取不到最后一段时退回整条路径，不显示空白。
+///
+/// ★ 飞牛卷根不能取末段：`/vol1/1000` 与 `/vol2/1000` 的末段都是 `1000`
+/// （那是 uid），侧边栏会出现两行一模一样的「1000」，用户分不出点哪个。
+/// 只这个形状走 `NASScopeLabel.volumeRootName`（「存储空间 1 / 2」），
+/// 其余品牌、其余层级照旧取末段。
 public enum SearchTargetLabel {
     public static func rootName(_ root: String) -> String {
         let trimmed = root.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
+        if let volume = NASScopeLabel.volumeRootName(trimmed) { return volume }
         let segments = trimmed.split(separator: "/", omittingEmptySubsequences: true)
         return segments.last.map(String.init) ?? trimmed
     }

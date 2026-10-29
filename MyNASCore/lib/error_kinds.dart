@@ -90,9 +90,14 @@ class ErrorKind {
   static const rateLimited = 'RateLimited';
   static const apiError = 'ApiError';
 
+  // —— 下载（右键「下载后打开」/「下载到…」，目前只有飞牛）——
+  /// 设备侧换票据或取包失败。
+  static const downloadFailed = 'DownloadFailed';
+  /// 这个品牌/设备没有下载这条路（不实现 `DownloadableAdapter`）。
+  static const downloadUnsupported = 'DownloadUnsupported';
+
   // —— 范围 / 路径 ——
-  static const scopeUnset = 'ScopeUnset';
-  static const scopeDenied = 'ScopeDenied';
+  static const scopeUnset = 'ScopeUnset';  static const scopeDenied = 'ScopeDenied';
   static const scopeUnavailable = 'ScopeUnavailable';
   static const emptyScope = 'EmptyScope';
   static const pathMissing = 'PathMissing';
@@ -157,6 +162,8 @@ class ErrorKind {
     resultLimit,
     rateLimited,
     apiError,
+    downloadFailed,
+    downloadUnsupported,
     scopeUnset,
     scopeDenied,
     scopeUnavailable,

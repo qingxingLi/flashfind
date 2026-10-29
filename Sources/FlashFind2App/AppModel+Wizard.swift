@@ -45,6 +45,9 @@ extension AppModel {
     func renameSource(_ id: String, to name: String) { wizard.renameSource(id, to: name) }
     func setDraftStatus(_ message: String) { wizard.setDraftStatus(message) }
     func connectDraft() { wizard.connectDraft() }
+    /// 「获取授权码」：在浏览器打开授权页（飞牛）。与 `connectDraft` 同一动作，
+    /// 因为授权地址只能由核心带着 PKCE 挑战去设备上换，见向导里的说明。
+    func requestDraftAuthorizeCode() { wizard.requestDraftAuthorizeCode() }
     func retryDraftUsingPlainHTTP() { wizard.retryDraftUsingPlainHTTP() }
     func confirmDraftTrust() { wizard.confirmDraftTrust() }
     func rejectDraftTrust() { wizard.rejectDraftTrust() }

@@ -94,4 +94,47 @@ final class SMBMountCandidateTests: XCTestCase {
         XCTAssertFalse(candidate().matches(smbEndpoint: ""))
         XCTAssertFalse(candidate().matches(smbEndpoint: "不是 URL"))
     }
+
+    // MARK: - 来源能用哪几条挂载（`matching`）
+
+    /// ★★ 来源填**域名**、访达里用**局域网 IP** 挂着同名共享且账号相同 ⇒ 认这一条。
+    ///
+    /// 2026-10-29 真机：`nas.example.com`（来源）vs `//admin1@10.20.30.96/李青宇`（挂载）。
+    /// 域名与 IP 之间没有可靠换算（实测该域名被解析成代理 fake-ip、反向解析 NXDOMAIN），
+    /// 只能靠「同一个 NAS 账号」认亲。账号比较不区分大小写。
+    func testMatchingFallsBackToTheSameAccountOnOneOtherHost() {
+        let ip = candidate(host: "10.20.30.96", share: "home")
+        let matched = SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
+                                                 preferredUser: "ALICE", in: [ip])
+        XCTAssertEqual(matched.map(\.mountRoot.path), [ip.mountRoot.path],
+                       "★ 账号相同、共享名相同、只落在一台主机 ⇒ 就是这台（旧判定这里返回空 ⇒ 开浏览器）")
+    }
+
+    /// ★ 两台主机账号与共享名都一样 ⇒ 一条都不认，别猜。
+    func testMatchingRefusesToGuessWhenTwoHostsShareTheAccount() {
+        let a = candidate(host: "10.20.30.96", share: "home")
+        let b = candidate(host: "192.168.0.97", share: "home")
+        XCTAssertTrue(SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
+                                                 preferredUser: "alice", in: [a, b]).isEmpty,
+                      "猜错就是打开另一台设备的同名文件，比退回网页糟")
+    }
+
+    /// 不知道登录账号时不许凭共享名硬猜。
+    func testMatchingWithoutAnAccountOnlyUsesExactHost() {
+        let ip = candidate(host: "10.20.30.96", share: "home")
+        XCTAssertTrue(SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
+                                                 preferredUser: nil, in: [ip]).isEmpty)
+        XCTAssertTrue(SMBMountCandidate.matching(host: "oec.example.icu", shares: ["home"],
+                                                 preferredUser: "  ", in: [ip]).isEmpty)
+    }
+
+    /// 主机精确匹配优先，且不受账号影响（多用户挂同一个共享是正常情形）。
+    func testMatchingPrefersExactHostBeforeAccount() {
+        let exact = candidate(host: "nas.example", share: "team")     // 账号 alice
+        let other = SMBMountCandidate.parse(origin: "//bob@10.20.30.96/team", mountPath: "/Volumes/team2")!
+        let matched = SMBMountCandidate.matching(host: "NAS.example", shares: ["team"],
+                                                 preferredUser: "bob", in: [exact, other])
+        XCTAssertEqual(matched.map(\.mountRoot.path), [exact.mountRoot.path],
+                       "主机对上了就只认主机，不许被账号相同的另一台顶掉")
+    }
 }

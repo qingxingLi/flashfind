@@ -47,25 +47,27 @@ struct SearchResultsSidebar: View {
                    value: selectedID)
     }
 
-    /// 哪些行要写副标题（同一个来源只在**组首行**写一次来源名）。
+    /// 哪些行要写副标题。
     ///
-    /// ★ 一台 NAS 勾了五个共享就是五行，每行都写「客厅 NAS · 未连接」只是噪音。
-    /// 判定在 Core（`SearchSidebar.groupStarts`）——「谁和谁算一组」是语义，不是排版。
-    private var groupStarts: [Bool] { SearchSidebar.groupStarts(entries) }
+    /// ★★ 每一行都写（2026-10-29 报障：飞牛「存储空间 2」下面空着）。上一版只在
+    /// 「同一个来源的第一行」写一次来源名，结果第二个存储空间只剩一个光秃秃的
+    /// 位置名，连「未连接」这个状态都一并省掉了。
+    /// 判定在 Core（`SearchSidebar.subtitleRows`）——「这行画不画第二行字」是语义。
+    private var subtitleRows: [Bool] { SearchSidebar.subtitleRows(entries) }
 
     private func row(_ entry: SearchSidebar.Entry, index: Int) -> some View {
         let selected = entry.id == selectedID
-        let showsSubtitle = groupStarts.indices.contains(index) && groupStarts[index]
+        let showsSubtitle = subtitleRows.indices.contains(index) && subtitleRows[index]
         return Button { select(index) } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.title)
-                    .font(.system(size: 12, weight: selected ? .medium : .regular))
+                    .ffFont(selected ? .sidebarTitleSelected : .sidebarTitle)
                     .lineLimit(1)
                 if showsSubtitle, let subtitle = entry.subtitle, !subtitle.isEmpty {
-                    // 副标题是**状态**（来源名 / 「· 未连接」），不是说明文字：
-                    // 同一行写不下来源时，光看根名分不清是哪台机器。
+                    // 副标题是**身份 + 状态**（来源名 / 「· 未连接」），不是说明文字：
+                    // 光看根名分不清是哪台机器，也看不出它此刻连没连上。
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .ffFont(.sidebarSubtitle)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }

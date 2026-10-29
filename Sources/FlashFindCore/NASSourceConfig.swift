@@ -63,7 +63,13 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         /// `openlist` 于 2026-10-24 在真实实例（v4.1.10 / commit e3c664f）上完成
         /// 登录、列存储、限定目录搜索与分页的实测，证据见
         /// `00-项目管理/任务交付/OL-AUTH-02-OpenList真实契约验证-20261024.md`。
-        public static let selectableVendors: [Vendor] = [.synology, .openlist]
+        ///
+        /// ★ `fnos` 于 2026-10-29 由用户决定**从实验性转入正式**：此前它排在
+        /// `ExperimentalSources` 追加的一批里（默认开关关着 ⇒ 普通用户看不到）。
+        /// 转入的同时必须把 `adapterStatus` 一起改成 `.deviceVerified` ——
+        /// 只加这里会得到「向导里能选、说明里却说还没真机验证」的自相矛盾。
+        /// 顺序 = 界面上的卡片顺序：群晖 / 飞牛 / OpenList。
+        public static let selectableVendors: [Vendor] = [.synology, .fnos, .openlist]
 
         /// 该品牌在闪寻里的接入状态。
         ///
@@ -99,12 +105,13 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             // WebDAV 已在飞牛 fnOS 的 5005 端口上真机跑通完整链路，
             // 故与群晖同列「已验证」。qnap / ugreen 仍只有适配器、无真机证据。
             // OpenList 于 2026-10-24 在真实实例 v4.1.10 上量过登录/列存储/限定目录搜索/分页。
-            case .synology, .webdav, .openlist: return .deviceVerified
+            // fnos：2026-10-28 重写后接进闪寻，2026-10-29 在用户真实设备上跑通
+            //   浏览器授权码登录 → 列共享 → 原生搜索 → 打开结果（1.1.32–1.1.44 连发版的
+            //   全部修复都以它为验证对象），故由「已移植未验证」转正为「已验证」。
+            //   同一轮用户决定把它从实验性开关里移进正式来源（`selectableVendors`），
+            //   两处必须同步改，否则向导能选、说明却说没验过。
+            case .synology, .webdav, .openlist, .fnos: return .deviceVerified
             case .qnap, .ugreen: return .portedUnverified
-            // 飞牛的适配器已下线：真机探测量到它的登录/列目录/搜索全走 WebSocket，
-            // 而既有实现走 HTTP 兼容层（`/api/v1/*` 一律 404）。核心侧的
-            // `retiredVendors` 同样不含它，`hasBrandAdapter` 因此为 false。
-            case .fnos: return .retired
             case .smb, .generic: return .notPorted
             }
         }
@@ -131,6 +138,32 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         /// WebDAV / QNAP / 飞牛 / 绿联的管理口都可以是明文，所以需要这个选择。
         public var allowsPlainHTTPChoice: Bool { self != .synology }
 
+        /// 这一类设备的**登录方式**。
+        ///
+        /// 分两档而不是一个 `requiresPassword` 布尔，因为两者的用户动作完全不同：
+        /// 输密码是一秒钟的事；浏览器授权要切窗口、登录、点授权、再把一串
+        /// 一次性 code 抄回来。界面据此决定摆不摆「账号 / 密码」这两个框 ——
+        /// 给一个用不上的输入框，用户会输一串永远不起作用的东西，
+        /// 然后以为是自己输错了。
+        public enum LoginMethod: Sendable, Equatable {
+            /// 账号 + 密码（部分设备另有动态验证码）。
+            case accountPassword
+            /// 浏览器授权后粘贴一次性授权码；**没有**账号密码这条路。
+            case browserAuthorization
+        }
+
+        /// 飞牛官方协议里**没有账号密码登录**：只有 OAuth 2.0 授权码 + PKCE，
+        /// 而且授权页不回跳（授权地址里没有 `redirect_uri`），一次性 code 只能
+        /// 由用户从页面上抄下来交回来。所以它的登录方式与其余品牌不同。
+        public var loginMethod: LoginMethod {
+            self == .fnos ? .browserAuthorization : .accountPassword
+        }
+
+        /// 连接前是否需要用户提供账号与密码。
+        ///
+        /// 用于「连接」按钮的可用性判定：不需要凭据的品牌，空着密码框也必须能点。
+        public var requiresAccountPassword: Bool { loginMethod == .accountPassword }
+
         /// 该品牌的连接地址是否**可能带路径前缀**。
         ///
         /// WebDAV 是典型：它的端点是服务自己决定的，不在站根上 ——
@@ -150,11 +183,13 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         /// 取值必须与 Dart 侧各适配器的 `capabilities.nativeSearch` 保持一致。
         public var hasNativeSearch: Bool {
             switch self {
-            // fnos 不在其列：它的适配器已从核心下线，没有 `capabilities` 可对齐，
-            // 说它有服务端搜索等于凭空给一个已证伪的路径加能力。
             // openlist 有 `/api/fs/search`（服务端索引搜索），真机实测可用。
-            case .synology, .qnap, .ugreen, .openlist: return true
-            case .fnos, .webdav, .smb, .generic: return false
+            // fnos 有 `appcgi.finder.fileSearch`（服务端文件名索引），
+            // 2026-10-28 在真实设备上量过：搜「报告」得 2711 条、覆盖 1189 个父目录，
+            // 单次上限 5010 条且无分页。**必须与 Dart 侧 `capabilities.nativeSearch`
+            // 一致**，否则界面会把一条真实存在的能力说成没有。
+            case .synology, .qnap, .ugreen, .openlist, .fnos: return true
+            case .webdav, .smb, .generic: return false
             }
         }
 
@@ -171,7 +206,10 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         /// 两者都以「这个来源根本没有 SMB 这一路」为前提，所以判断放在这里，
         /// 而不是在各调用点各写一遍 `vendor == .openlist`。
         public var exposesSMBShares: Bool {
-            self != .openlist
+            // fnos：SMB 共享名映射已被真机 `file.share.list` 证伪（2026-10-29，
+            // 共享是 `vol2/1000/备份` 这类任意文件夹，不是路径第三段），
+            // 打开走下载链（`verifiedFileURL` 的 fnos 分支），不暴露 SMB。
+            self != .openlist && self != .fnos
         }
 
         /// 已接入**且已验证**的原生搜索类型 = 有服务端搜索 ∩ 真机验证过。
@@ -230,8 +268,8 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
                 // 「已知不可用」直接说死，不再用「可以先连试试」把人送去白试。
                 if let blocker = knownBlocker { return blocker }
                 return hasNativeSearch
-                    ? "\(title) 的适配器已经接进闪寻，但**还没在真机上验证过**。可以先连试试；如果这个型号或固件的接口不一样，可能会连不上——真机结果会用来校准适配器。"
-                     : "\(title) 的适配器已经接进闪寻，但**还没在真机上验证过**，而且这个协议不提供服务端搜索。可以先连试试。"
+                    ? "\(title) 的适配器已经接进闪寻，但还没在真机上验证过。可以先连试试；如果这个型号或固件的接口不一样，可能会连不上——真机结果会用来校准适配器。"
+                     : "\(title) 的适配器已经接进闪寻，但还没在真机上验证过，而且这个协议不提供服务端搜索。可以先连试试。"
             case .retired:
                 // 与「没接入」不一样：这里必须说清是**试过、证伪了**，
                 // 否则用户会当成「还没做」而继续等。
@@ -257,11 +295,11 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         public var serviceHint: String {
             switch self {
             case .fnos:
-                return "这一项走的是飞牛的**管理口**接口（管理口在 5666，其登录实际走 WebSocket）。要连飞牛的 **WebDAV 文件服务**（常见 5005），请改选「WebDAV」，并按那项服务自己的协议填。"
+                return "填飞牛管理口的地址与端口（常见 5666，出厂多为明文 HTTP）。连接时会打开浏览器让你在飞牛页面登录并授权——飞牛没有账号密码直连这条路。要连它 5005 上的 WebDAV 文件服务，请改选「WebDAV」。"
             case .webdav:
-                return "填 WebDAV 服务自己的地址与端口。端点不在站点根时（OpenList / Alist 在 /dav）再填下面的「路径」。**多数设备只提供明文 HTTP**：如果浏览器里访问的是 http://，请把下面的协议开关切到明文。"
+                return "填 WebDAV 服务自己的地址与端口。端点不在站点根时（OpenList / Alist 在 /dav）再填下面的「路径」。多数设备只提供明文 HTTP：如果浏览器里访问的是 http://，请把下面的协议开关切到明文。"
             case .openlist:
-                return "填 OpenList **网站本身**的地址与端口（默认 5244）——不是 WebDAV 那个 /dav 端点。用 OpenList 的账号登录。**「搜索位置」要勾具体的存储**：这个服务按目录检索，不勾任何存储就搜不到东西。"
+                return "填 OpenList 网站本身的地址与端口（默认 5244）——不是 WebDAV 那个 /dav 端点。用 OpenList 的账号登录。「搜索位置」要勾具体的存储：这个服务按目录检索，不勾任何存储就搜不到东西。"
             case .synology:
                 return "填 DSM 的地址与端口（走 HTTPS，证书固定），用 NAS 账号登录即可。"
             case .qnap, .ugreen:
@@ -296,7 +334,7 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
             case .smb:
                 return "填提供 SMB 共享的那台机器的地址与端口（默认 445）。"
             case .fnos:
-                return "填飞牛管理口的地址与端口；文件服务请改用「WebDAV」。"
+                return "填飞牛管理口的地址与端口（常见 5666）。搜索走管理口的文件索引，打开结果靠同主机的 SMB 共享。"
             case .generic:
                 return "填这台设备的地址与端口。不确定就先存下来。"
             }
@@ -315,14 +353,14 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
         /// 措辞必须同时成立两件事，少一件都会误导：
         ///   - 「适配器已经下线」 —— 是做过、证伪了，不是「还没做」；
         ///   - 「试过、且注定失败」 —— 拿真机量过，不是「不知道」。
-        /// 由 `VendorKnownBlockerTests.testFnOSBlockerSaysRetiredNotWorkInProgress` 锁着。
+        ///
+        /// ★ 飞牛曾经是这里唯一的条目（旧实现假设 HTTP 兼容层，真机证明走
+        ///   WebSocket + HMAC）。2026-10-28 按官方端点文档重写并直连实测通过，
+        ///   已经移出本名单 —— **能连的东西不能继续告诉用户「注定失败」**。
+        ///   现在没有品牌需要这一条，但保留这个口子：下一个被证伪的品牌
+        ///   要有地方如实写「为什么用不了」。
         public var knownBlocker: String? {
-            switch self {
-            case .fnos:
-                return "飞牛 fnOS 的适配器**已经下线**：真机探测证明它与真实设备的协议不符——闪寻的实现走 HTTP 兼容层，而真机上量到，飞牛的登录 / 列目录 / 搜索全部走 WebSocket（`ws://<host>/websocket?type=main`），HTTP 侧 `/api/v1/*` 一律 404。**这跟你端口和账号怎么填无关。**要连飞牛的 **WebDAV 文件服务**（5005 上的那个），请把类型改成「WebDAV」。"
-            default:
-                return nil
-            }
+            nil
         }
     }
 
@@ -466,6 +504,26 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
     /// 主机名（不含端口），用于 SMB 挂载匹配与 openTarget。
     public var hostName: String { EndpointProbe.host(of: host) ?? "" }
 
+    /// 落盘前的必填项。返回要在状态栏显示的那句话；`nil` 表示可以保存。
+    ///
+    /// 只查**地址**与**账号**两项。端口与密码不在这里判：落盘不依赖密码，
+    /// 地址里写的 `host:port` 也算有效端口（`commitDraft` 自己会判）。
+    ///
+    /// ★ 账号这一条只对**账号密码**品牌成立。飞牛（fnOS）走浏览器授权，
+    ///   界面上根本不显示账号框；无条件要求账号，等于让一条已经连上、
+    ///   已经列出目录的授权连接永远存不下去 —— 底部只剩一句「请填写 NAS 账号」，
+    ///   而那个输入框在界面上并不存在（2026-10-29 用户截图当场撞上）。
+    public var saveBlockingReason: String? {
+        var normalized = self
+        normalized.normalizeHost()
+        if normalized.hostName.isEmpty { return "请填写 NAS 地址" }
+        guard normalized.vendor.requiresAccountPassword else { return nil }
+        if normalized.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请填写 NAS 账号"
+        }
+        return nil
+    }
+
     /// 两份配置是不是**同一条连接**（只看连接参数，不看名字）。
     ///
     /// `NASConnectionManager.rebuild` 原本拿 `existing.config == source` 决定「复用还是重建」。
@@ -533,36 +591,38 @@ public struct NASSourceConfig: Codable, Identifiable, Hashable {
     /// 端口判定一律走 `hasEffectivePort`：用户把 `192.0.2.96:5001` 整串
     /// 写进地址栏时端口字段是空的，只看字段会把「明明填了端口」判成未配置。
     public var isSearchConfigured: Bool {
-        !hostName.isEmpty && hasEffectivePort
-            && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !hostName.isEmpty && hasEffectivePort && accountConfigured
             && !scopes.isEmpty
             && scopes.allSatisfy { $0.hasPrefix("/") && $0 != "/" }
     }
     /// 是否具备发起连接的最低配置（尚可未选搜索位置）。
     public var isConnectConfigured: Bool {
-        !hostName.isEmpty && hasEffectivePort
-            && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !hostName.isEmpty && hasEffectivePort && accountConfigured
+    }
+
+    /// 账号这一项算不算填好了。
+    ///
+    /// ★ 只有**账密品牌**才要求账号非空。飞牛（fnOS）走浏览器授权，凭据是用户
+    /// 从授权页抄回来的一次性授权码，界面上**根本没有账号输入框**
+    /// （`NASSourceWizardView` 只在 `requiresAccountPassword` 时画那一排）。
+    /// 无条件要求账号，后果和 2026-10-29 那条「粘贴授权码后还要填 NAS 账号」
+    /// 一模一样：连接成功了、位置也选好了，来源行却永远写着
+    /// 「需要填写地址与账号」，后台也不肯自动重连（`isConnectConfigured` 为假）。
+    private var accountConfigured: Bool {
+        !vendor.requiresAccountPassword
+            || !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
 public extension NASSourceConfig {
-    /// 规范化用户输入：去掉协议前缀、路径与空白；地址里若带了端口，顺手记进端口字段。
-    ///
-    /// 端口不再由「自动探测」决定（探测已在自签名证书的 NAS 上证明不可靠），
-    /// 但用户把 `192.0.2.96:5001` 整串写进地址是常见写法，
-    /// 所以这里把端口**搬**到端口字段，让后续流程与界面显示一致。
+    /// 将完整地址中的主机、端口和支持的路径分别存入配置。
     mutating func normalizeHost() {
         var text = host.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { host = ""; return }
         for scheme in ["https://", "http://"] where text.lowercased().hasPrefix(scheme) {
             text = String(text.dropFirst(scheme.count)); break
         }
-        // 地址里顺带写的路径（`http://host:5244/dav`）：
-        // 对**允许填路径的品牌**把它搬进 `basePath`，而不是悄悄丢掉。
-        //
-        // 用户从 OpenList / Alist 复制来的就是整条 URL。丢掉 `/dav` 之后连接会
-        // 指向站点根 —— 界面看不出任何异常，只是连不上；而这里恰好是唯一
-        // 能把这层意思保留下来的地方。
+        // 保留支持路径的品牌粘贴进来的 /dav 等前缀。
         if let slash = text.firstIndex(of: "/") {
             if vendor.allowsBasePath, let derived = BasePathField.parse(String(text[slash...])) {
                 basePath = derived
@@ -570,7 +630,7 @@ public extension NASSourceConfig {
             text = String(text[..<slash])
         }
         if let at = text.lastIndex(of: "@") { text = String(text[text.index(after: at)...]) }
-        // 去掉用户可能顺手填的端口，端口一律由探测决定，避免填错就再也连不上。
+        // 地址中填写的有效端口优先存入端口字段。
         if let colon = text.lastIndex(of: ":"), text[colon...].dropFirst().allSatisfy({ $0.isNumber }),
            let typed = Int(text[text.index(after: colon)...]), (1...65535).contains(typed) {
             port = typed
@@ -580,361 +640,3 @@ public extension NASSourceConfig {
     }
 }
 
-/// 连接地址里的**路径前缀**输入框（WebDAV 专用）的「文本 ↔ 路径」转换。
-///
-/// 为什么要有这个字段：WebDAV 的服务端点不在站根上 —— OpenList / Alist 在
-/// `/dav`，NextCloud 在 `/remote.php/dav`。只让用户填 `host:port`，他就
-/// **没有任何办法**表达这件事，只能看着「连不上」而不知道差在哪。
-///
-/// 解析规则做成纯函数放在这里，理由与 `PortField` 相同：App 层是
-/// executableTarget，测试目标 import 不到，规则留在视图里就锁不住。
-public enum BasePathField {
-    /// 解析用户填写的路径。
-    ///
-    /// 宽容到「整条 URL 粘进来也能用」，因为这是最常见的输入方式：
-    ///   * 有 `://` 时丢掉 scheme + host 部分（`http://h:5244/dav` → `/dav`）；
-    ///   * 丢掉查询串与锚点（`?` 之后的都不属于路径）；
-    ///   * 丢掉 `.` 与 `..` 段 —— 它们只会拼出「越过 baseUrl」的地址；
-    ///   * 合并重复斜杠、补前导斜杠、去尾随斜杠。
-    ///
-    /// 返回 `nil` 表示**等价于没填**（空串、纯空白、或只剩一个 `/`），
-    /// 让调用方能把它当成「走站点根」而不是「填了个空路径」。
-    public static func parse(_ text: String) -> String? {
-        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if body.isEmpty { return nil }
-        if let range = body.range(of: "://") {
-            // 丢掉 scheme://host[:port]，只留路径。
-            body = String(body[range.upperBound...])
-            if let slash = body.firstIndex(of: "/") { body = String(body[slash...]) } else { return nil }
-        }
-        if let cut = body.firstIndex(where: { $0 == "?" || $0 == "#" }) { body = String(body[..<cut]) }
-        let segments = body
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
-            .filter { $0 != "." && $0 != ".." }
-        guard !segments.isEmpty else { return nil }
-        return "/" + segments.joined(separator: "/")
-    }
-
-    /// 反方向：把路径还原成输入框文本。没填时显示空串，让占位提示生效。
-    public static func text(for path: String?) -> String { parse(path ?? "") ?? "" }
-}
-
-/// 来源在产品层的可见状态。刻意与底层 phase 解耦：
-/// 普通用户只需要知道「正常 / 连接中 / 离线 / 需要处理」。
-public enum NASSourceHealth: String, Sendable {
-    case unconfigured, connecting, ready, offline, needsAttention
-    public var title: String {
-        switch self {
-        case .unconfigured: return "未配置"
-        case .connecting: return "正在连接"
-        case .ready: return "正常"
-        case .offline: return "离线"
-        case .needsAttention: return "需要处理"
-        }
-    }
-    public var symbol: String {
-        switch self {
-        case .unconfigured: return "circle.dashed"
-        case .connecting: return "arrow.triangle.2.circlepath"
-        case .ready: return "checkmark.circle.fill"
-        case .offline: return "circle.dashed"
-        case .needsAttention: return "exclamationmark.circle.fill"
-        }
-    }
-}
-
-public struct NASSourceStatus: Sendable {
-    public var health: NASSourceHealth = .unconfigured
-    public var message = ""
-    public var availableShares: [String] = []
-    public var selectedScope = ""
-    public var discoveredPort: Int?
-    public var searching = false
-    /// 出问题时用户该做的那**一件**事。
-    ///
-    /// `message` 是给详情页读的完整句子；这一项是给列表行决定「画哪个按钮」用的。
-    /// 两者分开，是因为光看文案推不出按钮——「读取共享目录失败」与
-    /// 「本机没有保存密码，请连接一次」都落在 `needsAttention`，
-    /// 但前者要去继续设置，后者是要登录。写成文本匹配一定会错。
-    /// `nil` 表示当前没有需要用户处理的事。
-    public var requiredAction: NASSourceRequiredAction?
-    /// 最近一次失败是不是因为设备要求 OTP。
-    ///
-    /// 这是一个**状态标记**，不是按钮本身。标记为 true 时，
-    /// 详情页的「重新登录…」要先弹 OTP 输入框，再把码带进去重连；
-    /// 连接成功后必须清掉，否则用户下次点重新登录还会被问 OTP。
-    public var needsOTP: Bool = false
-    /// 最近一次失败是不是**上一次那个码被拒了**（而不是「还没填过码」）。
-    ///
-    /// `needsOTP` 只回答「要不要问码」，回答不了「问的时候该说什么」。
-    /// 用户点取消、过一会儿再点「登录」时，弹窗必须还能说出
-    /// 「动态码输入错误，请再次输入」——那件事只存在于状态里，不在调用栈里。
-    public var otpRejected: Bool = false
-    public init() {}
-}
-
-/// 自绘密码框（AppKit `NSSecureTextField` 包 SwiftUI）的回写规则。
-///
-/// 真实故障：密码框「每敲一个字符就被截回上一个长度」，表现为只能打一个字。
-/// 成因是 `NSViewRepresentable` 的 Coordinator 只创建一次，
-/// 它持有的 `@Binding` 在外层视图重建后指向旧存储位置，
-/// 于是**用户输入被写进了一个没人读的地方**；
-/// 随后 `updateNSView` 拿旧值回写文本框，把刚输入的字符吃掉。
-///
-/// 修复分两层：① 每次 `updateNSView` 都把最新绑定交回 Coordinator；
-/// ② 用户正在编辑时**绝不回写**。第 ② 条是兜底——
-/// 即使绑定再次出现异常，也不会在输入过程中打断用户。
-///
-/// 这里把第 ② 条提炼成可测的纯函数，因为 App 层的 `NSViewRepresentable`
-/// 无法被测试目标 import，而这个规则值得被锁住。
-public enum SecureFieldEcho {
-    /// 是否应该把绑定值写回文本框。
-    ///
-    /// - Parameters:
-    ///   - fieldValue: 文本框当前显示的内容。
-    ///   - boundValue: 绑定的值。
-    ///   - isEditing: 用户是否正在此框内输入（`currentEditor() != nil`）。
-    public static func shouldWrite(fieldValue: String, boundValue: String, isEditing: Bool) -> Bool {
-        // 编辑中一律不回写：回写会移动光标与选区，并可能吞掉刚输入的字符。
-        if isEditing { return false }
-        return fieldValue != boundValue
-    }
-}
-
-/// 搜索浮窗的会话记忆策略。
-///
-/// 需求：关闭后短时间内再次打开，保留上一次的查询与结果——
-/// 常见场景是「关掉 → 去别的应用复制一行 → 回来接着看同一个结果」，
-/// 这时把词重敲一遍很烦。但保留太久又会让人误以为搜的还是那个词。
-///
-/// 所以两条规则，缺一不可：
-/// 1. **时间窗内**才保留（`isWithinMemoryWindow`）；
-/// 2. **结果仍有效**才保留（`shouldRestore`）——
-///    搜索范围、启用的来源、显示隐藏文件等设置一旦变了，
-///    旧结果就不再对应当前状态，拿出来显示等于骗人。
-public enum SearchSessionMemory {
-    /// 保留时长 30 秒。够覆盖一次「关掉—复制—回来」，又不至于跨天还挂着旧结果。
-    public static let windowSeconds: TimeInterval = 30
-
-    /// 距离隐藏是否仍在保留期内。
-    public static func isWithinMemoryWindow(hiddenAt: Date?, now: Date = Date()) -> Bool {
-        guard let hiddenAt else { return false }
-        let elapsed = now.timeIntervalSince(hiddenAt)
-        // 负数表示系统时间被回拨（少见但可能发生），一律当作仍在窗口内，
-        // 免得用户莫名其妙丢掉正在看的结果。
-        return elapsed <= windowSeconds
-    }
-
-    /// 是否应该恢复上一次的查询与结果。
-    ///
-    /// - Parameters:
-    ///   - hiddenAt: 浮窗上次隐藏的时刻；`nil` 表示从未隐藏过。
-    ///   - hasQuery: 上一次是否有查询词。
-    ///   - resultsAreValid: 上一次的结果是否仍对应当前设置
-    ///     （搜索范围、启用的来源、显示隐藏文件等都没变）。
-    public static func shouldRestore(hiddenAt: Date?, hasQuery: Bool, resultsAreValid: Bool,
-                                     now: Date = Date()) -> Bool {
-        guard isWithinMemoryWindow(hiddenAt: hiddenAt, now: now) else { return false }
-        guard hasQuery else { return false }
-        // 结果已过期时不能恢复：宁可让用户重搜一次，也不能显示不对应的结果。
-        return resultsAreValid
-    }
-}
-
-/// 端口输入框的「文本 ↔ 端口值」转换。
-///
-/// 端口字段不能直接绑 `Int`（`TextField(value:format: .number)`）：
-/// macOS 上带 `format:` 的 TextField 与普通 `TextField(text:)` 的写回时机不同，
-/// 用户敲完 `5001` 界面看着已经有值，绑定的 `Int` 可能还没更新，
-/// 于是依赖 `port > 0` 的「连接」按钮仍然是灰的（要等失焦或回车才亮）。
-///
-/// 改为让输入框始终是字符串、每次按键即时解析，按钮状态就能实时跟随。
-/// 解析规则做成纯函数放在这里，因为 App 层是 executableTarget、测试目标 import 不到。
-public enum PortField {
-    /// 解析用户输入的端口文本。非数字字符一律忽略（`5a0` 视作 `50`）。
-    /// 超出 1–65535 或解析不出数字时返回 `nil`。
-    public static func parse(_ text: String) -> Int? {
-        let digits = text.filter { $0.isNumber }
-        guard let value = Int(digits), (1...65535).contains(value) else { return nil }
-        return value
-    }
-
-    /// 反方向：把端口值还原成输入框文本。无效端口显示空串，让占位提示生效。
-    public static func text(for port: Int) -> String {
-        (1...65535).contains(port) ? String(port) : ""
-    }
-}
-
-/// 「连接」按钮是否可用的判定。
-///
-/// 这个判定原来写在视图里（`.disabled(model.draftBusy || host.isEmpty || … || model.nativeNASPassword.isEmpty)`），
-/// 导致一个自我失效的循环：
-///
-/// 1. 用户敲第一个字符 → `nativeNASPassword` 变化；
-/// 2. 密码框下方那句「将使用钥匙串中已保存的密码」是**依赖同一值**的条件视图，
-///    真假一变 SwiftUI 就重建整个 `VStack`，`PlainSecureField` 被销毁重建；
-/// 3. 重建后的按钮可用性判断拿到的是**刚重建、还没回写的空值**；
-/// 4. 于是按钮变灰——用户明明填了密码却点不了。
-///
-/// 关键教训：**控件的可用性判断不要放在会因该控件输入而重建的视图层级里。**
-/// 判定必须放在模型层、用不依赖视图重建的状态计算。
-public enum ConnectButtonState {
-    /// 能否发起连接。
-    ///
-    /// - Parameters:
-    ///   - busy: 是否有连接正在进行。
-    ///   - host: 规范化后的主机名（已通过格式校验）。
-    ///   - hasPort: **有效**端口是否可用。调用方应传 `hasEffectivePort`
-    ///     ——端口写在地址里（`192.0.2.96:5001`）时端口字段可能是空的，
-    ///     只看字段会让按钮永远点不亮。
-    ///   - username: 账号是否非空。
-    ///   - hasTypedPassword: 本次是否输入了密码。
-    ///   - hasStoredPassword: 钥匙串里是否有可用密码。
-    public static func canConnect(busy: Bool, host: String, hasPort: Bool,
-                                  username: String, hasTypedPassword: Bool,
-                                  hasStoredPassword: Bool) -> Bool {
-        if busy { return false }
-        if host.isEmpty || !hasPort { return false }
-        if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
-        // 密码二选一：本次输入的，或钥匙串里已有的。
-        return hasTypedPassword || hasStoredPassword
-    }
-
-    /// 按钮不可用时给用户的一句话，说明到底缺什么。
-    ///
-    /// 之前按钮只是「变灰」，用户完全不知道为什么点不了——
-    /// 灰按钮不解释自己，是最容易被当成程序坏了的界面。
-    public static func disabledReason(busy: Bool, host: String, hasPort: Bool,
-                                       username: String, hasTypedPassword: Bool,
-                                       hasStoredPassword: Bool) -> String? {
-        if busy { return nil }   // 正在连接，不需要解释
-        if host.isEmpty { return "请填写 NAS 地址" }
-        if !hasPort { return "请填写端口（也可以直接写进地址，像 192.0.2.96:5001）。闪寻不做自动探测——自签名证书的 NAS 在探测阶段就会被误判为不可用。" }
-        if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写 NAS 账号" }
-        if !hasTypedPassword && !hasStoredPassword { return "请输入密码" }
-        return nil
-    }
-}
-
-/// 「断开之后点重新连接」该怎么走。
-///
-/// ## 为什么要有这条判定
-///
-/// 用户断开一台 NAS 之后想连回来，遇到的是一条**写死的**向导提示
-/// 「请输入密码以重新连接」——即使本机凭据文件里就存着这把密码。
-/// 一半的故障是这句话造成的（用户以为必须重输，实际不必）；
-/// 另一半是凭据真的不在，那句「请输入密码」又没说是为什么。
-///
-/// 所以把「能不能用已保存的密码」做成一条显式判定，结果只有三种：
-/// 有 → 静默用；没有但用户勾过记住 → 说清为什么没有、输一次以后就不用了；
-/// 没勾记住 → 说清这是他自己的选择，以及勾上以后会怎样。
-public enum ReconnectRoute: Equatable {
-    /// 本机有可用密码：直接静默重连，**不问用户**。
-    case storedCredential
-    /// 必须输一次密码，附带一句说清为什么。
-    case askForPassword(reason: String)
-}
-
-public enum ReconnectEntryState {
-
-    /// 断开后「重新连接」的路由。
-    ///
-    /// - Parameters:
-    ///   - rememberPassword: 该来源配置里是否勾了「记住这台 NAS 的密码」。
-    ///   - hasStoredCredential: 本机凭据文件里现在是否真有这把密码。
-    ///     只看前者是不够的：勾了却没存上（保存失败、被清除）时，
-    ///     界面若还宣称「有已保存的密码」就是在骗人。
-    public static func route(rememberPassword: Bool, hasStoredCredential: Bool) -> ReconnectRoute {
-        if rememberPassword && hasStoredCredential { return .storedCredential }
-        if !rememberPassword { return .askForPassword(reason: notRememberedReason) }
-        return .askForPassword(reason: missingStoredReason)
-    }
-
-    /// 没勾「记住密码」时的说明。不许暗示「程序忘了」——这是用户的选择。
-    public static let notRememberedReason =
-        "这台 NAS 没有勾选「记住这台 NAS 的密码」，需要输入一次。"
-        + "勾上之后，断开再重连就不用再输了。"
-
-    /// 勾了却没存上时的说明。
-    ///
-    /// 措辞刻意不猜原因（「没存上」「被清除」都列出来）：事后从凭据文件里
-    /// 分辨不出是哪一种，写成确定语气就是编造。
-    public static let missingStoredReason =
-        "本机凭据文件里没有这台 NAS 的密码（可能上次没存上，或刚被清除）。"
-        + "请在这里输入一次；连接成功且勾了「记住密码」，以后重连会直接连上。"
-
-    public static func canReconnectSilently(rememberPassword: Bool, hasStoredCredential: Bool) -> Bool {
-        route(rememberPassword: rememberPassword, hasStoredCredential: hasStoredCredential) == .storedCredential
-    }
-}
-
-/// 来源卡片行内按钮该显示「断开」还是「重新连接」。
-///
-/// ⚠️ UI 简化后，来源行上**已经不再有**这两个按钮（断开/重连属于
-/// NAS 管理操作，已从列表撤下，异常时才由 `NASSourceRowModel` 给一个按钮）。
-/// 这条判定与其单测**刻意保留**：`disconnectSource` 仍然存在且被
-/// `NASDisconnectIsolationTests` 覆盖，将来若重新暴露断开入口，
-/// 这里那套「不能只看 `ready`」的结论必须原样复用，不要再重新踩一遍。
-///
-/// ## 为什么不能只看 Provider 的 `ready`
-///
-/// 用户点「断开」后，界面上「已断开」的状态是**同步**写入的，
-/// 但 Provider 的 `ready` 要等 `disconnectOne` 异步收尾（含向核心发 disconnect 命令）
-/// 跑完才翻转。若按钮只认 `ready`，就会出现用户报障的那一幕：
-/// 文字说「已断开」，按钮却还是「断开」，得再点一次才能触发重渲染、露出「重新连接」。
-/// 断开意图一旦确立（状态已标记离线），按钮应**立刻**切到「重新连接」，
-/// 不让用户等网络往返。
-public enum NASRowAction: Equatable {
-    case disconnect
-    case reconnect
-
-    /// - Parameters:
-    ///   - ready: Provider 当前是否处于已连接（`ready == true`）。
-    ///   - markedOffline: 该来源的状态是否已被显式标记为离线（用户点了断开，
-    ///     或断开流程已确立）。此时即使 `ready` 还没走完异步收尾，
-    ///     也必须给「重新连接」。
-    public static func decide(ready: Bool, markedOffline: Bool) -> NASRowAction {
-        if ready && !markedOffline { return .disconnect }
-        return .reconnect
-    }
-}
-
-/// 「这次失败该不该提示用户改用明文 HTTP 重试」的判定。
-///
-/// ## 为什么需要这条独立判定
-///
-/// 大量 NAS 的 WebDAV / 管理口**只提供明文 HTTP**（已在真机上验证的飞牛 5005 就是）。
-/// 而 WebDAV 品牌的协议开关默认是**加密**（`Vendor.defaultInsecureHTTP == false`），
-/// 于是「端口填对了、账号也对」仍然连不上，报出来的原因是一句
-/// 「TLS 握手失败」——用户读不出「去把那个开关打开」这一步。
-///
-/// 更隐蔽的是：切品牌时开关会被清回新品牌的默认值（这是为了修
-/// 「在飞牛上开过明文的来源，切到群晖后仍按明文连」那个历史故障，不能去掉）。
-/// 用户在飞牛上开了明文、再切到 WebDAV，开关就被悄悄清掉了。
-///
-/// 所以**失败之后**再给一次一键改写的机会：不猜、不自动降级，
-/// 但仍然把「要不要不加密」的决定权留在用户手里（点一下才算数）。
-public enum PlainHTTPRetryOffer {
-
-    /// 是否应当提示。
-    ///
-    /// - Parameters:
-    ///   - allowsPlainHTTPChoice: 该品牌是否允许用户选协议（群晖不允许，见 `Vendor.allowsPlainHTTPChoice`）。
-    ///   - usesPlainHTTP: 本次尝试实际用的协议。
-    ///   - coreApiCode: 核心返回的 `apiCode`。**有值说明请求已经打到设备并拿到了 HTTP 状态码**
-    ///     （例如 401）——链路是通的，问题不在协议，就不该把人往明文上引。`nil` 才是传输层没走通。
-    ///   - isCoreFailure: 失败是否来自核心的适配器（`CoreError`）。
-    ///     其它错误（缺资源、超时兜底、内部断言失败）与协议无关，不提示。
-    public static func shouldOffer(allowsPlainHTTPChoice: Bool, usesPlainHTTP: Bool,
-                                   coreApiCode: Int?, isCoreFailure: Bool) -> Bool {
-        guard allowsPlainHTTPChoice, !usesPlainHTTP, isCoreFailure else { return false }
-        return coreApiCode == nil
-    }
-
-    /// 提示文案。**把核心给的原话留在前面**，用户已经能从那里看到真因。
-    public static func message(reason: String) -> String {
-        "\(reason)\n\n连不上的原因很可能在协议上：不少 NAS 的 WebDAV / 管理口只提供**明文 HTTP**。"
-            + "闪寻不会替你自动换成不加密的连接——要试的话，点下面的按钮，它会打开「使用明文 HTTP」再重连一次。"
-    }
-}

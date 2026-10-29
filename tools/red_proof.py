@@ -864,12 +864,12 @@ MUTATIONS = [
     ('已下线的品牌仍算「有适配器」（界面放行、核心接不住）', FILES['NASSourceConfig'],
      '            case .retired, .notPorted: return false',
      '            case .notPorted: return false\n            case .retired: return true'),
-    ('飞牛退回「已接入未验证」（抹掉真机结论）', FILES['NASSourceConfig'],
-     '            case .fnos: return .retired',
-     '            case .fnos: return .portedUnverified'),
-    ('已下线的文案说回「还没接入」（用户会以为等一等就有）', FILES['NASSourceConfig'],
-     '                return "飞牛 fnOS 的适配器**已经下线**',
-      '                return "飞牛 fnOS 的适配器**还没接进闪寻**'),
+    ('飞牛重新标为已下线（掩盖已接入状态）', FILES['NASSourceConfig'],
+     '            case .qnap, .ugreen, .fnos: return .portedUnverified',
+     '            case .qnap, .ugreen: return .portedUnverified\n            case .fnos: return .retired'),
+    ('未验证适配器误称已通过真机验证', FILES['NASSourceConfig'],
+     '? "\\(title) 的适配器已经接进闪寻，但还没在真机上验证过。',
+     '? "\\(title) 的适配器已经接进闪寻，而且已在真机验证。'),
     # ---- 2026-10-17 §2.6 Preview/Fixture 的 Release 隔离 ----
     # 用 `#if true` 而不是删掉包裹：删了会因多余的 #endif 编译失败，
     # 那样红的是编译器而不是断言，验证不到「这条测试真的会红」。
@@ -3101,8 +3101,8 @@ EXPECTED = {
     # ---- 2026-10-17 第二阶段：工作区路径 / 已下线品牌不下发 ----
     'testDevelopmentStateDirectoryStaysInsideTheBuildDirectory',
     'testAdapterStatusKeepsRetiredSeparateFromNeverPorted',
-    'testRetiredVendorMessageDoesNotSoundLikeWorkInProgress',
-     'testFnOSBlockerSaysRetiredNotWorkInProgress',
+    'testFnOSIsPortedAgainAndSaysItIsNotPasswordLogin',
+    'testPortedUnverifiedMessageIsHonest',
      # ---- 2026-10-17 §2.6 Preview/Fixture 的 Release 隔离 ----
      'testPreviewEvidenceFacilitiesAreExcludedFromReleaseBuilds',
     # ---- clean clone 下不许产出缺 NAS 运行时的 App（2026-10-17）----

@@ -43,4 +43,32 @@ public enum NASCredentialPick {
         }
         return nil
     }
+
+    /// 「登录不靠密码」品牌（fnOS）**没有**独立的取值函数：
+    /// 它的凭据就是 sessionSecret 原样进 `password`、otp 恒为 nil，
+    /// 两行就能写清的逻辑不值得一个包装（2026-10-29 审查收敛）。
+    /// 判定「哪些品牌走这条路」住在向导的分支里，那里有上下文。
+}
+
+/// 连接成功之后，凭据槽位里该存哪一串东西。
+///
+/// 槽位的语义是「**下次登录所需的那一串东西**」，不是「密码」：
+/// 账密品牌是密码，飞牛（fnOS）则是 OAuth 换来的 refresh token
+/// （它根本没有密码）。核心在登录成功后会把后者交上来（`sessionSecret`）。
+///
+/// ★ 判定放在 Core 而不是向导里，因为它藏过一个「看起来成功、其实没存上」的形态：
+///   对飞牛存用户输入的密码，存到的是空串 —— 界面一路显示「已记住」，
+///   下次启动照样要重新授权，而用户无从判断是没存上还是被清了。
+public enum NASCredentialSave {
+    /// - Parameters:
+    ///   - sessionSecret: 核心交上来的续期凭据；账密品牌恒为 `nil`。
+    ///   - typedPassword: 用户这次输入的密码。
+    /// - Returns: 该存的那一串；两者都为空时返回 `nil`（调用方应当如实报「没存上」，
+    ///   而不是存一个空串假装成功）。
+    public static func pick(sessionSecret: String?, typedPassword: String) -> String? {
+        if let secret = sessionSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !secret.isEmpty { return secret }
+        if !typedPassword.isEmpty { return typedPassword }
+        return nil
+    }
 }

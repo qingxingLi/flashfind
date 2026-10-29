@@ -141,6 +141,20 @@ final class NASSourceConfigTests: XCTestCase {
         XCTAssertTrue(config.isConnectConfigured)
     }
 
+    /// 飞牛（fnOS）走浏览器授权，没有账号框 ⇒ 不能拿「账号为空」判它没配好。
+    ///
+    /// 真实报障（2026-10-29 用户截图）：来源行写着「需要填写地址与账号」，
+    /// 但那时授权已经通过、搜索也出结果了 —— 账号框在飞牛的界面上根本不存在。
+    /// 同一条判定还挡着后台自动重连（`quietConnectable` 要求 `isConnectConfigured`），
+    /// 于是每次重启闪寻，飞牛都不会自己连回来。
+    func testFnOSIsConfiguredWithoutAccount() {
+        var config = NASSourceConfig(vendor: .fnos, host: "192.0.2.96", port: 5666)
+        XCTAssertTrue(config.isConnectConfigured, "飞牛没有账号这一项")
+        XCTAssertFalse(config.isSearchConfigured, "还没选搜索位置时不算可搜索")
+        config.scopes = ["/vol1/1000"]
+        XCTAssertTrue(config.isSearchConfigured, "选了位置就该算可搜索")
+    }
+
     func testDisplayNameFallsBackToVendor() {
         XCTAssertEqual(NASSourceConfig(name: "").displayName, "群晖 Synology")
         XCTAssertEqual(NASSourceConfig(name: "  办公室 NAS  ").displayName, "办公室 NAS")
@@ -970,6 +984,79 @@ final class ConnectButtonStateTests: XCTestCase {
                 XCTAssertNotNil(reason, "不能点必须说明原因（busy=\(busy) host=\(host) port=\(hasPort) user=\(username) typed=\(typed)）")
             }
         }
+    }
+
+    // MARK: 不需要账号密码的品牌（fnOS 浏览器授权）
+
+    /// 飞牛走 OAuth 授权码，没有账号密码这条路。
+    /// 拿「请填写账号」「请输入密码」去拦它，等于让一颗本该可用的按钮永远灰着。
+    func testCredentialFreeBrandCanConnectWithEmptyAccountAndPassword() {
+        XCTAssertTrue(ConnectButtonState.canConnect(busy: false, host: "192.0.2.96",
+                                                    hasPort: true, username: "",
+                                                    hasTypedPassword: false, hasStoredPassword: false,
+                                                    requiresCredential: false),
+                      "空账号空密码也必须能点——它要的是授权，不是密码")
+        XCTAssertNil(ConnectButtonState.disabledReason(busy: false, host: "192.0.2.96",
+                                                        hasPort: true, username: "",
+                                                        hasTypedPassword: false, hasStoredPassword: false,
+                                                        requiresCredential: false),
+                     "不需要凭据时不该报「请填写账号」")
+        // 缺地址/端口照样拦：免凭据 ≠ 免地址。
+        XCTAssertFalse(ConnectButtonState.canConnect(busy: false, host: "",
+                                                     hasPort: true, username: "",
+                                                     hasTypedPassword: false, hasStoredPassword: false,
+                                                     requiresCredential: false))
+    }
+
+    /// 默认值必须保持旧行为：不传 `requiresCredential` 的老调用点
+    /// （账密品牌）仍然要求账号与密码。
+    func testDefaultStillRequiresCredential() {
+        XCTAssertFalse(ConnectButtonState.canConnect(busy: false, host: "192.0.2.96",
+                                                     hasPort: true, username: "",
+                                                     hasTypedPassword: false, hasStoredPassword: false),
+                       "默认必须要求凭据，否则账密品牌的按钮会被放开")
+    }
+
+    // MARK: 登录方式（哪类品牌没有账号密码）
+
+    /// 飞牛官方协议只有 OAuth 授权码 + PKCE（授权页不回跳）。
+    /// 界面据此隐藏账号/密码两框 —— 摆一个用不上的输入框，
+    /// 用户会认认真真输一串永远不起作用的东西。
+    func testOnlyFnOSLogsInThroughBrowserAuthorization() {
+        XCTAssertEqual(NASSourceConfig.Vendor.fnos.loginMethod, .browserAuthorization)
+        for vendor in NASSourceConfig.Vendor.allCases where vendor != .fnos {
+            XCTAssertEqual(vendor.loginMethod, .accountPassword,
+                           "\(vendor.title) 仍是账号密码登录")
+            XCTAssertTrue(vendor.requiresAccountPassword)
+        }
+        XCTAssertFalse(NASSourceConfig.Vendor.fnos.requiresAccountPassword)
+    }
+
+    /// 保存校验不许向「没有账号密码」的品牌要账号。
+    ///
+    /// 2026-10-29 用户截图：飞牛授权成功、已列出目录、位置也勾好了，
+    /// 点「完成」底部只有一句「请填写 NAS 账号」——而账号输入框在飞牛这一步
+    /// 根本不显示。校验写在 App 层时无条件要求账号，于是这条连接永远存不下去。
+    func testSaveBlockerRequiresAccountOnlyForAccountPasswordVendors() {
+        // 飞牛：授权登录、没有账号字段，地址齐了就该能存。
+        let fnos = NASSourceConfig(vendor: .fnos, host: "192.0.2.2:5666", username: "")
+        XCTAssertNil(fnos.saveBlockingReason, "飞牛走授权，不该要求 NAS 账号")
+
+        // 地址仍是必填（这一条对谁都不放水）。
+        var noHost = fnos
+        noHost.host = ""
+        XCTAssertEqual(noHost.saveBlockingReason, "请填写 NAS 地址")
+
+        // 协议前缀 + 路径 + 端口都写在地址里时，也算填过地址。
+        let messy = NASSourceConfig(vendor: .fnos, host: "http://192.0.2.2:5666/")
+        XCTAssertNil(messy.saveBlockingReason, "normalizeHost 之后主机名非空，不该报地址")
+
+        // 账密品牌照旧：账号空就拦，填了就放。
+        let synology = NASSourceConfig(vendor: .synology, host: "192.0.2.96:5001", username: "")
+        XCTAssertEqual(synology.saveBlockingReason, "请填写 NAS 账号")
+        let filled = NASSourceConfig(vendor: .synology, host: "192.0.2.96:5001",
+                                     username: "fixture-user")
+        XCTAssertNil(filled.saveBlockingReason)
     }
 }
 

@@ -177,3 +177,94 @@ final class OpenTargetWebTests: XCTestCase {
         XCTAssertFalse(row.canOpen, "SMB 行必须等挂载核对后才能说 canOpen")
     }
 }
+
+/// fnOS 打开链（2026-10-29 用户定：SMB > 网页 > 右键下载）。
+///
+/// 共享名来自**设备侧映射**（核心的 `file.share.list`/`file.share.info`），
+/// 不在授权 scopes（卷根）里；网页兜底是**站点首页**（飞牛没有能定位到
+/// 文件的网页地址），不满足「路径逐字相等」——两处都只对 fnOS 放宽。
+@MainActor
+final class FnosOpenTargetTests: XCTestCase {
+
+    private final class StubBridge: MyNASBridgeTransport {
+        func request(_ command: String, sourceID: String, queryID: String,
+                     fields: [String: Any], event: (([String: Any]) -> Void)?) async throws -> [String: Any] {
+            switch command {
+            case "discover": return ["event": "capabilities"]
+            case "login": return ["event": "authState", "state": "scopeReady", "isManager": false,
+                                  "webFileURL": "http://fn.example.invalid/"]
+            case "selectScope": return ["event": "scopeState", "state": "scopeReady", "scopes": ["/vol1/1000"]]
+            default: return [:]
+            }
+        }
+    }
+
+    private func provider(host: String = "fn.example.invalid") async throws -> NASSearchProvider {
+        var config = NASSourceConfig(vendor: .fnos, host: host, port: 80,
+                                     username: "tester", scopes: ["/vol1/1000"])
+        config.usePlainHTTP = true
+        let subject = NASSearchProvider(bridge: StubBridge(), config: config, port: 80)
+        try await subject.login(account: "tester", password: "")
+        _ = try await subject.selectScopes(["/vol1/1000"])
+        return subject
+    }
+
+    private func payload(sourceID: String, path: String = "/vol1/1000/报告.txt",
+                         target: [String: Any]) -> [String: Any] {
+        ["id": "1:" + path, "name": (path as NSString).lastPathComponent,
+         "path": path, "fileType": "document", "size": 3,
+         "sourceID": sourceID, "canOpen": true, "openTarget": target]
+    }
+
+    /// 设备映射出的共享名（如「备份」）不在授权 scopes（vol1/1000）里，照样放行。
+    func testDeviceMappedShareIsAcceptedWithoutScopeMembership() async throws {
+        let p = try await provider()
+        let row = try XCTUnwrap(p.result(payload(
+            sourceID: p.source.id,
+            target: ["kind": "smbLocation", "host": "fn.example.invalid",
+                     "share": "备份", "relativeSegments": ["子", "x.pdf"]])))
+        guard case .smbLocation(let url) = row.openTarget else {
+            return XCTFail("设备共享名应放行，实际：\(row.openTarget)")
+        }
+        XCTAssertEqual(url.path, "/备份/子/x.pdf")
+        XCTAssertFalse(row.canOpen, "SMB 行等 Swift 挂载核对")
+    }
+
+    /// 共享名放行了，主机一致性这道卡**不许**跟着放：指向别的机器就是假目标。
+    func testCrossHostSMBTargetIsRejected() async throws {
+        let p = try await provider()
+        let row = try XCTUnwrap(p.result(payload(
+            sourceID: p.source.id,
+            target: ["kind": "smbLocation", "host": "evil.example.invalid",
+                     "share": "备份", "relativeSegments": ["x.pdf"]])))
+        XCTAssertEqual(row.openTarget, .unavailable, "host 不一致必须拒绝")
+    }
+
+    /// 站点首页兜底（`/`）对 fnOS 放行 —— 路径等值那道卡只管文件级直链。
+    func testFolderLevelWebFallbackIsAccepted() async throws {
+        let p = try await provider()
+        let row = try XCTUnwrap(p.result(payload(
+            sourceID: p.source.id,
+            target: ["kind": "webLocation", "url": "http://fn.example.invalid/"])))
+        guard case .webURL(let url) = row.openTarget else {
+            return XCTFail("站点首页兜底应放行，实际：\(row.openTarget)")
+        }
+        XCTAssertEqual(url.path, "/")
+        XCTAssertTrue(row.canOpen, "网页行点开就能到")
+    }
+
+    /// 放宽的只有第 ③ 条（路径等值）：同源、scheme、无秘密三道卡原样有效。
+    func testWebFallbackStillRejectsCrossOriginAndSmuggledParts() async throws {
+        let p = try await provider()
+        // 换主机 —— 同源卡必须拦住。
+        let crossHost = try XCTUnwrap(p.result(payload(
+            sourceID: p.source.id,
+            target: ["kind": "webLocation", "url": "http://evil.example.invalid/"])))
+        XCTAssertEqual(crossHost.openTarget, .unavailable, "换主机的网页兜底必须拒绝")
+        // 带查询串 —— 秘密卡必须拦住。
+        let withQuery = try XCTUnwrap(p.result(payload(
+            sourceID: p.source.id,
+            target: ["kind": "webLocation", "url": "http://fn.example.invalid/?token=abc"])))
+        XCTAssertEqual(withQuery.openTarget, .unavailable, "查询串必须拒绝")
+    }
+}

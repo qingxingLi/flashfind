@@ -30,20 +30,13 @@ public enum SearchSidebar {
         public let subtitle: String?
         /// 点这一行要应用的位置限定。
         public let target: SearchTarget
-        /// 它属于哪个来源（「全部位置」「此 Mac」为 nil）。
-        ///
-        /// ★ 它是**分组**用的，不是身份：一台 NAS 勾了五个共享就有五行，
-        /// 每行都写一遍「客厅 NAS · 未连接」只是噪音。同一来源的连续几行算一组，
-        /// 组首行写来源名，其余行只写根名。
-        public let sourceID: String?
 
         public init(id: String, title: String, subtitle: String? = nil,
-                    target: SearchTarget, sourceID: String? = nil) {
+                    target: SearchTarget) {
             self.id = id
             self.title = title
             self.subtitle = subtitle
             self.target = target
-            self.sourceID = sourceID
         }
     }
 
@@ -56,29 +49,27 @@ public enum SearchSidebar {
         items.compactMap { item in
             guard case .search(let target) = item.action else { return nil }
             return Entry(id: item.id, title: item.title, subtitle: item.subtitle,
-                         target: target, sourceID: target.sourceID)
+                         target: target)
         }
     }
 
-    /// 这一行是不是**一组的第一行**（要不要写副标题）。
+    /// 每一行要不要写副标题。
     ///
-    /// 「组」= 同一个来源的连续几行。`nil`（全部位置 / 此 Mac）各自成组。
-    /// 界面据此决定副标题画不画：组首行写「客厅 NAS · 未连接」，
-    /// 组内其余行只写根名——否则五个共享会写五遍同一个来源名。
-    public static func groupStarts(_ entries: [Entry]) -> [Bool] {
-        var out: [Bool] = []
-        var previous: String?
-        var hasPrevious = false
-        for entry in entries {
-            // ★ `nil`（全部位置 / 此 Mac）**各自成组**：它们不是「同一台机器的两行」。
-            // 按「nil == nil 就是同组」处理过一版，结果「此 Mac」被并进「全部位置」的组里，
-            // 副标题整行消失——截图里那条竖排就少了一行字。
-            let starts = entry.sourceID == nil || !hasPrevious || entry.sourceID != previous
-            out.append(starts)
-            previous = entry.sourceID
-            hasPrevious = true
-        }
-        return out
+    /// ★★ **每一行都写**（2026-10-29 真实报障：「飞牛位置侧边栏的存储空间 2 不显示设备名称」）。
+    ///
+    /// 上一版按「同一个来源只在组首行写一次」处理，理由是「一台 NAS 勾五个共享
+    /// 就是五行，每行都写一遍来源名是噪音」。真实后果是：一台飞牛挂两个存储空间时，
+    /// 第二行下面**整片空白**——用户看到的是一行没有出处的位置名，
+    /// 既不知道它属于哪台设备，也看不到「未连接」这个状态。
+    ///
+    /// 副标题不是装饰，是**身份 + 状态**（「飞牛 fnOS」「群晖 Synology · 未连接」）：
+    /// 一旦允许省略，省略的就不只是重复的设备名，还包括那一行自己的连接状态。
+    /// 重复可以忍，缺信息不行。
+    ///
+    /// 判定留在 Core（不是视图里 `if subtitle != nil` + 别处的分组表）：
+    /// 「这行画不画第二行字」是语义，用例直接钉住。
+    public static func subtitleRows(_ entries: [Entry]) -> [Bool] {
+        entries.map { !($0.subtitle ?? "").isEmpty }
     }
 
     /// 当前位置限定应该在侧边栏里高亮哪一行。

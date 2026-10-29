@@ -558,45 +558,56 @@ final class CredentialStoreAtomicWriteTests: XCTestCase {
 }
 
 /// 「已知不可用」与「未验证」必须分开说。
+///
+/// 这一组锁的是 `knownBlocker` 这个口子的**用法**，不是某个品牌的一时结论。
+/// 2026-10-28 飞牛被移出名单（按官方端点文档重写、真机直连逐条实测），
+/// 名单清空之后，这里改成锁「清空」这件事本身 —— 能连的品牌不许再被说成注定失败。
 final class VendorKnownBlockerTests: XCTestCase {
 
-    func testFnOSIsReportedAsKnownUnusable() {
-        let blocker = NASSourceConfig.Vendor.fnos.knownBlocker
-        XCTAssertNotNil(blocker, "飞牛已在真机上量过：HTTP 兼容层接不住 WebSocket，必须说死")
-        XCTAssertTrue(blocker!.contains("WebSocket"))
-        XCTAssertTrue(blocker!.contains("WebDAV"), "要给出可操作的替代：改选 WebDAV")
-        XCTAssertFalse(blocker!.contains("可以先连试试"))
-    }
-
-    /// 「已下线」不能被说回「没做完」。
+    /// 飞牛**不再**是「已知不可用」。
     ///
-    /// 飞牛拿到真机结论后从「已接入未验证」降为「已下线」，文案跟着改了：
-    /// 说「还没接进闪寻」会让人以为等一等就有了，而那是一次已经做完的结论。
-    /// 反方向的旧坑同样要防：说成「不支持」等于抹掉真机证据。
-    func testFnOSBlockerSaysRetiredNotWorkInProgress() {
+    /// 旧实现假设 HTTP 兼容层，真机证明走 WebSocket + HMAC，于是被判定死路并写进
+    /// `knownBlocker`；之后按 `fnnas-labs/fnos-cli-skill` 的端点文档重写，
+    /// 登录 / 搜索 / 列目录 / 下载都在真机上量过，这条路已经通了。
+    /// 继续留着 `knownBlocker` 会把一条能连的路重新说成死路。
+    func testFnOSNoLongerClaimsKnownUnusable() {
+        XCTAssertNil(NASSourceConfig.Vendor.fnos.knownBlocker,
+                     "飞牛已重新接入且端点契约在真机上量过，不该再报「已知不可用」")
         let message = NASSourceConfig.Vendor.fnos.supportMessage
-        XCTAssertTrue(message.contains("下线"), "必须说清适配器已下线：\(message)")
-        XCTAssertFalse(message.contains("还没接进闪寻"),
-                       "已下线 ≠ 没接入，说成后者会让人以为等一等就有：\(message)")
+        XCTAssertFalse(message.contains("下线"), "不能再提下线：\(message)")
+        // ★ 2026-10-29 起飞牛是**正式来源**（真机跑通全链路）：文案转为产品口径，
+        //   不再有「可以先连试试」这种把正常功能说成试验品的措辞。
+        XCTAssertFalse(message.contains("可以先连试试"),
+                       "飞牛已是正式来源，不该再用「先试试」的口吻：\(message)")
+        XCTAssertTrue(message.contains("原生搜索"),
+                      "应讲它能做什么：\(message)")
     }
 
-    func testFnOSSupportMessageIsTheBlockerNotAnInvitationToTry() {
+    /// 两个反方向的旧坑一起防。
+    ///
+    /// 说「还没接进闪寻」会抹掉已经写完的适配器（让人白等）；
+    /// 说「已下线」会抹掉真机量过的端点契约（把人劝退）。
+    /// 飞牛这一版走的是第三档：**已接入、未真机验证**。
+    func testFnOSMessageIsNeitherNotPortedNorRetired() {
         let message = NASSourceConfig.Vendor.fnos.supportMessage
-        XCTAssertEqual(message, NASSourceConfig.Vendor.fnos.knownBlocker)
-        XCTAssertFalse(message.contains("可以先连试试"),
-                       "已知连不上的品牌不能再邀请用户去试")
+        XCTAssertFalse(message.contains("还没接进闪寻"),
+                       "适配器已经在那儿了，说成「还没接」会让人白等：\(message)")
+        XCTAssertFalse(message.contains("下线"), "没有下线这件事：\(message)")
     }
 
     func testNoBlockerClaimedWithoutDeviceEvidence() {
-        // qnap / ugreen 只是「没在真机上验证过」，不能顺手说成「已知不可用」。
-        for vendor in [NASSourceConfig.Vendor.qnap, .ugreen, .synology, .webdav, .smb, .generic] {
-            XCTAssertNil(vendor.knownBlocker, "\(vendor.rawValue) 没有真机证据，不该有 knownBlocker")
+        // 名单此刻应为空：没有任何品牌拿得出「注定连不上」的现役真机反证。
+        for vendor in NASSourceConfig.Vendor.allCases {
+            XCTAssertNil(vendor.knownBlocker, "\(vendor.rawValue) 没有现役真机反证，不该有 knownBlocker")
         }
     }
 
     func testUnverifiedVendorsStillInviteARetry() {
         // 没有证据的仍然邀请用户试 —— 真机结果正是校准适配器唯一的数据来源。
-        XCTAssertTrue(NASSourceConfig.Vendor.qnap.supportMessage.contains("可以先连试试"))
-        XCTAssertTrue(NASSourceConfig.Vendor.ugreen.supportMessage.contains("可以先连试试"))
+        // 飞牛已转正（2026-10-29），不在这张名单里。
+        for vendor in [NASSourceConfig.Vendor.qnap, .ugreen] {
+            XCTAssertTrue(vendor.supportMessage.contains("可以先连试试"),
+                          "\(vendor.title)：\(vendor.supportMessage)")
+        }
     }
 }

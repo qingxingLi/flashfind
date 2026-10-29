@@ -17,8 +17,25 @@ public enum NASScopeLabel {
     public static let wholeRootName = "全部目录"
 
     /// 位置 → 展示名。普通位置去掉前导斜杠（`/照片` → `照片`），保持既有观感。
+    ///
+    /// 飞牛的卷根是例外，见 `volumeRootName`。
     public static func text(for scope: String) -> String {
-        scope == wholeRoot ? wholeRootName : String(scope.dropFirst())
+        if scope == wholeRoot { return wholeRootName }
+        if let volume = volumeRootName(scope) { return volume }
+        return scope.hasPrefix("/") ? String(scope.dropFirst()) : scope
+    }
+
+    /// 飞牛卷根（`/vol1/1000`）→ `存储空间 1`；不是这个形状就返回 `nil`。
+    ///
+    /// ★ 后半段是账号的 **uid**，不是名字：这台机器两个卷都长成 `/volN/1000`，
+    /// 侧边栏按「末段」取名，于是两行都写「1000」——用户根本分不出点哪个
+    /// （2026-10-29 截图报障）。核心给共享起的名字本来就是「存储空间 N」
+    /// （`FnOSAdapter.shareRoots`），界面沿用同一个说法，不再自己拼。
+    public static func volumeRootName(_ scope: String) -> String? {
+        let parts = scope.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count == 2, parts[0].hasPrefix("vol"),
+              let volume = Int(parts[0].dropFirst(3)), Int(parts[1]) != nil else { return nil }
+        return "存储空间 \(volume)"
     }
 
     /// 是否「整根授权」。界面据此决定要不要再显示一行原始路径。

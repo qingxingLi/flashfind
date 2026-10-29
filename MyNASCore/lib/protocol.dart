@@ -49,7 +49,29 @@ import 'dart:convert';
 ///        字段可选 ⇒ 旧客户端不发它时行为完全不变；但它改变了「同一输入
 ///        下的搜索范围」，因此升号：旧客户端配新核心会忽略这个限定，
 ///        表现为「界面显示了限定位置，设备却仍在扫全部共享」。
-const int coreRevision = 7;
+///   8 —— 登录新增**两段式 OAuth 授权**：`login` 命令多一个可选字段
+///        `authorizeCode`，核心新增事件 `authChallenge`（带授权地址、
+///        有效期、是否被拒）。起因是飞牛 fnOS：官方协议没有账号密码登录，
+///        只有 OAuth 2.0 授权码 + PKCE，且授权 URL 里**没有 `redirect_uri`**
+///        ⇒ 授权页不回跳，一次性 code 只能由用户从页面上抄下来交回。
+///        旧客户端配新核心时，选飞牛会停在「等待授权」而界面上没有任何
+///        入口（终止事件白名单不认 `authChallenge`，请求会一直挂着），
+///        因此升号。其余品牌的行为不变。
+///
+/// 8 → 9（2026-10-29）：新增 `download` 命令与 `remoteDownload` 打开目标。
+///        飞牛的打开链（multiple-download 拿 token → GET zip → 解包）
+///        端到端真机量完落地。旧客户端配新核心时，飞牛结果的 canOpen
+///        会停留在 false（结果行打不开但搜索不受影响），因此升号。
+///
+/// 9 → 10（2026-10-29，审查修复）：① `login` 新增**可选**字段 `optionalScopes`
+///        （授权弹窗里用户勾选的额外权限，fnOS 默认只申请必需的 3 项）；
+///        ② `authChallenge` 事件新增**可选**字段 `scopes`（授权页权限清单，
+///        界面用它告知用户「闪寻只需要哪几项」）。两者都可选 ⇒ 旧客户端配
+///        新核心行为不变；但新客户端配旧核心时授权弹窗拿不到清单、勾选的
+///        权限传不到核心，因此升号。同时修掉 `BrandSession.login` 先
+///        `logout` 清掉 PKCE verifier 的阻断缺陷（fnOS 两段授权曾因此
+///        永远报「授权流程已过期」）。
+const int coreRevision = 10;
 
 class CoreError implements Exception {
   final String kind, api, method;

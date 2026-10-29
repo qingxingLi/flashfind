@@ -55,6 +55,10 @@ echo "==> 核心行为测试"
 "$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_multi_scope.dart"
 # 来源根 / 共享名契约（6.3b-3）：适配器不许私自重造设备的身份空间。
 "$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_share_contract.dart"
+# 飞牛 fnOS 端点契约（2026-10-28）：本地 fixture 模拟全部端点，真的验 PKCE、
+# 多包拼接、单 path 搜索、下载 Range、refresh 后旧 token 失效。
+# 这些断言必须在 Dart 侧，Swift 测试打不到适配器内部。
+"$DART_SDK/bin/dart" run "$CLIENT/MyNASCore/test_fnos.dart"
 
 echo "==> 编译 Dart AOT 核心"
 mkdir -p "$OUT/bin" "$OUT/native"

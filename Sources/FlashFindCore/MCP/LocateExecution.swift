@@ -1,11 +1,6 @@
 import Foundation
 
-/// 一个来源在本次请求里的失败码。**取值全部来自 §4.2 的固定错误码**，不新增码。
-///
-/// ★ 为什么要一个类型而不是直接拼 `String`：
-/// ① 聚合时要比大小（谁最该让用户处理），字符串比不了；
-/// ② `warnings` 的格式是 `"<code>:<source_id>"`，闭集才断言得动；
-/// ③ 「来源超时」被谁改写成「来源连不上」这种事故，只有类型能挡住。
+/// 来源失败码使用固定闭集，供排序与警告输出共用。
 public enum LocateFailureCode: String, Equatable, Sendable, CaseIterable {
 
     /// 凭据失效（设备那边的登录态过期 / 需要重新认证）。
@@ -21,26 +16,7 @@ public enum LocateFailureCode: String, Equatable, Sendable, CaseIterable {
     /// 其它（含「搜索被取消」）。
     case internalError = "internal_error"
 
-    /// 「全部来源都失败」时选哪个码。
-    ///
-    /// ## 前三条来自方案 §4.2.1，后两条是本轮补的
-    ///
-    /// 方案原文只写了 `auth_required > source_denied > source_unavailable` 三条。
-    /// 但真实执行会产出 `timeout` 与 `internal_error`，如果把它们当「不在表里」
-    /// 就折成 `source_unavailable`，Agent 会收到一个假事实（复审 6.3b-1 明确要求
-    /// **typed error 不降级**）。所以这里把它俩也放进同一张表，并定死位置：
-    ///
-    /// ```text
-    /// auth_required 0 > source_denied 1 > timeout 2
-    ///                > source_unavailable 3 > invalid_argument 4 > internal_error 5
-    /// ```
-    ///
-    /// * 前三条的**相对顺序没改**（与方案一致）；
-    /// * `timeout` 排在 `source_unavailable` **之前**：超时是「重试可能就好」，
-    ///   而「来源不可用」是「去检查设备」。若把超时折进后者，Agent 会去让用户
-    ///   排查一台其实好好的设备；
-    /// * `invalid_argument` 排在后面：它只对个别来源成立（别的来源可能刚给出了结果），
-    ///   只有在**没有任何来源成功**时才轮得到它说话。
+    /// 超时与不可用分别排序，避免误导用户排查正常设备。
     public var priority: Int {
         switch self {
         case .authRequired:      return 0
@@ -73,18 +49,7 @@ public enum LocateFailureCode: String, Equatable, Sendable, CaseIterable {
     }
 }
 
-/// 一条**已经过过滤、路径已规范化、`file_id` 已算好**的候选。
-///
-/// ## 为什么三个 Tool 共用这个中间类型
-///
-/// `locate` / `locate_many` / `search` 的上游完全一样（多来源并行 → 收事件 →
-/// 过滤 → 规范化路径 → 算 `file_id`），下游才分岔（一个加权排序、一个 lexical 排序、
-/// 一个按子查询分组）。如果让 `search` 自己再走一遍过滤，就会长出这种差异：
-/// 「`locate` 会丢掉 `..` 越界的行，`search` 不会」——**同一份 provider 数据，
-/// 两个 Tool 给出不同的文件集合**，而且两边各自的用例都绿。
-///
-/// ★ 内部类型，不线上化：字段与 `LocateResult` 的七个字段不是一回事
-/// （它有 `modified` 供打分，没有 `score` / `reasons`）。
+/// 各搜索工具共用的已过滤、已规范化候选，避免路径规则分叉。
 struct Candidate: Equatable {
     let fileID: FileID
     let name: String
@@ -94,27 +59,7 @@ struct Candidate: Equatable {
     let modified: Date?
 }
 
-/// 一次请求的**绝对截止时间**（一张券，不是每条子查询各领一张）。
-///
-/// ## 为什么必须有这个类型（§15 #28 / v0.27 决策）
-///
-/// `locate_many` 一次展开 1…5 条子查询。如果每条子查询各自拿一份 `budget`
-/// ——无论那份是 8 s 还是 10 s——最坏情况就是 5 × budget：
-///
-/// ```text
-/// 5 queries × 每条 10 s = 最坏 50 s   ← 直接突破 AuthorityLimits.requestTimeout
-/// ```
-///
-/// 对外契约是**整个 `tools/call` ≤ 10 s**（`AuthorityLimits.requestTimeout`），
-/// 所以预算必须按**请求**算一次，然后所有子查询共用它：
-///
-/// ```text
-/// deadline = 请求开始 + budget
-/// 每个子查询 / 每个来源 wait 的是 max(0, deadline - now)
-/// ```
-///
-/// ★ 时钟用 `DispatchTime`（单调），不用 `timing.now`：后者是可注入的**墙上**
-/// 时钟，测试把它固定成常量才能复现排序，用它算超时永远算出「还剩一整个 budget」。
+/// 整次请求共用单调时钟预算，避免子查询各自重复领取时限。
 public struct Deadline: Sendable {
 
     private let start: DispatchTime
@@ -132,38 +77,8 @@ public struct Deadline: Sendable {
     }
 }
 
-/// `locate` / `locate_many` / `search` 的执行：**多来源并行搜 → 过滤 → 去重 → 排序 → 开窗**。
-///
-/// ## 它只消费授权快照
-///
-/// 入口参数里没有注册表、没有 `AppModel`、没有「按 id 找 provider」的入口：
-/// provider 只能从 `snapshot.execution(for:)` 拿（见 `SourceExecutionHandle`）。
-/// 于是「判权之后又读一次注册表」在类型上写不出来（§15 #23）。
-///
-/// ## `truncated` 怎么才算得出来
-///
-/// 复审 6.3b-1 的硬要求：**必须真的观察到 `limit_applied + 1` 个合格候选**，
-/// 才能说 `truncated = true`。所以这一步刻意**不提供任何「取前 N 条」的入口**：
-///
-/// ```text
-/// provider 给多少 → 全部收下（本类不做窗口）
-///   → 过滤 / 去重 / 排序（仍是全量）
-///   → LocateResponse(selecting:) / SearchResponse(selecting:) 一处开窗
-/// ```
-///
-/// 一旦有人在过滤阶段顺手 `prefix(limit)`，`truncated` 就永远只能是 false，
-/// 而所有单元测试仍然绿——`LocateExecutionTests` 里有一条走**生产路径**的
-/// 21 条候选用例专门守这件事。
-///
-/// ## 为什么有预算（`Timing.budget`）
-///
-/// 一次 NAS 搜索最长可以跑到 180 秒（看门狗），而 socket 那条请求只有 10 秒
-/// （`AuthorityLimits.requestTimeout`）。不设预算的话，一台慢设备会让**另一个
-/// 已经搜完的来源的结果也送不回去**——Agent 收到 `timeout`，而答案其实在手里。
-/// 超预算的来源会：① 结果按已收到的部分保留；② 回 `timeout:<id>` warning；
-/// ③ 被 `cancel(queryID:requester:)` 停掉，不留在设备上继续跑。
-///
-/// `locate_many` 的 N 条子查询共用**同一个** `Deadline`（见 `Deadline` 的注释）。
+/// 只消费授权快照；全部候选先过滤、去重和排序，再统一截取窗口。
+/// 超时保留已收结果并取消未完成搜索，locate_many 共用一个截止时间。
 @MainActor
 public final class LocateExecutor {
 
@@ -182,15 +97,7 @@ public final class LocateExecutor {
         }
     }
 
-    /// 8 秒 = `AuthorityLimits.requestTimeout`（10 秒）留 2 秒余量给编码与传输。
-    ///
-    /// ★ 余量不能省：本类返回之后还有 JSON 编码、socket 写回、Helper 转发三步，
-    /// 而监听端的 10 秒是从**收到请求**开始算的。卡着 10 秒返回等于让客户端先超时。
-    ///
-    /// ★ 它是**整个请求**的预算，不是「每条子查询 8 秒」。`locate_many` 展开 5 条时
-    /// 全部子查询共用这一份——否则 5 × 8 s 就是 40 s，比对外契约还大。
-    ///
-    /// `nonisolated`：`Timing` 是 `Sendable` 的纯值类型，默认实参在隔离域外求值。
+    /// 请求共用 8 秒，留 2 秒给编码和传输。
     nonisolated public static let defaultBudget: TimeInterval = 8
 
     private let timing: Timing
@@ -942,97 +849,3 @@ public final class LocateExecutor {
     }
 }
 
-// MARK: - 单来源收集
-
-/// 收一个来源的流式事件，等到终态或预算到期。
-///
-/// 用锁而不是 actor：事件来自 `@MainActor` 的 emit，而超时来自一个后台 Task，
-/// 两边都要能**同步**写下同一个结果。actor 在这里只会把「刚好同时到达」变成
-/// 一个可重入问题，而锁让「恰好一个终态」变成一件显然的事。
-final class SourceCollector: @unchecked Sendable {
-
-    struct Snapshot: Sendable {
-        let rows: [SearchResult]
-        let state: ProviderSearchState
-        let resultsIncomplete: Bool
-        /// 预算到期，provider 还没给终态。
-        let timedOut: Bool
-    }
-
-    private let lock = NSLock()
-    private var rows: [SearchResult] = []
-    private var resultsIncomplete = false
-    private var outcome: Snapshot?
-    private var waiter: CheckedContinuation<Snapshot, Never>?
-    private var timer: Task<Void, Never>?
-
-    /// 收到一条事件。终态第一条生效，之后的全部忽略（provider 违约多发也不会双计）。
-    func record(_ event: ProviderEvent) {
-        var resume: CheckedContinuation<Snapshot, Never>?
-        var finished: Snapshot?
-        lock.lock()
-        if outcome == nil {
-            rows.append(contentsOf: event.results)
-            resultsIncomplete = resultsIncomplete || event.resultsIncomplete
-            if event.isTerminal {
-                let snapshot = Snapshot(rows: rows,
-                                        state: event.state,
-                                        resultsIncomplete: resultsIncomplete,
-                                        timedOut: false)
-                outcome = snapshot
-                finished = snapshot
-                resume = waiter
-                waiter = nil
-                timer?.cancel()
-                timer = nil
-            }
-        }
-        lock.unlock()
-
-        guard let finished else { return }
-        resume?.resume(returning: finished)
-    }
-
-    /// 等到终态，或预算到期。
-    func wait(budget: TimeInterval) async -> Snapshot {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            if let outcome {
-                lock.unlock()
-                continuation.resume(returning: outcome)
-                return
-            }
-            waiter = continuation
-            lock.unlock()
-
-            let task = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(budget))
-                guard !Task.isCancelled else { return }
-                self?.expire()
-            }
-
-            lock.lock()
-            if outcome == nil { timer = task } else { task.cancel() }
-            lock.unlock()
-        }
-    }
-
-    private func expire() {
-        var resume: CheckedContinuation<Snapshot, Never>?
-        var finished: Snapshot?
-        lock.lock()
-        if outcome == nil {
-            let snapshot = Snapshot(rows: rows,
-                                    state: .searching,
-                                    resultsIncomplete: true,
-                                    timedOut: true)
-            outcome = snapshot
-            finished = snapshot
-            resume = waiter
-            waiter = nil
-        }
-        lock.unlock()
-        guard let finished else { return }
-        resume?.resume(returning: finished)
-    }
-}

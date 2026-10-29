@@ -181,6 +181,8 @@ class OpenListAdapter implements NasBrandAdapter, WebOpenableAdapter {
     required String username,
     required String password,
     String? otpCode,
+    // 账密品牌用不到授权码：飞牛那种 OAuth 流程才会传它。
+    String? authorizeCode,
   }) async {
     _identity = null;
     _token = null;

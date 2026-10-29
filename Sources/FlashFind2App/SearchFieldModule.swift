@@ -55,7 +55,7 @@ struct SearchFieldModule: View {
             if showsHint {
                 HStack(spacing: 14) {
                     ForEach(hintLines, id: \.self) { line in
-                        Text(line).font(.caption).foregroundStyle(.secondary)
+                        Text(line).ffFont(.fieldHint).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -88,8 +88,11 @@ struct SearchFieldModule: View {
             .buttonStyle(.plain)
             .help("打开设置")
             .accessibilityLabel("打开设置")
-            TextField("搜索文件与文件夹", text: $query)
-                .textFieldStyle(.plain).font(.system(size: 20, weight: .regular))
+            // 占位文案 = 品牌名（用户 2026-10-29：「搜索文件与文件夹换成品牌名『闪寻』」）。
+            // 读屏标签仍写全「搜索文件与文件夹」—— 读屏用户听到「闪寻」不知道这框是干嘛的，
+            // 而视觉上占位文案只有两个汉字的位置，写全称会挤。
+            TextField("闪寻", text: $query)
+                .textFieldStyle(.plain).ffFont(.searchField)
                 .focused(focused).onSubmit(submit)
                 .accessibilityLabel("搜索文件与文件夹")
             if searching { ProgressView().controlSize(.small).accessibilityLabel("正在搜索") }

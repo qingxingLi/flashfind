@@ -11,8 +11,8 @@ struct SearchStateView: View {
             if loading { ProgressView().controlSize(.small).padding(.top, 3) }
             else { Image(systemName: symbol).font(.system(size: 19)).foregroundStyle(.secondary).padding(.top, 2) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 14, weight: .medium))
-                Text(detail).font(.callout).foregroundStyle(.secondary).lineLimit(3)
+                Text(title).ffFont(.stateTitle)
+                Text(detail).ffFont(.stateDetail).foregroundStyle(.secondary).lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true).help(detail)
             }
             Spacer(minLength: 0)
@@ -49,10 +49,10 @@ struct SearchStatusBar: View {
                     .popover(isPresented: $showWarnings) {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 10) {
-                                Text("搜索提示").font(.headline)
+                                Text("搜索提示").ffFont(.sectionHeader)
                                 if let configureSources { Button("打开搜索来源设置", action: configureSources) }
                                 ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in
-                                    Text(warning).font(.callout).textSelection(.enabled)
+                                    Text(warning).ffFont(.stateDetail).textSelection(.enabled)
                                 }
                             }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
                         }.frame(width: 360).frame(maxHeight: 260)
@@ -77,7 +77,7 @@ struct SearchStatusBar: View {
                 .help(SearchResultLimit.continueHelp(remaining: max(0, total - count)))
                 .accessibilityIdentifier("search-continue-button")
             }
-        }.font(.system(size: 11)).foregroundStyle(.secondary)
+        }.ffFont(.statusBar).foregroundStyle(.secondary)
             .padding(.horizontal, 22).frame(height: 32)
             .accessibilityElement(children: .contain)
             .accessibilityLabel(truncated
@@ -104,8 +104,8 @@ struct OpenFailureBanner: View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 3) {
-                Text("无法打开文件").font(.system(size: 13, weight: .medium))
-                Text(failure.message).font(.callout).foregroundStyle(.secondary)
+                Text("无法打开文件").ffFont(.bannerTitle)
+                Text(failure.message).ffFont(.stateDetail).foregroundStyle(.secondary)
                     // 高度是固定的（见 SearchLayout.openFailureBannerHeight）：
                     // 长句截断到两行，全文走悬停，不能让提示条自己长高把浮窗撑变形。
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true).help(failure.message)

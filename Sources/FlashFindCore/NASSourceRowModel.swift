@@ -58,8 +58,10 @@ public struct NASSourceRowModel: Equatable, Sendable {
     ///
     /// 搜索位置在界面上一律不带前导斜杠：用户配的是 NAS 上的共享名，
     /// 那是产品概念；`/xxx` 是 DSM 的表示法，属于实现细节。
+    /// 飞牛卷根（`/vol1/1000`）另有说法，统一交给 `NASScopeLabel`
+    /// —— 设置行、侧边栏、向导必须是同一个名字。
     public static func scopeDisplayName(_ scope: String) -> String {
-        scope.hasPrefix("/") ? String(scope.dropFirst()) : scope
+        NASScopeLabel.text(for: scope)
     }
 
     /// 从真实状态推出这一行该长什么样。

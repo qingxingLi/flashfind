@@ -209,21 +209,25 @@ final class SettingsIATests: XCTestCase {
 
     /// ★ 默认**关**：开关只管「实验性」的那几个品牌。
     ///
-    /// 群晖与 OpenList 是**正式开放**的两项，不归这个开关管——
-    /// 关着的时候也应该看得见，否则用户永远找不到 OpenList 的入口。
+    /// 群晖、飞牛、OpenList 是**正式开放**的三项，不归这个开关管 ——
+    /// 关着的时候也应该看得见，否则用户永远找不到它们的入口。
     func testExperimentalSourcesDefaultsOffAndGatesTheVendorList() {
         XCTAssertFalse(ExperimentalSources.resolve(stored: nil), "没设过必须是关")
         XCTAssertFalse(ExperimentalSources.resolve(stored: false))
         XCTAssertTrue(ExperimentalSources.resolve(stored: true))
 
-        XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: false), [.synology, .openlist],
-                       "关着的时候给正式开放的两项")
-        // 打开只放出「核心里有适配器的」那一批：没接入的（smb/generic）与
-        // 已下线的（fnos）都不该出现——摆出来等于请用户去试一个连不上的类型。
+        XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: false),
+                       [.synology, .fnos, .openlist],
+                       "关着的时候给正式开放的三项")
+        // 打开只放出「核心里有适配器的」那一批：没接入的（smb/generic）不出现——
+        // 摆出来等于请用户去试一个连不上的类型。
         //
-        // 顺序 = 正式两项在前，其余按 `allCases` 声明顺序追加。
+        // 顺序 = 正式三项在前，其余按 `allCases` 声明顺序追加
+        // （qnap → ugreen → webdav，与「优先级」无关）。
+        // ★ 飞牛 2026-10-29 转正后**不在追加批里**：它已在基线里，
+        //   `ExperimentalSources` 的 `!result.contains(vendor)` 会跳过它。
         XCTAssertEqual(ExperimentalSources.vendors(includingExperimental: true),
-                       [.synology, .openlist, .qnap, .ugreen, .webdav],
+                       [.synology, .fnos, .openlist, .qnap, .ugreen, .webdav],
                        "打开以后给出的是核心认得的类型，不是全部枚举值")
     }
 

@@ -99,7 +99,7 @@ struct SettingsCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 9) {
             if let title {
                 Text(title)
-                    .font(.system(size: SettingsTypography.sectionHeader, weight: .semibold))
+                    .ffFont(.settingsSectionHeader)
                     .padding(.leading, 2)
             }
 
@@ -109,7 +109,7 @@ struct SettingsCard<Content: View>: View {
 
             if let footer {
                 Text(footer)
-                    .font(.system(size: SettingsTypography.caption))
+                    .ffFont(.settingsCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 2)
@@ -234,7 +234,7 @@ struct SettingsSwitchRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(label).font(.system(size: SettingsTypography.body))
+            Text(label).ffFont(.settingsBody)
             Spacer(minLength: 12)
             Toggle("", isOn: $isOn)
                 .labelsHidden()
@@ -273,7 +273,7 @@ struct SettingsLabeledRow<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Text(label).font(.system(size: SettingsTypography.body))
+            Text(label).ffFont(.settingsBody)
             Spacer(minLength: 12)
             content
         }
@@ -349,7 +349,7 @@ struct SettingsPanePicker: View {
             Text(item.rawValue)
                 // 「间距拉开」：段本身就有 26pt 的左右留白，
                 // 不再是系统分段控件那种挤在一起的样子。
-                .font(.system(size: SettingsTypography.body, weight: isSelected ? .semibold : .regular))
+                .ffFont(isSelected ? .settingsBodyStrong : .settingsBody)
                 .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .padding(.horizontal, 26)
                 .padding(.vertical, 6)

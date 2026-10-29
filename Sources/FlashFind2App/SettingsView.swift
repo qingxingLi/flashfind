@@ -140,7 +140,7 @@ struct SettingsView: View {
 
     /// 分段页脚（辅助说明）：比正文小一档，且不抢注意力。
     private func sectionFooter(_ text: String) -> some View {
-        Text(text).font(.system(size: SettingsTypography.caption))
+        Text(text).ffFont(.settingsCaption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 2)
@@ -148,7 +148,7 @@ struct SettingsView: View {
 
     /// 一行提示文字（反馈，不是备注）：比正文小一档。
     private func noteText(_ text: String, tint: Color = .secondary) -> some View {
-        Text(text).font(.system(size: SettingsTypography.caption))
+        Text(text).ffFont(.settingsCaption)
             .foregroundStyle(tint)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -411,21 +411,21 @@ struct SettingsView: View {
         HStack(spacing: 12) {
             Button { detailSourceID = source.id } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: source.vendor.symbol)
-                        .font(.system(size: 20)).foregroundStyle(.secondary).frame(width: 28)
+                    VendorIcon(vendor: source.vendor, size: 20)
+                        .foregroundStyle(.secondary).frame(width: 28)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(row.title)
-                            .font(.system(size: SettingsTypography.body, weight: .medium))
+                            .ffFont(.settingsBodyEmphasis)
                             .lineLimit(1).help(row.title)
                         HStack(spacing: 5) {
                             if row.health == .needsAttention {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .font(.caption2).foregroundStyle(.orange)
                             }
-                            Text(row.detail).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary).lineLimit(1)
+                            Text(row.detail).ffFont(.settingsCaption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         if !row.locations.isEmpty {
-                            Text(row.locations).font(.system(size: SettingsTypography.caption))
+                            Text(row.locations).ffFont(.settingsCaption)
                                 .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                 .help(row.locations)
                         }
@@ -497,13 +497,30 @@ struct SettingsView: View {
                 .settingsRow()
             }
 
-            SettingsCard("账号") {
-                SettingsLabeledRow("账号") { Text(source.username.isEmpty ? "未填写" : source.username) }
-                    .settingsRow()
-                SettingsRowDivider()
-                Button("重新登录…") { model.reconnectSource(source.id) }
-                    .settingsRow()
-                    .accessibilityIdentifier("source-relogin")
+            // 只有**账号密码**品牌才有「账号」这张卡。
+            //
+            // 飞牛（fnOS）走浏览器授权，根本没有账号可展示；摆一张写着
+            // 「账号：未填写」的卡，用户会当成「还差一步没做完」——
+            // 2026-10-29 用户正是因为界面上冒出「请填写 NAS 账号」来问的。
+            // 两条分支都走 `reconnectSource` 统一路由，重连入口不许丢。
+            if source.vendor.requiresAccountPassword {
+                SettingsCard("账号") {
+                    SettingsLabeledRow("账号") { Text(source.username.isEmpty ? "未填写" : source.username) }
+                        .settingsRow()
+                    SettingsRowDivider()
+                    Button("重新登录…") { model.reconnectSource(source.id) }
+                        .settingsRow()
+                        .accessibilityIdentifier("source-relogin")
+                }
+            } else {
+                SettingsCard("授权") {
+                    SettingsLabeledRow("登录方式") { Text("浏览器授权") }
+                        .settingsRow()
+                    SettingsRowDivider()
+                    Button("重新授权…") { model.reconnectSource(source.id) }
+                        .settingsRow()
+                        .accessibilityIdentifier("source-relogin")
+                }
             }
 
             SettingsCard("连接") {
@@ -528,11 +545,11 @@ struct SettingsView: View {
                         if model.nativeProviders[source.id]?.isManagerAccount == true {
                             Label("使用管理员账号搜索，范围包含这台 NAS 的全部共享",
                                   systemImage: "exclamationmark.triangle.fill")
-                                .font(.system(size: SettingsTypography.caption)).foregroundStyle(.orange)
+                                .ffFont(.settingsCaption).foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary).padding(.top, 4)
+                    .ffFont(.settingsCaption).foregroundStyle(.secondary).padding(.top, 4)
                 }
                 .settingsRow()
             }
@@ -551,18 +568,17 @@ struct SettingsView: View {
     @ViewBuilder private func identity(_ source: NASSourceConfig) -> some View {
         let status = model.sourceStatus(source.id)
         HStack(spacing: 12) {
-            Image(systemName: source.vendor.symbol)
-                .font(.system(size: 22, weight: .medium))
+            VendorIcon(vendor: source.vendor, size: 22)
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 44, height: 44)
                 .background(Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.12),
                             in: RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 3) {
                 Text(source.displayName)
-                    .font(.system(size: SettingsTypography.pageTitle, weight: .semibold))
+                    .ffFont(.settingsPageTitle)
                     .lineLimit(1).truncationMode(.middle).help(source.displayName)
                 Text(model.sourceRow(source.id)?.detail ?? "")
-                    .font(.system(size: SettingsTypography.body)).foregroundStyle(.secondary)
+                    .ffFont(.settingsBody).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             Toggle("参与搜索", isOn: Binding(get: { source.enabled },
@@ -729,7 +745,7 @@ struct SettingsView: View {
                 }
             } else if model.aiAccess.draft.isEnabled {
                 Text(MCPIntegrationText.saveFirst)
-                    .font(.system(size: SettingsTypography.caption))
+                    .ffFont(.settingsCaption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 2)
@@ -808,7 +824,7 @@ struct SettingsView: View {
                         SettingsRowDivider()
                         VStack(alignment: .leading, spacing: 4) {
                             Text(source.displayName)
-                                .font(.system(size: SettingsTypography.body, weight: .medium))
+                                .ffFont(.settingsBodyEmphasis)
                             ForEach(ConnectionDiagnostics.summary(
                                 config: source,
                                 status: model.sourceStatus(source.id),
@@ -817,9 +833,9 @@ struct SettingsView: View {
                                     Image(systemName: line.ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                                         .font(.caption2)
                                         .foregroundStyle(line.ok ? .green : .orange)
-                                    Text(line.title).font(.system(size: SettingsTypography.caption)).foregroundStyle(.secondary)
+                                    Text(line.title).ffFont(.settingsCaption).foregroundStyle(.secondary)
                                         .frame(width: 64, alignment: .leading)
-                                    Text(line.value).font(.system(size: SettingsTypography.caption))
+                                    Text(line.value).ffFont(.settingsCaption)
                                 }
                             }
                         }
@@ -855,10 +871,10 @@ struct SettingsView: View {
     @ViewBuilder private func updateResultRow(_ outcome: UpdateCheck.Outcome) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: updateSymbol(outcome))
-                .font(.system(size: SettingsTypography.caption))
+                .ffFont(.settingsCaption)
                 .foregroundStyle(updateTint(outcome))
             Text(UpdateCheckText.message(for: outcome))
-                .font(.system(size: SettingsTypography.caption))
+                .ffFont(.settingsCaption)
                 .fixedSize(horizontal: false, vertical: true)
             if let title = UpdateCheckText.linkTitle(for: outcome) {
                 Button(title) { model.openReleasePage(for: outcome) }

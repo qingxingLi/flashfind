@@ -276,8 +276,154 @@ extension AppModel {
         return otp.isEmpty ? nil : otp
     }
 
-    /// 断开一台已保存的 NAS，保留配置与缓存。
+    /// 弹一个「去浏览器授权 → 把页面上的授权码粘回来」的窗，返回用户填的授权码；取消返回 `nil`。
     ///
+    /// ★ 2026-10-29：**向导不再走这里**。用户要求「不要弹窗 直接在图示位置生成
+    ///   获取授权码，点击后打开浏览器 然后再粘贴授权码」——授权码在向导里已经是
+    ///   「连接信息」表单的一格（`NASSourceWizardController.draftAuthorizeCode`），
+    ///   浏览器由向导自己打开。这条路只剩**没有表单可填**的那一个调用方：
+    ///   设置页点「登录」触发的后台重连（`AppModel+QuietConnect`），
+    ///   它撞上授权态时没有别的地方能接收那串码。
+    ///
+    /// 放在 AppModel 而不是 Core：需要 AppKit 的 `NSAlert` 与 `NSWorkspace`，
+    /// Core 不能依赖 AppKit。但「说什么」全在 Core 的
+    /// `ConnectionFailureText.authorizationPromptText`（可单测）。
+    ///
+    /// ★ **为什么只用一扇窗、而不是「先弹去授权、再弹粘授权码」**：
+    /// 两个弹窗意味着用户要在两个模态之间来回切，中间那次取消会让连接停在半路；
+    /// 而且地址与输入框分开之后，用户切回来时页面上那串码已经不在视野里了。
+    /// 所以浏览器在本窗出现前**自动打开**，窗里只做一件事：粘码。
+    /// 剩下的「打开授权页面」按钮是给「页面被关了 / 勾了额外权限要换地址」用的。
+    ///
+    /// - Parameter rejected: 上一次交的码被拒 ⇒ 标题与首句都直说「没有被接受」，
+    ///   而不是让用户对着同一句话猜自己刚才那串到底怎么了。
+    /// - Parameters:
+    ///   - scopes: 授权页权限清单（fnOS）。必需项锁定勾选，可选项默认不勾 ——
+    ///     **不勾就不申请**：授权地址按「必需 + 勾选」重新产出，授权页上
+    ///     根本不会出现没勾的那几项（2026-10-29 审查：原先全量申请 11 项）。
+    ///   - reauthorize: 用户勾选了额外权限后重新产出授权地址。传勾选的
+    ///     可选 scope id，返回包含这些权限的新地址。
+    func promptForAuthorizeCode(sourceName: String, url: URL,
+                                validFor: TimeInterval, rejected: Bool,
+                                scopes: [NASAuthorizationScope],
+                                reauthorize: @escaping ([String]) async throws -> URL) async -> String? {
+        let required = scopes.filter { $0.required }
+        let optional = scopes.filter { !$0.required }
+        let alert = NSAlert()
+        alert.messageText = rejected
+            ? ConnectionFailureText.authorizeRejectedTitle
+            : ConnectionFailureText.authorizeDialogTitle
+        alert.informativeText = ConnectionFailureText.authorizationPromptText(
+            sourceName: sourceName, url: url, validFor: validFor, rejected: rejected)
+        alert.alertStyle = rejected ? .warning : .informational
+        alert.addButton(withTitle: "连接")
+        alert.addButton(withTitle: "取消")
+
+        // 附件视图：[必需权限说明] [可选权限勾选] [授权码输入框] [重新打开授权页面]
+        // 宽 440：输入框 300 + 间距 8 + 按钮 128 = 436，420 会切掉按钮右边一截。
+        let checkboxHeight: CGFloat = optional.isEmpty ? 0 : CGFloat(optional.count) * 22 + 8
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 440,
+                                             height: 26 + 20 + checkboxHeight))
+        var y = container.frame.height
+        if !required.isEmpty {
+            y -= 20
+            let note = NSTextField(labelWithString:
+                "闪寻只需要：\n" + required.map { "· \($0.label)" }.joined(separator: "\n"))
+            note.font = NSFont.systemFont(ofSize: 11)
+            note.frame = NSRect(x: 0, y: y, width: 440, height: 20 + CGFloat(required.count) * 15)
+            container.addSubview(note)
+            y -= 6
+        }
+        // 可选权限：默认全部不勾。勾选后点「重新打开授权页面」会按勾选结果
+        // 重新生成授权地址 —— 未勾选的权限不会出现在授权页上。
+        var optionalBoxes: [(button: NSButton, id: String)] = []
+        for item in optional {
+            y -= 22
+            let box = NSButton(checkboxWithTitle: item.label, target: nil, action: nil)
+            box.font = NSFont.systemFont(ofSize: 11)
+            box.state = .off
+            box.frame = NSRect(x: 0, y: y, width: 440, height: 20)
+            container.addSubview(box)
+            optionalBoxes.append((box, item.id))
+        }
+        y -= 30
+        let field = NSTextField(frame: NSRect(x: 0, y: y + 1, width: 300, height: 24))
+        field.placeholderString = "粘贴页面上的授权码"
+        field.alignment = .left
+        field.lineBreakMode = .byTruncatingMiddle
+        container.addSubview(field)
+        // 按钮的 target 是 unretained，所以这个 opener 必须活到弹窗结束——
+        // 放在局部常量上即可：`runModal` 是同步阻塞的，作用域覆盖整个弹窗生命周期。
+        let opener = AuthorizePageOpener(url: url, boxes: optionalBoxes, reauthorize: reauthorize)
+        // 标题写「重新」：浏览器在这个窗出现前已经自动开过一次（见下面 `NSWorkspace.open`），
+        // 按钮只负责「页面被我关了 / 要换成勾选后的新地址」这一种情况。
+        let openButton = NSButton(title: "重新打开授权页面", target: opener,
+                                  action: #selector(AuthorizePageOpener.openInBrowser))
+        openButton.bezelStyle = .rounded
+        // 起点 308 + 宽 128 = 436，正好落在 440 的 container 里。
+        openButton.frame = NSRect(x: 308, y: y + 4, width: 128, height: 26)
+        container.addSubview(openButton)
+        alert.accessoryView = container
+
+        let alertWindow = alert.window
+        DispatchQueue.main.async { alertWindow.makeFirstResponder(field) }
+        // 与动态码弹窗同一条规则：闪寻不进程序坞（`accessory`），runModal 建的窗口
+        // 不会自动抢前台，不激活就压在设置窗口底下——用户看到的是「点了一下毫无反应」。
+        NSApp.activate(ignoringOtherApps: true)
+
+        // ★ 授权期间先把闪寻自己的窗口收起来（2026-10-29 用户截图：弹窗 + 设置窗 +
+        //   向导窗正好把浏览器里的授权页整个挡死，得手动挪开窗口才看得见）。
+        //
+        //   只「把浏览器叫到前台」是不够的：`runModal` 建立的 modal session 会把 App
+        //   重新激活，闪寻的窗口随即又压回浏览器上方。所以这里先 `orderOut`。
+        //
+        //   恢复放在 `defer` 里**无条件**执行：取消、授权码被拒、直接抛错都要把窗口
+        //   放回去，否则用户会遇到「闪寻像死了一样，一个窗口都没有」。
+        let hiddenBehindAlert = hideWindowsBehindAuthorizationAlert(except: alertWindow)
+        defer {
+            // 倒序放回：`orderedWindows` 是 front-to-back，倒着 orderFront
+            // 才能保住原来谁在上面。
+            for window in hiddenBehindAlert.reversed() { window.orderFront(nil) }
+            // 用户点完「连接 / 取消」是要继续在闪寻里操作，把前台还回来——
+            // 不激活的话焦点还在浏览器上，向导状态行的变化看不到。
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        // ★ 用户点了「连接」就是要连上，不该再让他在弹窗里点第二次才看到授权页
+        //   （2026-10-29 用户要求：「点击连接直接弹出浏览器打开这个网页登陆授权就行」）。
+        //   打开放在 runModal **之前**：即使这扇窗被别的窗口挡住，浏览器也已经在前台，
+        //   用户照着弹窗文案做就是「去浏览器登录 → 回来粘码」两步。
+        //   返回值不看：开不出来（没有默认浏览器）时弹窗里就有「重新打开授权页面」，
+        //   不值得为它加一条分支。
+        NSWorkspace.shared.open(url)
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return nil }
+        // ★ 授权码的去空白**只在弹窗出口做这一次**（入口即边界）：
+        // 调用方（向导 / 静默重连）拿到手的已经是干净的非空串。
+        let code = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return code.isEmpty ? nil : code
+    }
+
+    /// 授权弹窗期间把闪寻自己的窗口收起来，返回收起来的那些（供调用方原样放回）。
+    ///
+    /// 判据是**层级**而不是标题栏：闪寻有两类窗口——设置窗 / 向导窗（普通层级），
+    /// 以及搜索、结果、钉住这三块浮层（`floating`，且 `hidesOnDeactivate = false`，
+    /// 所以 App 退到后台它们也不让开）。两类都会把浏览器挡死，都得收。
+    /// `floating` 以上的层级是系统窗口（菜单、状态栏面板），一律不碰。
+    private func hideWindowsBehindAuthorizationAlert(except alertWindow: NSWindow) -> [NSWindow] {
+        var hidden: [NSWindow] = []
+        // 按 front-to-back 取，调用方倒序放回才能保住原来谁在上面。
+        for window in NSApp.orderedWindows where window !== alertWindow {
+            guard window.isVisible,
+                  window.level.rawValue <= NSWindow.Level.floating.rawValue else { continue }
+            window.orderOut(nil)
+            hidden.append(window)
+        }
+        return hidden
+    }
+
+    /// 断开一台已保存的 NAS，保留配置与缓存。
     /// ★ 断开只作用于这一台（BUG-NAS-DISCONNECT-01，用户报障：
     /// 「点某个 NAS 的断开按钮会导致全部 NAS 断开」）。这里**不做**三件事：
     ///   * 不 `rebuildNativeProviders()` —— 断开一台却把全部 Provider 重建核对一遍，
@@ -343,5 +489,55 @@ extension AppModel {
         guard !Task.isCancelled else { return false }
         guard let current = nasSources.first(where: { $0.id == token.sourceID }) else { return false }
         return connectIntent.isCurrent(token, config: current)
+    }
+}
+
+/// 「打开授权页面」按钮的 target。
+///
+/// 单独一个 `NSObject` 小类，而不是让 `AppModel` 自己当 target：
+/// `AppModel` 不是 `NSObject` 子类（它是 `ObservableObject`），而 `@objc`
+/// 选择子只能挂在 NSObject 系上。加一个基类会把整个观察链卷进 ObjC 运行时，
+/// 为了一个按钮不值得。
+///
+/// ★ 按钮的 target 是 **unretained**：调用方必须把实例活到弹窗结束
+///   （`promptForAuthorizeCode` 里放在局部常量上，`runModal` 是同步阻塞的，
+///   作用域正好覆盖弹窗整个生命周期）。改成惰性全局单例会引入「URL 被后一次覆盖」
+///   的新 bug —— 用户在弹窗开着时再点一次连接就会开错地址。
+final class AuthorizePageOpener: NSObject {
+    private var url: URL
+    /// 当前授权地址里已经包含的可选 scope（避免每次点击都重新产地址）。
+    private var requestedOptional: Set<String> = []
+    private let boxes: [(button: NSButton, id: String)]
+    private let reauthorize: ([String]) async throws -> URL
+    private var busy = false
+
+    init(url: URL, boxes: [(button: NSButton, id: String)],
+         reauthorize: @escaping ([String]) async throws -> URL) {
+        self.url = url
+        self.boxes = boxes
+        self.reauthorize = reauthorize
+    }
+
+    @objc func openInBrowser() {
+        guard !busy else { return }
+        busy = true
+        Task { @MainActor in
+            defer { busy = false }
+            let selected = boxes.filter { $0.button.state == .on }.map { $0.id }
+            if Set(selected) != requestedOptional {
+                do {
+                    url = try await reauthorize(selected)
+                    requestedOptional = Set(selected)
+                } catch {
+                    // 重新产地址失败必须说清，不能拿旧地址冒充「已包含勾选权限」。
+                    let failure = NSAlert()
+                    failure.messageText = "权限选择没有生效"
+                    failure.informativeText = ConnectionFailureText.describe(error, host: "", port: 0)
+                    failure.runModal()
+                    return
+                }
+            }
+            NSWorkspace.shared.open(url)
+        }
     }
 }
