@@ -3551,10 +3551,19 @@ final class AppLayerStructureTests: XCTestCase {
 
         // 位置候选里的来源必须带**真实**就绪状态：写死 true 会让副标题永远不标
         // 「未连接」，用户就不知道点了还得等一次连接。
+        // 唯一例外是预览 demo（夹具来源没有真实会话，照实取就永远「未连接」，
+        // 截图会自相矛盾）；例外必须显式走 `AppEnvironment.demoSourcesActive`
+        // 这道门——它自己守着「只在 DEBUG 预览包里为真」，不许就地写死。
         let sources = try body(of: "commandSources", in: code)
-        XCTAssertTrue(sources.contains("ready: nativeProviders[config.id]?.ready == true"),
+        XCTAssertTrue(sources.contains("nativeProviders[config.id]?.ready == true"),
                       "ready 要照实取；键是 config.id（nativeProviders 就是这么建的），"
                       + "用 sourceID 查在 id 含非法字符时会永远查不到")
+        XCTAssertTrue(sources.contains("AppEnvironment.demoSourcesActive ||"),
+                      "demo 例外必须显式走 AppEnvironment 的门，不许删掉真实判定")
+        let envCode = try appSource("AppEnvironment.swift")
+        let demoGate = try body(of: "demoSourcesActive", in: envCode)
+        XCTAssertTrue(demoGate.contains("#if DEBUG") && demoGate.contains("isPreview"),
+                      "demo 门必须同时被 DEBUG 编译开关与预览包标志挡住，生产构建里恒为 false")
         XCTAssertTrue(sources.contains("filter(\\.enabled)"),
                       "只列已启用的来源：停用的来源不该出现在位置面板里")
     }

@@ -213,6 +213,9 @@ struct SearchView: View {
         // `FF_UI_TRUNCATED=1`：造 240 条结果，看上限（200）生效时的状态栏。
         // 与 `FF_UI_EMPTY_RESULTS` 互斥（都改结果），所以排在其后、谁后谁生效。
         model.applyPreviewTruncatedResultsIfRequested()
+        // `FF_UI_DEMO=1`：三台不同厂商的样例来源 + 跨来源结果，演「一次搜索问多台设备」。
+        // 与上面两个改结果的钩子互斥，排在它们之后（谁后谁生效）。
+        model.applyPreviewDemoResultsIfRequested()
         // `FF_UI_PIN=1`：程序自己钉一次，用来取「钉住的窗口」的证据。
         //
         // ★ 为什么必须有钩子：钉住是一次点击，而锁屏/无人值守时点不了
@@ -220,7 +223,28 @@ struct SearchView: View {
         //   这件事一并演出来——两张截图就是一个前后对照。
         if AppEnvironment.isPreview,
            ProcessInfo.processInfo.environment["FF_UI_PIN"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { model.pinCurrentResults() }
+            // `FF_UI_DEMO_SECOND=查询词`：钉住一批之后**换一个词接着搜**——钉住窗
+            // 挪到搜索框上方（下方被新结果占住，即 present 摆位规矩 2 的情形），
+            // 结果模块换成第二组。三步各自等上一节拍，避免互相抢主线程。
+            let secondQuery = ProcessInfo.processInfo.environment["FF_UI_DEMO_SECOND"]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                if secondQuery != nil { model.trimPreviewDemoResultsForPinningIfRequested() }
+                model.pinCurrentResults()
+            }
+            if let secondQuery, !secondQuery.isEmpty {
+                // ★ 结果注入必须比设词晚一拍：程序里改 `query` 会经 SwiftUI 绑定
+                //   再触发一次 `changedQuery()`，同一拍注入的结果会被它覆盖回
+                //   通用夹具（实测踩过：列表显示的是 fixtures 而不是第二组）。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    model.applyPreviewDemoSecondQueryIfRequested()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    model.applyPreviewDemoSecondResultsOnly()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.9) {
+                    PinnedResultsWindows.shared.demoMovePanelsAboveField()
+                }
+            }
         }
         #endif
         if AppEnvironment.isPreview, ProcessInfo.processInfo.environment["FF_UI_SETTINGS"] == "1", !configuredPreviewSettings {

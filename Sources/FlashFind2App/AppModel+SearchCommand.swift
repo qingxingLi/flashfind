@@ -37,7 +37,8 @@ extension AppModel {
                 sourceID: config.sourceID,
                 displayName: config.displayName,
                 roots: config.scopes,
-                ready: nativeProviders[config.id]?.ready == true)
+                // 仅预览 demo：来源按已就绪画，别让截图里出现「有它的结果却说未连接」。
+                ready: AppEnvironment.demoSourcesActive || nativeProviders[config.id]?.ready == true)
         }
     }
 

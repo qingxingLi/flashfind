@@ -959,6 +959,22 @@ final class NASSourceWizardController: ObservableObject {
     /// 仅预览包使用 FF_UI_SOURCES 构造来源，不连接设备或持久化。
     func loadPreviewSavedSourcesIfRequested() {
         guard AppEnvironment.isPreview, !previewSavedSourcesLoaded else { return }
+        // `FF_UI_DEMO=1`：三家**不同厂商**的样例来源，用来演「一次搜索同时问几台设备」。
+        //
+        // 与 `FF_UI_SOURCES=N` 分开：那个只会造 N 台一模一样的群晖来源（数行数用的），
+        // 来源列全是同一个名字，证明不了「多设备合并」。这里的三台名字与厂商
+        // 来自 `AppEnvironment.demoSourceSpecs`，结果行引用的也是同一份。
+        if ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1" {
+            previewSavedSourcesLoaded = true
+            nasSources = AppEnvironment.demoSourceSpecs.map { spec in
+                var source = NASSourceConfig(id: spec.id, name: spec.name, host: spec.host,
+                                             port: 5001, username: "demo", scopes: spec.scopes)
+                source.vendor = spec.vendor
+                source.enabled = true
+                return source
+            }
+            return
+        }
         guard let raw = ProcessInfo.processInfo.environment["FF_UI_SOURCES"],
               let count = Int(raw), count > 0 else { return }
         previewSavedSourcesLoaded = true

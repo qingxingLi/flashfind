@@ -14,6 +14,66 @@ enum AppEnvironment {
         guard isPreview, let name = ProcessInfo.processInfo.environment["FF_UI_APPEARANCE"] else { return nil }
         return NSAppearance(named: name == "dark" ? .darkAqua : .aqua)
     }
+
+    /// `FF_UI_DEMO=1` 且在预览包里：demo 来源按「已就绪」画。
+    ///
+    /// ★ 为什么必须有这一档：demo 结果挂在三台假来源名下，而位置栏的副标题
+    ///   由 `ready` 决定（`SourceEntry.locationSubtitle`）。没有真实会话，
+    ///   `ready` 恒为 false，截出来的图就是「列表里全是它的结果、位置栏却说
+    ///   未连接」的自相矛盾。夹具摆什么状态是截图的事，不许反向影响生产判定。
+    static var demoSourcesActive: Bool {
+        #if DEBUG
+        return isPreview && ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1"
+        #else
+        return false
+        #endif
+    }
+
+    /// 预览演示：三台**不同厂商**的样例来源（群晖 / 飞牛 / OpenList）。
+    ///
+    /// 为什么单独定义一处：来源由 `NASSourceWizardController` 造，结果行的
+    /// `sourceName` / `sourceID` 由 `AppModel` 写，两边必须一一对应——分开写名字，
+    /// 改一个忘一个，截出来的图就会「来源列写着 A、位置栏里没有 A」。
+    ///
+    /// `host` 全落在 `192.0.2.0/24`（RFC 5737 的 TEST-NET-1，文档专用网段），
+    // MARK: - 预览演示数据（`FF_UI_DEMO=1`）
+
+    /// 演示结果行的公共形状。文件名、大小、修改时间都是编的；
+    /// 分数仍由 `SearchRanking` 真算、排序仍走 `SearchResultMerge`。
+    typealias DemoRow = (name: String, path: String, bytes: Int64, source: Int, daysAgo: Int)
+
+    /// 第一组：查询词「2026」。三条来源各有命中，扩展名覆盖
+    /// pdf / 图片 / 表格 / 视频 / 压缩包 / 音频 / 文档，类型条与图标才有东西可看；
+    /// `daysAgo` 拉开，排序才看得出「新的在前」。
+    static let demoRows: [DemoRow] = [
+        ("2026年度产品路线图.pdf", "/Project/规划/2026年度产品路线图.pdf", 2_400_000, 1, 1),
+        ("2026-京都-秋-001.jpg", "/Photo/旅行/2026-京都-秋-001.jpg", 5_600_000, 0, 3),
+        ("2026-Q4-预算.xlsx", "/Document/财务/2026-Q4-预算.xlsx", 168_000, 1, 6),
+        ("2026春节-家庭录像.mp4", "/Video/家庭/2026春节-家庭录像.mp4", 1_200_000_000, 0, 20),
+        ("2026-09-自动备份.zip", "/Backup/2026-09-自动备份.zip", 340_000_000, 2, 32),
+        ("2026-音乐节-现场.flac", "/Music/现场/2026-音乐节-现场.flac", 48_000_000, 2, 55),
+        ("2026年度总结.docx", "/Document/汇报/2026年度总结.docx", 36_000, 1, 8),
+        ("2026-10-会议纪要.md", "/Project/会议/2026-10-会议纪要.md", 12_000, 1, 2),
+    ]
+
+    /// 第二组：查询词「旅行」（`FF_UI_DEMO_SECOND`）。钉住第一组之后接着搜的
+    /// 那一批——路径全含「旅行」，来源仍然三台各有份，跟第一组明显不是一批。
+    static let demoSecondRows: [DemoRow] = [
+        ("2026-京都-秋-001.jpg", "/Photo/旅行/2026-京都-秋-001.jpg", 5_600_000, 0, 3),
+        ("京都五日行程单.pdf", "/Document/旅行/京都五日行程单.pdf", 88_000, 1, 5),
+        ("2026春节-家庭录像.mp4", "/Video/旅行/2026春节-家庭录像.mp4", 1_200_000_000, 0, 20),
+        ("行李打包清单.xlsx", "/Document/旅行/行李打包清单.xlsx", 24_000, 2, 12),
+    ]
+
+    /// 三台**不同厂商**的样例来源。与 `demoRows` 的 `source` 下标一一对应——
+    /// 分开写名字，改一个忘一个，截出来的图就会「来源列写着 A、位置栏里没有 A」。
+    /// 不会指向任何真实设备；搜根用通用的共享名，不用真机上的目录。
+    static let demoSourceSpecs: [(id: String, name: String, vendor: NASSourceConfig.Vendor,
+                                  host: String, scopes: [String])] = [
+        ("preview-source-0", "家庭 NAS", .synology, "192.0.2.11", ["/Photo", "/Video"]),
+        ("preview-source-1", "书房 NAS", .fnos, "192.0.2.12", ["/Project", "/Document"]),
+        ("preview-source-2", "云盘", .openlist, "192.0.2.13", ["/Music", "/Backup"]),
+    ]
     static func fixtures(for query: String) -> [SearchResult] {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         if query == "empty" || query == "error" { return [] }

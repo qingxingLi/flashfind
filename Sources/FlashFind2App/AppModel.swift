@@ -531,6 +531,80 @@ final class AppModel: ObservableObject {
         displayedTokenBar = tokenBar
     }
 
+    /// 预览构建：造「一次搜索跨三台 NAS」的结果集。
+    ///
+    /// `FF_UI_DEMO=1`，来源由 `loadPreviewSavedSourcesIfRequested` 用同一份
+    /// `AppEnvironment.demoSourceSpecs` 造出来。为什么要单开一个钩子：
+    /// `FF_UI_SAMPLE_RESULTS` 的行全挂在「此 Mac」名下，右侧来源列只有一个名字——
+    /// 那张图能证明「列表能摆几行」，证明不了「一次查询同时问了几台设备、
+    /// 结果按匹配度合到一起」。三条来源各有命中，来源列才会出现三个不同的名字。
+    ///
+    /// 文件名、大小、修改时间都是编的，只走视图，不发任何请求；
+    /// 分数仍由 `SearchRanking` 真算、排序仍走 `SearchResultMerge`——
+    /// 否则顺序退回旧口径，截图里的排序就和真机不一样了。
+    func applyPreviewDemoResultsIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1" else { return }
+        setPreviewDemoResults(AppEnvironment.demoRows)
+    }
+
+    /// 行数据 → 夹具结果。分数仍由 `SearchRanking` 真算、排序仍走
+    /// `SearchResultMerge`——否则顺序退回旧口径，截图里的排序就和真机不一样了。
+    private func setPreviewDemoResults(_ rows: [AppEnvironment.DemoRow]) {
+        let specs = AppEnvironment.demoSourceSpecs
+        let now = Date()
+        setFixtureResults(rows.enumerated().map { index, row in
+            let spec = specs[row.source]
+            var result = SearchResult(id: "demo-\(index)-\(row.name)", name: row.name, relativePath: row.path,
+                                      sourceID: spec.id, sourceName: spec.name, kind: "file",
+                                      size: row.bytes, localURL: nil, rank: 2)
+            result.modifiedDate = now.addingTimeInterval(-86_400 * Double(row.daysAgo))
+            result.score = SearchRanking.score(name: row.name, path: row.path, query: query,
+                                               modified: result.modifiedDate, now: now).score
+            return result
+        })
+        resultsAreCurrent = true
+        // 样例结果不带真实告警：否则状态栏会写「请先填写 NAS 的地址和账号」，
+        // 看截图的人会以为那是界面的一部分。
+        searchWarnings = []
+        status = ""
+        displayedRevision = contextRevision
+        displayedQuery = query
+        displayedScope = scope
+        displayedTokenBar = tokenBar
+    }
+
+    /// 钉住前把结果裁到 3 行：演示「钉住一批、再搜一批」（`FF_UI_DEMO_SECOND`）时，
+    /// 钉住窗要挪到搜索框上方，8 行的窗放不下；3 行的钉住窗正好在搜索框与菜单栏
+    /// 之间。也可以理解为用户钉住前先用类型条收窄过——一个合理的状态。
+    func trimPreviewDemoResultsForPinningIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1",
+              ProcessInfo.processInfo.environment["FF_UI_DEMO_SECOND"] != nil else { return }
+        setPreviewDemoResults(Array(AppEnvironment.demoRows.prefix(3)))
+    }
+
+    /// 钉住之后换一个词接着搜：搜索框显示第二个查询词，结果模块换第二组行。
+    /// 分成两步：本方法只**设词**（会触发 `changedQuery()` 走一遍真实管线，
+    /// 在预览态它先填通用夹具）；第二组结果由 `applyPreviewDemoSecondResultsOnly`
+    /// 在绑定回调稳定之后再覆盖——同一拍写会被那次回调冲掉。
+    func applyPreviewDemoSecondQueryIfRequested() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1",
+              let second = ProcessInfo.processInfo.environment["FF_UI_DEMO_SECOND"],
+              !second.isEmpty else { return }
+        query = second
+        changedQuery()
+    }
+
+    /// 第二组结果的单独注入口（见 `applyPreviewDemoSecondQueryIfRequested` 的时序说明）。
+    func applyPreviewDemoSecondResultsOnly() {
+        guard AppEnvironment.isPreview,
+              ProcessInfo.processInfo.environment["FF_UI_DEMO"] == "1",
+              ProcessInfo.processInfo.environment["FF_UI_DEMO_SECOND"] != nil else { return }
+        setPreviewDemoResults(AppEnvironment.demoSecondRows)
+    }
+
     /// 预览构建：造 240 条结果，用来看**上限生效时**的状态栏与结果区。
     ///
     /// 为什么需要它：预览壳的 fixture 只回 4 条（搜索什么都一样），

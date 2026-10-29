@@ -298,6 +298,24 @@ final class PinnedResultsWindows {
     /// 当前开着几块（预览与核对用）。
     var count: Int { panels.count }
 
+    #if DEBUG
+    /// 仅预览：把已钉住的窗挪到**搜索框上方**。
+    ///
+    /// 演示「钉住一批、再搜一批」时，搜索框下方被新的结果模块占着——这正对应
+    /// `present` 摆位规矩的第 2 条「下方放不下就摆上方」，只是这里的「放不下」
+    /// 由演示脚本安排。生产构建编译掉，不影响真实摆位。
+    func demoMovePanelsAboveField() {
+        guard AppEnvironment.isPreview,
+              let anchor = SearchWindowRegistry.shared.fieldFrame else { return }
+        for panel in panels.values {
+            let frame = NSRect(x: anchor.minX,
+                               y: anchor.maxY + SearchModuleLayout.moduleGap,
+                               width: panel.frame.width, height: panel.frame.height)
+            panel.setFrame(frame, display: true)
+        }
+    }
+    #endif
+
     private func makePanel(for snapshot: PinnedResults, model: AppModel, height: CGFloat) -> NSPanel {
         let panel = PinnedResultsPanel(contentRect: NSRect(x: 0, y: 0,
                                                            width: SearchModuleLayout.pinnedWidth,
