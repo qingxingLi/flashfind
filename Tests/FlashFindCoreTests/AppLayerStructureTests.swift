@@ -1717,8 +1717,15 @@ final class AppLayerStructureTests: XCTestCase {
                       "窗口高度由开窗时算一次传进来，视图不许再自己按行数算")
         XCTAssertFalse(pinned.contains("SearchPanelSizing"),
                        "★ 钉住窗里不许再有尺寸同步：上屏后改尺寸就是「跳一下」的来源")
-        XCTAssertTrue(pinned.contains("snapshot.rows(fileType: snapshot.fileType"),
-                      "开窗高度要按**首屏真的会显示的那批行**算（先筛再量），否则第一帧就会缩一次")
+        // ★★ 2026-10-30 改口（用户报障：「点击固定住，会直接显示搜索不到结果了，并且搜索结果会变小」）：
+        //   这里原来断言高度要按**筛后行数**算（"先筛再量"）。那条规矩在
+        //   「筛选判错把整批筛成 0 行」时会通过 `windowHeight` 里的 `max(visible, 1)`
+        //   把窗口开成一行高 —— 于是判定错误被放大成「窗口塌了」。
+        //   现在高度只按**快照行数**算：筛是临时的探索，筛少了底下留白、筛空了居中写一句话。
+        XCTAssertTrue(pinned.contains("snapshot.windowHeight(rowCount: snapshot.rows.count"),
+                      "开窗高度要按**快照本身的行数**算：按筛后行数算时，筛到 0 行窗口会塌成一行")
+        XCTAssertFalse(pinned.contains("windowHeight(rowCount: snapshot.rows(fileType:"),
+                       "★ 不许按「钉住那一刻筛完剩几行」算高度（那是把筛选结果当成这批的规模）")
 
         // 快照本身在 Core：条数与高度都由同一份数据算。
         let core = codeOnly(try coreSource("PinnedResults.swift"))

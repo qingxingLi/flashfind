@@ -42,12 +42,27 @@ public enum SearchResultFilter {
         case .unrestricted:
             return true
         case .local:
-            // 本机结果的 `sourceID` 恒为 nil（`LocalFolderSearch` / `AppCatalog` 都是这么造的）。
-            return result.sourceID == nil
+            // ★★ 本机结果有三种 id，**不能只看「是不是 nil」**：`nil`（`LocalFolderSearch`
+            //   的文件夹遍历、夹具）、`local_mac`（`SpotlightProvider`，本机主搜索路径）、
+            //   `local_apps`（应用搜索）。判据只有一处：`SearchSource.isLocalResultSource`。
+            //   2026-10-30 的「钉住后 0 / 59 项」就是这里写成了 `sourceID == nil`：
+            //   Spotlight 那一整批（带 `local_mac`）被当成「不属于此 Mac」全筛掉了。
+            return SearchSource.isLocalResultSource(result.sourceID)
         case .sourceRoot(let sourceID, let root):
-            guard let raw = result.sourceID,
-                  NASSourceConfig.protocolIdentifier(for: raw)
-                    == NASSourceConfig.protocolIdentifier(for: sourceID) else { return false }
+            // ★★ 本机来源的 id **有三种写法**（`nil` / `local_mac` / `local_apps`），
+            //   而 NAS 来源只有一个 id。所以「是不是同一个来源」在本机这一侧必须按
+            //   **身份**判，不能按字符串比：拿 `local_mac` 的根去比 nil 的行，
+            //   结果是「此 Mac 的整根共享里一行都不剩」——与 `.local` 那个 bug 同族，
+            //   只是入口换成了侧边栏的「此 Mac → /」。
+            let sameSource: Bool
+            if SearchSource.isLocalResultSource(sourceID) {
+                sameSource = SearchSource.isLocalResultSource(result.sourceID)
+            } else {
+                guard let raw = result.sourceID else { return false }
+                sameSource = NASSourceConfig.protocolIdentifier(for: raw)
+                    == NASSourceConfig.protocolIdentifier(for: sourceID)
+            }
+            guard sameSource else { return false }
             return path(result.relativePath, isUnder: root)
         }
     }

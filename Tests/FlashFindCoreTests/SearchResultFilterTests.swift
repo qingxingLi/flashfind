@@ -58,6 +58,61 @@ final class SearchResultFilterTests: XCTestCase {
         XCTAssertFalse(SearchResultFilter.matches(location: .local, result: row("a.pdf", sourceID: "src1")))
     }
 
+    /// ★★ 2026-10-30 报障的原样复原：**Spotlight 的结果带 `sourceID: "local_mac"`**，
+    ///   不是 nil。原来的 `.local` 判据写 `sourceID == nil`，于是「选此 Mac → 钉住」
+    ///   时整批被判成「不属于此 Mac」，题头 `0 / 59 项`、正文写「没有符合当前筛选的文件」。
+    ///
+    ///   这条用例在 bug 存在时必须红：修前 `matches(.local, local_mac 的行)` 是 `false`。
+    func testLocalLocationAcceptsSpotlightAndAppRows() {
+        XCTAssertTrue(SearchResultFilter.matches(location: .local,
+                                                 result: row("a.pdf", sourceID: SearchSource.local.id)),
+                      "Spotlight（本机主搜索路径）的结果必须算「此 Mac」")
+        XCTAssertTrue(SearchResultFilter.matches(location: .local,
+                                                 result: row("Xcode.app", sourceID: SearchSource.apps.id)),
+                      "应用搜索同属 .local 一侧")
+        // 反面：NAS 的行不许被 .local 收进来。
+        XCTAssertFalse(SearchResultFilter.matches(location: .local,
+                                                  result: row("a.pdf", sourceID: "nas-fixture")))
+    }
+
+    /// 判「本机来源」只有一处出处（`SearchSource.isLocalResultSource`），三种写法都要认。
+    func testLocalSourcePredicateCoversAllThreeIdentifiers() {
+        XCTAssertTrue(SearchSource.isLocalResultSource(nil))
+        XCTAssertTrue(SearchSource.isLocalResultSource("local_mac"))
+        XCTAssertTrue(SearchSource.isLocalResultSource("local_apps"))
+        XCTAssertFalse(SearchSource.isLocalResultSource("nas-fixture"))
+        XCTAssertFalse(SearchSource.isLocalResultSource(""), "空串不是「没来源」，别让它冒充本机")
+    }
+
+    /// ★ 同族的第二个洞：侧边栏「此 Mac → /」给的是 `.sourceRoot(sourceID: "local_mac", root: "/")`。
+    ///   按字符串比 id 时，`LocalFolderSearch` 的 nil 行一条都匹配不上 ——
+    ///   症状同样是「选了整根共享，一行都不剩」。
+    func testLocalRootTargetAcceptsNilAndSpotlightRows() {
+        let target = SearchTarget.sourceRoot(sourceID: SearchSource.local.id, root: "/")
+        XCTAssertTrue(SearchResultFilter.matches(location: target,
+                                                 result: row("a.pdf", sourceID: nil, path: "/Users/x/a.pdf")),
+                      "本机文件夹遍历的行没有 sourceID，仍属「此 Mac」")
+        XCTAssertTrue(SearchResultFilter.matches(location: target,
+                                                 result: row("b.log", sourceID: "local_mac", path: "/Users/x/b.log")))
+        XCTAssertFalse(SearchResultFilter.matches(location: target,
+                                                  result: row("c.pdf", sourceID: "nas-fixture", path: "/Book/c.pdf")),
+                       "NAS 的行不能因为「本机判据放宽」也被收进来")
+    }
+
+    /// 端到端式的复原：一整批 Spotlight 行 + `.local` 快照 ⇒ 一条都不能少。
+    ///
+    /// 单独测 `matches` 只能证明判定对了；这条证明**钉住的窗口里不会再变成 0 行**。
+    func testPinningALocalBatchKeepsEverySpotlightRow() {
+        let spotlightRows = (0..<59).map {
+            row("测试-\($0).log", sourceID: SearchSource.local.id, path: "/Users/x/Documents/测试-\($0).log")
+        }
+        let pinned = PinnedResults(query: "测试", rows: spotlightRows, totalMatched: 59,
+                                   locationTitle: "此 Mac", fileType: nil, location: .local)
+        XCTAssertEqual(pinned.rows(fileType: nil, location: .local).count, 59,
+                       "「此 Mac」里的一整批 Spotlight 结果，钉住后必须原样还在")
+        XCTAssertEqual(pinned.countText(matching: 59), "59 项")
+    }
+
     func testSourceRootRequiresSameSourceAndPrefix() {
         let target = SearchTarget.sourceRoot(sourceID: "src1", root: "/Book")
         XCTAssertTrue(SearchResultFilter.matches(location: target, result: row("a.pdf", path: "/Book/a.pdf")))

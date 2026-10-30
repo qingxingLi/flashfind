@@ -27,6 +27,24 @@ public struct SearchSource: Identifiable, Hashable, Sendable {
     public static func nas(id: String, displayName: String) -> SearchSource {
         SearchSource(id: id, name: displayName, type: .nas, displayName: displayName)
     }
+
+    /// 「这条结果的来源算不算本机」的**唯一判据**。
+    ///
+    /// ★★ 2026-10-30 报障（用户：钉住后变成「搜索不到结果」且窗口变小）。
+    ///   `SearchResultFilter` 的 `.local` 分支原来写 `result.sourceID == nil`，
+    ///   注释还断言「本机结果的 sourceID 恒为 nil，`LocalFolderSearch` / `AppCatalog`
+    ///   都是这么造的」。**这句话是错的**：本机结果有三种写法 ——
+    ///   - `nil`：`LocalFolderSearch` 的文件夹遍历、预览夹具；
+    ///   - `"local_mac"`：`SpotlightProvider`（**主搜索路径**，绝大多数本机结果都是它）；
+    ///   - `"local_apps"`：`AppSearchProvider`。
+    ///   于是「选此 Mac 搜（正常）→ 点钉住 → 就地重筛」时，整批 Spotlight 结果被判成
+    ///   「不符合位置」⇒ 题头 `0 / 59 项`、正文「这一批结果里没有符合当前筛选的文件」、
+    ///   窗口按 1 行高开出来（用户看到的就是「结果变小了」）。
+    ///   判「本机」只能按**来源身份**，不能按「id 是不是 nil」。
+    public static func isLocalResultSource(_ sourceID: String?) -> Bool {
+        guard let sourceID else { return true }
+        return sourceID == local.id || sourceID == apps.id
+    }
 }
 public enum ProviderSearchState: String, Sendable {
     case searching, completed, cancelled, timedOut, failed, degraded, blocked

@@ -213,8 +213,15 @@ final class PinnedResultsWindows {
     func present(_ snapshot: PinnedResults, model: AppModel, near anchor: NSRect?) -> Bool {
         guard !snapshot.isEmpty, panels[snapshot.id] == nil else { return false }
         self.model = model
-        let height = snapshot.windowHeight(rowCount: snapshot.rows(fileType: snapshot.fileType,
-                                                                  location: snapshot.location).count,
+        // ★★ 高度按**快照本身的行数**算，不按「钉住那一刻筛完剩几行」。
+        //   2026-10-30 报障（用户：钉住后「结果变小、还显示搜索不到」）：
+        //   原来的写法传的是筛后行数，而 `.local` 判据有 bug 把整批筛成 0 行，
+        //   `windowHeight` 里的 `max(visible, 1)` 就把窗口开成**一行高**——
+        //   于是「筛选判错」被放大成「窗口塌了」。就算判据是对的，用户钉住时
+        //   恰好筛到 1 行（或筛到空）也会得到一条玻璃缝。
+        //   快照的行数才是「这一批有多少东西」；筛只是临时的探索，
+        //   筛少了底下留白、筛空了居中写一句话，窗口都不该变形。
+        let height = snapshot.windowHeight(rowCount: snapshot.rows.count,
                                            rowHeight: SearchLayout.rowHeight)
         let panel = makePanel(for: snapshot, model: model, height: height)
         let size = panel.frame.size
