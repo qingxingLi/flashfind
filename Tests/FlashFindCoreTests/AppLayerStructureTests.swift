@@ -249,9 +249,12 @@ final class AppLayerStructureTests: XCTestCase {
                        "提示条高度不能在两处各加一遍，否则列表与提示条之间会多出一条空白")
 
         let controller = codeOnly(try appSource("SearchPanelController.swift"))
-        let place = try XCTUnwrap(braceBlock(after: "private func placeResultsBelowField()", in: controller),
-                                  "找不到 placeResultsBelowField")
-        XCTAssertTrue(place.contains("SearchModuleLayout.moduleGap"),
+        // ★ 2026-10-30 改口：摆位入口从 `placeResultsBelowField` 换成 `layoutForResults`
+        //   （放不下时要抬搜索框）。间距仍由 Core 的 `moduleGap` 决定，只是改由
+        //   `SearchWindowLift.plan` 的 `gap:` 参数传进去。
+        let place = try XCTUnwrap(braceBlock(after: "private func layoutForResults()", in: controller),
+                                  "找不到 layoutForResults")
+        XCTAssertTrue(place.contains("gap: SearchModuleLayout.moduleGap"),
                       "两块窗口之间那道空白仍由 Core 的 moduleGap 决定（现在是窗口间距）")
 
         let banner = try XCTUnwrap(
@@ -1562,6 +1565,9 @@ final class AppLayerStructureTests: XCTestCase {
                       "★ 豁免名单必须逐窗判 isVisible：隐藏窗口的 frame 留在原地不动")
         XCTAssertTrue(body.contains("$0.canBecomeKey"),
                       "菜单/提示这类辅助窗口弹出时也「可见」，不许被当成自家窗口")
+        // ★ 2026-10-30 报障「一截图就直接消失了」：截图遮罩上的那一下点击要放行。
+        XCTAssertTrue(body.contains("overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal("),
+                      "★ 截图遮罩（盖满整屏的高层窗口）上不收窗：判据在 Core，探测在 ScreenOverlayProbe")
         XCTAssertFalse(body.contains("results.panel.frame"),
                        "★ 结果窗的 frame 不许单独豁免——它收起来之后 frame 不变，"
                        + "正是这条报障的根因")
@@ -1686,6 +1692,13 @@ final class AppLayerStructureTests: XCTestCase {
         let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
         XCTAssertTrue(pinned.contains("panel.level = .floating"),
                       "钉住必须置顶：用户切到别的 App 之后还要看得见")
+        // ★★ 2026-10-30 报障（用户原话）：「闪寻的钉住还是伪钉住，我想要的钉住是
+        //   始终显示在屏幕的上层」。`NSPanel.hidesOnDeactivate` **默认是 true** ——
+        //   点别的 App 时整块窗口跟着 App 隐起来，钉住就名存实亡。
+        //   ★ 这条在层级设成 floating 的前提下才成立：`level` 管「谁压谁」，
+        //   `hidesOnDeactivate` 管「还画不画」，两样缺一样都是假钉住。
+        XCTAssertTrue(pinned.contains("hidesOnDeactivate = false"),
+                      "★★ 钉住的窗口不许跟着 App 一起藏起来（NSPanel 默认会藏）")
         XCTAssertTrue(pinned.contains(".canJoinAllSpaces"),
                       "切 Space 时也要跟着，否则「钉住」只在当前桌面成立")
         XCTAssertTrue(pinned.contains("isMovableByWindowBackground = true"),
@@ -1752,6 +1765,130 @@ final class AppLayerStructureTests: XCTestCase {
         // 钉住的行不在当前结果里了，打开动作必须走快照解析这条路。
         XCTAssertTrue(modelCode.contains("func openPinned("),
                       "钉住的行要能打开：解析入口必须是快照版（不要求还在 results 里）")
+    }
+
+    /// ★★ 结果展开时**抬搜索框**，而不是把结果顶上去压住它。
+    ///
+    /// 2026-10-30 用户原话：「把搜索框拉到屏幕下方，输入文字闪寻的搜索框会直接被搜索结果
+    /// 盖住；聚焦搜索的做法是随着搜索框的变大逐渐往上走，最后关闭的时候会跳到设定好的
+    /// 屏幕的某个位置」。
+    ///
+    /// 几何本身在 Core（`SearchWindowLiftTests` 覆盖三种处境）。这里只守**接线**，
+    /// 守的是三条会静默退化的东西：
+    /// 1. 位置只在协调者那一处算（结果窗不许再自己「往上顶到屏幕底边」）；
+    /// 2. 收窗 / 结果收起时回到 `homeOrigin`（用户设定的位置）；
+    /// 3. 判定走 Core，不在视图里拼第二套。
+    func testResultsLayoutLiftsTheFieldInsteadOfCoveringIt() throws {
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        XCTAssertTrue(controller.contains("SearchWindowLift.plan("),
+                      "★ 几何必须走 Core：App 层再算一遍就是第二份真相")
+        XCTAssertTrue(controller.contains("homeOrigin"),
+                      "要被抬起来的那个窗口必须记住「用户设定的位置」，否则放不下去也回不来")
+        let hidePanel = try XCTUnwrap(braceBlock(after: "model.hidePanel = ", in: controller),
+                                      "找不到 model.hidePanel")
+        XCTAssertTrue(hidePanel.contains("snapHome()"),
+                      "★ 收窗时先回到设定位置（用户：「关闭的时候会跳到设定好的位置」）")
+        let snap = try XCTUnwrap(braceBlock(after: "private func snapHome()", in: controller))
+        XCTAssertTrue(snap.contains("panel.setFrame(frame, display: false)"),
+                      "回位不用动画：收窗时那一段动画根本看不见")
+        let layout = try XCTUnwrap(braceBlock(after: "private func layoutForResults()", in: controller))
+        XCTAssertTrue(layout.contains("results.userMoved"),
+                      "结果被用户拖走过就不许再摆：两块互不相干是他 2026-10-28 定的")
+        // ★★ 摆位只有一条路。2026-10-30 这里曾经是
+        //   `guard let plan = SearchWindowLift.plan(…) else { restoreHome(); return }`，
+        //   于是「结果放得下」这条最常见的处境根本没有摆结果窗：用户报
+        //   「第一次打开的搜索结果不在搜索框下方了」，证据里 resultsWindowOrigin 是 [0, 0]。
+        XCTAssertTrue(layout.contains("results.place("),
+                      "★ 每条分支都必须真的摆结果窗：放得下也得摆（plan 已改成永远有解）")
+        XCTAssertFalse(layout.contains("guard let plan = SearchWindowLift.plan("),
+                       "★ plan 不许再用可选类型：拿到 nil 就只剩「回位」一条路，结果没人摆")
+
+        // 结果窗不许自己算兜底位置——那条「顶到屏幕底边」正是压住搜索框的元凶。
+        let results = codeOnly(try appSource("SearchResultsPanel.swift"))
+        XCTAssertFalse(results.contains("visible.minY + 12"),
+                       "★ 结果窗不许自己往上顶：抬的是搜索框，不是结果")
+        XCTAssertFalse(results.contains("align(under:"), "摆位入口只有一个（协调者算好传进来）")
+        XCTAssertTrue(results.contains("func place("), "结果窗只接受算好的 frame")
+    }
+
+    /// ★★ 浅色那块「背景高斯模糊」是 AppKit 视图，圆角必须它自己裁一次。
+    ///
+    /// 依据是原理而不是本机故障：`NSVisualEffectView` 是真正的 NSView，SwiftUI 的
+    /// `clipShape` 要跨到 NSView 的 layer 上才生效。2026-10-30 实测把裁剪清空后
+    /// 重拍比对，圆角边缘有 ≤17/255 的差异（材质被裁掉 1–2pt）、肉眼几乎看不出，
+    /// 所以这条用例守的是「别把这道裁剪删了」，不是「它修好了某个可见 bug」。
+    /// 半径仍必须从模块传进来（同一份真相），不许在模糊视图里另写一个数。
+    func testBackdropBlurRoundsItsOwnCorners() throws {
+        let blur = codeOnly(try appSource("SearchBackdropBlur.swift"))
+        XCTAssertTrue(blur.contains("masksToBounds = true"),
+                      "★★ NSVisualEffectView 必须自己裁圆角：跨到 AppKit 的视图外层裁不到")
+        XCTAssertTrue(blur.contains("cornerRadius"),
+                      "自己裁就得有半径")
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        XCTAssertTrue(chrome.contains("SearchBackdropBlur(cornerRadius: radius)"),
+                      "半径必须从模块传进去（同一份真相），不许在模糊视图里另写一个数")
+    }
+
+    /// ★ 深色玻璃要比系统 `.regular` 更暗（对齐聚焦搜索）；浅色换成背景高斯模糊。
+    ///
+    /// 2026-10-30 用户拿两张实拍对比：「暗色模式下闪寻的颜色和聚焦搜索不一样，
+    /// 聚焦搜索更暗一些，感觉更舒服」；同一天又定了浅色：「改成底部背景高斯模糊质感」。
+    /// 两档底色都由 Core 给值，视图里不许出现裸数字。
+    func testDarkGlassIsDarkerThanTheSystemDefault() throws {
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        XCTAssertTrue(chrome.contains("SearchGlassTint.alpha(dark: isDark)"),
+                      "底色取值必须来自 Core（视图里写 0.28 这种数没人能回归）")
+        // ★ 浅色走的是另一条路：真高斯模糊 + 一层薄白膜，不再是「什么都不压」。
+        XCTAssertTrue(chrome.contains("SearchBackdropBlur("),
+                      "浅色必须是**背景高斯模糊**（用户 2026-10-30 原话），不是又一层玻璃")
+        XCTAssertGreaterThan(SearchGlassTint.alpha(dark: false), 0,
+                             "浅色要一层白膜把文字从小花壁上按住，压在模糊背景上")
+        XCTAssertLessThan(SearchGlassTint.alpha(dark: false), 0.3,
+                          "白膜太浓就把高斯模糊的质感盖没了（那不是「模糊质感」，是白板）")
+        XCTAssertGreaterThan(SearchGlassTint.alpha(dark: true), 0.1,
+                             "深色要能看出差别（太小等于没压）")
+        // ★ 用户 2026-10-30 从三档实拍（0.28 / 0.45 / 0.62）里挑的就是 0.62，
+        //   所以上限从 0.5 放到 0.7。再往上就真是一块实心板了。
+        XCTAssertLessThan(SearchGlassTint.alpha(dark: true), 0.7,
+                          "★ 超过 0.7 就把玻璃压成一块实心板，「动态玻璃」这个形态就没了")
+    }
+
+    /// ★ 悬停那层液态玻璃：看得见，但不能把界面糊住。
+    ///
+    /// 用户 2026-10-30：「搜索鼠标滑动时覆盖一层液态玻璃遮罩」。
+    func testHoverVeilIsVisibleWithoutWashingOutTheContent() throws {
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        XCTAssertTrue(chrome.contains(".searchHoverVeil(shape: shape, isDark: isDark)"),
+                      "两块模块都必须挂上悬停涂层（搜索框与结果块）")
+        let veil = codeOnly(try appSource("SearchHoverVeil.swift"))
+        XCTAssertTrue(veil.contains("allowsHitTesting(false)"),
+                      "★ 涂层一旦参与命中测试，模块空白处就拖不动窗口了（10-28 老坑）")
+        XCTAssertTrue(veil.contains("onContinuousHover"),
+                      "要高光跟着光标走，`onHover` 只给一个布尔")
+        // ★★ 2026-10-30 用户判断：「悬停光晕没有按窗口圆角裁剪，移到边缘时露到圆角外面」。
+        //
+        //   光晕是固定 440×440 的圆，比搜索框模块（52 高）还高——它必须被裁到
+        //   同一个 `shape` 里。当前窗口恰好等于模块，溢出落在窗口 frame 之外看不出来，
+        //   所以这条守的不是「今天能看见的像素」，而是「光晕属于这块表面」这个契约：
+        //   哪天窗口比模块大，没有它立刻就是一块方角亮斑。
+        XCTAssertTrue(veil.contains(".clipShape(shape)"),
+                      "★ 光晕必须裁到模块圆角里，否则移到边缘就露到圆角外")
+        // ★ 反面：不许用 `ZStack` 叠。ZStack 尺寸取子视图并集，440 的圆会把
+        //   整块膜从 52 撑到 440——膜就不再等于模块，只能靠窗口边界兜着。
+        XCTAssertFalse(veil.contains("ZStack"),
+                       "★ 光晕要 `overlay` 叠（不参与父尺寸），用 `ZStack` 会把膜撑高 8 倍")
+        for dark in [true, false] {
+            XCTAssertGreaterThan(SearchGlassVeil.filmAlpha(dark: dark), 0,
+                                 "整块膜必须看得见（否则「鼠标进来了」根本察觉不到）")
+            XCTAssertLessThan(SearchGlassVeil.filmAlpha(dark: dark), 0.2,
+                              "膜压在所有文字上，浓一点就像发了霉")
+            XCTAssertGreaterThan(SearchGlassVeil.specularAlpha(dark: dark), 0,
+                                 "高光是「液态」感的全部来源，不能为 0")
+            XCTAssertLessThan(SearchGlassVeil.specularAlpha(dark: dark), 0.4,
+                              "高光过亮会把底下的结果标题洗掉")
+        }
+        XCTAssertGreaterThan(SearchGlassVeil.fade, 0, "要有淡入，不能硬切")
+        XCTAssertLessThan(SearchGlassVeil.fade, 0.4, "悬停反馈慢半拍就像卡了")
     }
 
     /// ★ 「继续搜索」：200 条只是第一批，状态栏要给一条继续的路。
@@ -1902,6 +2039,48 @@ final class AppLayerStructureTests: XCTestCase {
                       "玻璃调用必须有运行期门")
         XCTAssertTrue(chrome.contains("#if compiler(>=6.2)"),
                       "玻璃调用必须有编译期门（旧工具链要编得过）")
+    }
+
+    /// ★ 选中行的蓝必须从 Core 取，而且**只染标题**、跟着遮罩走。
+    ///
+    /// 2026-10-30 用户给了两张 iOS 26 电话 App 的实拍：「选中不动时字体变成天蓝色，
+    /// 移动时字体慢慢变蓝色」。三件事缺一不可——
+    /// ① 颜色由 Core 的曲线算（视图里写一个 `.blue` 就再也回归不了「慢慢变」）；
+    /// ② 只有文件名叫蓝（路径与来源标签保持灰，全行染色像报错）；
+    /// ③ 遮罩「在不在」与遮罩「许不许动」必须是两个入参（见下面那条）。
+    func testSelectedRowInkTracksTheLensAndComesFromCore() throws {
+        let row = codeOnly(try appSource("SearchResultRow.swift"))
+        XCTAssertTrue(row.contains("resultInk(position: lensPosition"),
+                      "★ 染色要跟着遮罩位置走：换成一个布尔，遮罩还在路上时字就全蓝了")
+        XCTAssertTrue(row.contains("presence: lensPresence"),
+                      "遮罩淡出时整行要一起退色")
+        XCTAssertFalse(row.contains("Color.blue"),
+                       "视图里不许写死蓝：天蓝/深蓝两档与过渡曲线都在 Core（`SearchSelectionInk`）")
+
+        // 染色只挂在标题上：路径那一段若也被染色，「文件名 / 路径」的层次就没了。
+        let nameBlock = braceBlock(after: "private var nameLabel", in: row) ?? ""
+        XCTAssertTrue(nameBlock.contains("resultInk("), "标题要染")
+        XCTAssertFalse((braceBlock(after: "private var pathText", in: row) ?? "").contains("resultInk("),
+                       "路径不染")
+
+        let ink = codeOnly(try appSource("ResultInk.swift"))
+        XCTAssertTrue(ink.contains("SearchSelectionInk.ink(rowDistance:"),
+                      "曲线只能问 Core")
+        XCTAssertTrue(ink.contains("AnimatablePair(position, presence)"),
+                      "★ 遮罩位置必须在 animatableData 里，否则颜色是硬切（`Color` 不是 Animatable）")
+
+        let module = codeOnly(try appSource("SearchResultsModule.swift"))
+        XCTAssertTrue(module.contains("lensPresence: style == .glass && lensVisible ? 1 : 0"),
+                      "★ 「遮罩在不在」不能和「许不许动」共用一个入参，否则开了"
+                      + "「减少动态效果」字就不变蓝了")
+        XCTAssertTrue(module.contains("lensActive: style == .glass && lensVisible && !reduceMotion"))
+
+        // 参考图那圈蓝青彩边（色散环）由 Core 给值。
+        let chrome = codeOnly(try appSource("SearchGlassChrome.swift"))
+        XCTAssertTrue(chrome.contains("SearchGlassEdge.lensRim(dark: isDark)"),
+                      "遮罩边缘的色散环取值来自 Core")
+        XCTAssertTrue(chrome.contains("SearchGlassEdge.lensSpecular(dark: isDark)"),
+                      "遮罩上的柔光取值来自 Core")
     }
 
     /// ★ 「搜索来源」并入「搜索」后，视图里不许再有它的一级页面分支。

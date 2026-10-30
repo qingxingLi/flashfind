@@ -51,20 +51,12 @@ struct SearchGlassLens: View {
             shape
                 .fill(Color.white.opacity(0.001))
                 .glassEffect(.clear.interactive(), in: shape)
-                .overlay {
-                    // 玻璃在纯色背景上几乎看不见边界，补一圈描边。
-                    // ★ 2026-10-28：原来只描白，白底上等于没画——外圈改由 Core 给
-                    //   （浅色外观是黑色、深色是白色），内圈仍是上亮下暗的高光。
-                    shape.strokeBorder(Color(glassStroke: SearchGlassEdge.lens(dark: isDark)),
-                                       lineWidth: SearchGlassEdge.lensStrokeWidth)
-                        .overlay {
-                            shape.strokeBorder(
-                                LinearGradient(colors: [Color(glassStroke: SearchGlassEdge.lensHighlight(dark: isDark)),
-                                                        .clear],
-                                               startPoint: .top, endPoint: .bottom),
-                                lineWidth: SearchGlassEdge.lensStrokeWidth)
-                        }
-                }
+                // ★ 2026-10-30 按用户给的 iOS 26 实拍补两层（见 `SearchGlassEdge` 的说明）：
+                //   色散环（蓝→青的彩边）+ 左下那点柔光。两者都画在**描边里面**，
+                //   外面那条分界线仍然是最后画、最上面的一层。
+                .overlay { rim }
+                .overlay { specular }
+                .overlay { edge }
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         } else {
@@ -73,6 +65,48 @@ struct SearchGlassLens: View {
         #else
         fallback
         #endif
+    }
+
+    /// 边缘那一圈：外分界线 + 上半段内高光（原有）。
+    private var edge: some View {
+        // 玻璃在纯色背景上几乎看不见边界，补一圈描边。
+        // ★ 2026-10-28：原来只描白，白底上等于没画——外圈改由 Core 给
+        //   （浅色外观是黑色、深色是白色），内圈仍是上亮下暗的高光。
+        shape.strokeBorder(Color(glassStroke: SearchGlassEdge.lens(dark: isDark)),
+                           lineWidth: SearchGlassEdge.lensStrokeWidth)
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(colors: [Color(glassStroke: SearchGlassEdge.lensHighlight(dark: isDark)),
+                                            .clear],
+                                   startPoint: .top, endPoint: .bottom),
+                    lineWidth: SearchGlassEdge.lensStrokeWidth)
+            }
+    }
+
+    /// 色散环：折射把不同波长掰到不同角度，边缘就露出一圈彩边。
+    ///
+    /// `blur` 一点点是必须的：一根纯粹的描线读起来像「又画了一条边」，
+    /// 化开 0.5pt 之后才像光被掰散了。
+    private var rim: some View {
+        shape.strokeBorder(
+            LinearGradient(colors: [Color(glassStroke: SearchGlassEdge.lensRim(dark: isDark)),
+                                    Color(glassStroke: SearchGlassEdge.lensRimFar(dark: isDark))],
+                           startPoint: .topLeading, endPoint: .bottomTrailing),
+            lineWidth: SearchGlassEdge.lensRimWidth)
+            .blur(radius: 0.5)
+    }
+
+    /// 左下那块柔光。用径向渐变而不是实心圆：边缘必须收到 0，
+    /// 否则会看出一个圆的轮廓，像玻璃上贴了张圆纸片。
+    private var specular: some View {
+        GeometryReader { geo in
+            let radius = SearchGlassEdge.lensSpecularRadius
+            RadialGradient(colors: [Color(glassStroke: SearchGlassEdge.lensSpecular(dark: isDark)),
+                                    .clear],
+                           center: .center, startRadius: 0, endRadius: radius)
+                .frame(width: radius * 2, height: radius * 2)
+                .position(x: geo.size.width * 0.16, y: geo.size.height * 0.82)
+        }
     }
 
     /// 没有 Liquid Glass 时的替身。正常走不到（`SearchGlass.style` 已经拦了），
@@ -221,6 +255,10 @@ struct SearchModuleSurface: ViewModifier {
             //   仍然 `allowsHitTesting(false)`：描边是表面的一部分，
             //   它一旦参与命中测试，空白处就又拖不动窗口了（见上面那段注释）。
             .overlay { edge(shape) }
+            // 鼠标滑进来时盖上的那层液态玻璃（2026-10-30 用户：「搜索鼠标滑动时
+            // 覆盖一层液态玻璃遮罩」）。同样只是表面，不参与命中测试——
+            // 否则悬停反馈会把「空白处能拖窗口」这件事一起吃掉。
+            .searchHoverVeil(shape: shape, isDark: isDark)
     }
 
     /// 模块边缘那一圈：外分界线 + 上半段内高光。
@@ -241,16 +279,49 @@ struct SearchModuleSurface: ViewModifier {
     }
 
     @ViewBuilder private func glassShape(_ shape: RoundedRectangle) -> some View {
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            shape.fill(Color.white.opacity(0.001))
-                .glassEffect(.regular, in: shape)
-        } else {
+        if isDark {
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                shape.fill(Color.white.opacity(0.001))
+                    .glassEffect(.regular, in: shape)
+                    .overlay { tint(shape) }
+            } else {
+                shape.fill(.regularMaterial)
+            }
+            #else
             shape.fill(.regularMaterial)
+            #endif
+        } else {
+            // 浅色：**背景真高斯模糊** + 一层薄白膜。
+            //
+            // ★ 2026-10-30 用户：「浅色模式改成底部背景高斯模糊质感」。
+            //   原来浅色也走 `.glassEffect(.regular)`，它把背景洗成一片白——
+            //   糊掉的是颜色，看不到质感。现在改成系统的 behindWindow 模糊，
+            //   壁纸的形状与颜色都还在，只是一片糊；白膜（`SearchGlassTint.lightAlpha`）
+            //   只负责把文字从小花壁上按住。
+            ZStack {
+                // ★ 半径照样传下去：外层 `clipShape` 基本能裁住这块 AppKit 材质
+                //   （2026-10-30 用 `FF_UI_BACKDROP_NO_ROUND=1` 验过，边缘只剩 1–2pt 泄漏），
+                //   所以这里是双保险。见 `SearchBackdropBlur` 的说明。
+                SearchBackdropBlur(cornerRadius: radius)
+                tint(shape)
+            }
         }
-        #else
-        shape.fill(.regularMaterial)
-        #endif
+    }
+
+    /// 压在底面之上的那层「调子」：深色是黑（把玻璃压暗），浅色是白（把文字按住）。
+    ///
+    /// 2026-10-30 用户拿聚焦搜索对标：「暗色模式下闪寻的颜色和聚焦搜索不一样，
+    /// 聚焦搜索更暗一些，感觉更舒服」。`.glassEffect(.regular)` 在浅色壁纸上会被
+    /// 折射得发白，压一层半透明黑才靠近系统那块深灰玻璃。数值在 Core
+    /// （`SearchGlassTint`）。
+    ///
+    /// 画在 `background` 里（`content` 之前），所以正文、图标、结果行不受影响。
+    @ViewBuilder private func tint(_ shape: RoundedRectangle) -> some View {
+        let alpha = SearchGlassTint.alpha(dark: isDark)
+        if alpha > 0 {
+            shape.fill(Color(isDark ? .black : .white).opacity(alpha)).allowsHitTesting(false)
+        }
     }
 }
 

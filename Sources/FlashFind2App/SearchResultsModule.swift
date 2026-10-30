@@ -238,7 +238,10 @@ struct SearchResultsModule: View {
                         isHovered: hoveredResultID == result.id,
                         lensPosition: lensPosition,
                         lensRow: index,
-                        lensActive: style == .glass && lensVisible && !reduceMotion)
+                        lensActive: style == .glass && lensVisible && !reduceMotion,
+                        // 染色只看遮罩「在不在」，不看「许不许动」：
+                        // 开了「减少动态效果」时字照样该变蓝，只是不跟手（见 Row 的注释）。
+                        lensPresence: style == .glass && lensVisible ? 1 : 0)
             .id(result.id)
             .contentShape(Rectangle())
             .disabled(!model.canUseDisplayedResults)
@@ -283,11 +286,31 @@ struct SearchResultsModule: View {
     /// 「字变大变小」由 `SearchLensMagnification` 的 `animatableData` 逐帧算。
     private func moveLens(to index: Int) {
         guard style == .glass else { return }
-        if reduceMotion { lensVisible = true; lensPosition = CGFloat(index); return }
+        let target = CGFloat(index) + previewLensOffset
+        if reduceMotion { lensVisible = true; lensPosition = target; return }
         lensVisible = true
         withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
-            lensPosition = CGFloat(index)
+            lensPosition = target
         }
+    }
+
+    /// 预览钩子 `FF_UI_LENS_OFFSET=0.5`：把遮罩**停在两行之间**（0 = 不生效）。
+    ///
+    /// ★ 为什么必须有：用户要的「移动时字慢慢变蓝」是一个**中间帧**的性质，
+    ///   首尾两张截图永远证明不了（瞬移也能满足）。靠 `FF_UI_LENS_SWEEP` 抢时间
+    ///   截图也不行——两次运行的相位差一点，拍到的就不是同一个时刻。
+    ///   这个钩子把中间状态**摆住**，什么时候按快门都是同一帧。
+    ///   它必须写在摆位里而不是选中的那一刻：写完马上会被
+    ///   `onChange(of: model.selected)` → `syncLensToSelection()` 覆盖掉（实测踩过）。
+    private var previewLensOffset: CGFloat {
+        #if DEBUG
+        guard AppEnvironment.isPreview,
+              let raw = ProcessInfo.processInfo.environment["FF_UI_LENS_OFFSET"],
+              let offset = Double(raw) else { return 0 }
+        return CGFloat(offset)
+        #else
+        return 0
+        #endif
     }
 
     /// 指针离开列表、也没有选中项时，遮罩淡出（不做位移动画）。

@@ -26,9 +26,44 @@ public enum SearchClickOutside {
     ///     把它算进来就等于在屏幕上留了一片看不见的禁点区。
     public static func shouldDismiss(click point: CGPoint,
                                      field: CGRect,
-                                     otherVisibleWindows: [CGRect]) -> Bool {
+                                     otherVisibleWindows: [CGRect],
+                                     overlayBlocksDismissal: Bool = false) -> Bool {
+        // ★ 2026-10-30 报障：「闪寻无法被截图，一截图就直接消失了」。
+        //   截图工具的选区遮罩是一块**盖满整屏、层级高于浮窗**的窗口。用 ⌘⇧5 或
+        //   第三方截图工具时，它一启动就把闪寻挤成「非前台」，那一下鼠标按下正好
+        //   落进下面的全局监视里 —— 于是浮窗在选区画到一半时被收掉，截出来的图里
+        //   自然没有闪寻。判据见 `blocksDismissal`：点在这种遮罩上不算「点了外面」。
+        if overlayBlocksDismissal { return false }
         if field.contains(point) { return false }
         for frame in otherVisibleWindows where frame.contains(point) { return false }
         return true
+    }
+
+    /// 这一点是不是落在**截图遮罩**上（盖满整屏、且层级高于所有常驻界面元素）。
+    ///
+    /// 两条同时成立才算：光看层级，程序坞会一直命中；光看铺满整屏，任何 App 的
+    /// 全屏窗口都会命中——两种误判下面都有用例钉着。
+    ///
+    /// ## 门槛为什么是 25（实测出来的，不是估的）
+    ///
+    /// 2026-10-30 拿 `CGWindowListCopyWindowInfo` 在同一次截图操作里量到的：
+    ///
+    /// | 窗口 | 层级 | 占屏 |
+    /// | --- | --- | --- |
+    /// | 系统截图选区遮罩（`screencapture`） | **1498** | 100%（要放行的就是它） |
+    /// | 程序坞 | **20** | **100%**（常驻！只按「高于浮窗」判就永远命中） |
+    /// | 菜单栏 | 25 | 一条薄片 |
+    ///
+    /// `NSWindow.Level.statusBar` 就是 25，写成数字是为了 Core 不引 AppKit。
+    /// 常驻界面元素都不高于它，真正为了「盖住屏幕」而生的临时遮罩一定在它之上。
+    public static let overlayLayerFloor = 25
+
+    public static func blocksDismissal(windowLayer: Int,
+                                       windowBounds: CGRect,
+                                       screen: CGRect) -> Bool {
+        guard windowLayer > overlayLayerFloor, screen.width > 0, screen.height > 0 else { return false }
+        let covered = windowBounds.intersection(screen)
+        guard !covered.isNull else { return false }
+        return covered.width * covered.height >= screen.width * screen.height * 0.9
     }
 }

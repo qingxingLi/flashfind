@@ -63,6 +63,7 @@ final class SearchPanelController {
     private var showObserver: NSObjectProtocol?
     private var toggleObserver: NSObjectProtocol?
     private var focusObserver: NSObjectProtocol?
+    private var homeObserver: NSObjectProtocol?
 
     init(model: AppModel) {
         self.model = model
@@ -96,13 +97,23 @@ final class SearchPanelController {
         panel.contentView = host
 
         results = SearchResultsPanelController(model: model)
-        results.onBecameVisible = { [weak self] in self?.placeResultsBelowField() }
+        results.onLayoutNeeded = { [weak self] in self?.layoutForResults() }
         SearchWindowRegistry.shared.register(field: panel, results: results.panel)
 
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - frame.height * 0.28 - SearchLayout.searchHeight))
+            homeOrigin = panel.frame.origin
         }
+#if DEBUG
+        // `FF_UI_FIELD_Y=40`：把搜索框摆到屏幕下方，拍「结果展开时它往上让」的证据。
+        // 只在预览包里存在（`AppEnvironment.isPreview` + DEBUG），发布构建整段编译掉。
+        if AppEnvironment.isPreview,
+           let y = ProcessInfo.processInfo.environment["FF_UI_FIELD_Y"].flatMap(Double.init) {
+            panel.setFrameOrigin(NSPoint(x: panel.frame.origin.x, y: y))
+            homeOrigin = panel.frame.origin
+        }
+#endif
         showObserver = NotificationCenter.default.addObserver(forName: .showFlashFind2, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.show() }
         }
@@ -121,6 +132,9 @@ final class SearchPanelController {
         // 而点在**其它应用**上时闪寻已失去前台、keyWindow 常为 nil，
         // 于是「点了外面，浮窗还杵在那儿」。谁持有窗口谁负责收。
         model.hidePanel = { [weak self] in
+            // 收窗之前先回到「用户设定的位置」：结果展开时抬上去的位移属于**这一轮**，
+            // 下一次唤起要从原位开始（用户：「最后关闭的时候会跳到设定好的位置」）。
+            self?.snapHome()
             self?.panel.orderOut(nil)
             self?.results.hide()
         }
@@ -129,6 +143,11 @@ final class SearchPanelController {
         // 查询词恢复、键位提示、点击外部关闭的监视都在里面，少走一样就会出现
         // 「浮窗回来了但点外面关不掉」这种只在某条路径上坏掉的缺陷。
         model.showPanel = { [weak self] in self?.show() }
+        // 用户把搜索框拖到哪儿，「设定好的位置」就更新到哪儿。
+        homeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
+                                                             object: panel, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.rememberHome() }
+        }
     }
 
     func toggle() {
@@ -211,7 +230,8 @@ final class SearchPanelController {
             .map(\.frame)
         guard SearchClickOutside.shouldDismiss(click: NSEvent.mouseLocation,
                                                field: panel.frame,
-                                               otherVisibleWindows: ownVisibleFrames) else { return }
+                                               otherVisibleWindows: ownVisibleFrames,
+                                               overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal(at: NSEvent.mouseLocation)) else { return }
         model.hideSearch()   // 通知会顺带卸载监视，这里不用重复
     }
 
@@ -228,6 +248,8 @@ final class SearchPanelController {
         // 首次使用的那行键位提示：只显示一次，输入或操作后收起（见 `SearchHintGuide`）。
         model.showSearchHintsIfNeeded()
         installClickOutsideMonitor()
+        // 每次唤起都从「用户设定的位置」开始（见 `snapHome` 的说明）。
+        snapHome()
         if AppEnvironment.isPreview, ProcessInfo.processInfo.environment["FF_UI_PASSIVE"] == "1" {
             panel.orderFrontRegardless()
         } else {
@@ -242,8 +264,8 @@ final class SearchPanelController {
         // ★ `beginSession()` 在最前面：一次新的唤起 = 回到「结果贴在搜索框下面」的默认，
         //   用户上一轮把结果拖到哪儿都翻篇。
         results.beginSession()
-        placeResultsBelowField()
         results.refreshVisibility(hasContent: model.hasSearchContent)
+        layoutForResults()
         panel.invalidateShadow()
 #if DEBUG
         if AppEnvironment.isPreview {
@@ -258,12 +280,90 @@ final class SearchPanelController {
 #endif
     }
 
-    /// 把结果窗口的上沿贴到搜索框下沿下方 `moduleGap` 处。
+    /// 搜索框「用户设定的位置」：没被抬高时的原点。收窗 / 结果收起时回到这里。
+    private var homeOrigin: NSPoint?
+    /// 当前为了让结果放下而抬高的量（0 = 没抬）。
     ///
-    /// ★ 只在「第一次显示」与「每次唤起」时做：用户把它拖到别处之后，
-    ///   任何自动回位都是在跟用户抢位置。拖动搜索框也不带着它走（用户明确选的）。
-    private func placeResultsBelowField() {
-        results.align(under: panel.frame, gap: SearchModuleLayout.moduleGap)
+    /// ★ 标志位在**动窗之前**就得置上：动画期间 `didMove` 会成串地到，
+    ///   那一刻起窗口的位置就是临时位置了，不能再被当成「用户设定的位置」。
+    private var fieldLift: CGFloat = 0
+
+    /// 搜索区重排一次：结果放得下就原地，放不下就把**搜索框抬上去**。
+    ///
+    /// ★ 2026-10-30 报障（用户）：「把搜索框拉到屏幕下方，输入文字后搜索框直接被搜索结果
+    ///   盖住；聚焦搜索是随着结果变大逐渐往上走，关闭时跳回设定好的位置。」
+    ///   旧代码把**结果窗**往上顶到屏幕底边，于是它压在搜索框身上——几何判定搬到了
+    ///   `SearchWindowLift`（Core，可测），这里只负责把两块的 frame 摆上去。
+    private func layoutForResults() {
+        guard panel.isVisible, let screen = visibleFrame(for: panel.frame) else { return }
+        // 结果被用户亲手拖走过：两块互不相干，谁也不动谁（2026-10-28 用户定）。
+        guard results.panel.isVisible, !results.userMoved else { restoreHome(); return }
+        let home = homeOrigin ?? panel.frame.origin
+        // ★★ `plan` 永远有解：放得下时 `lifted == 0`、结果照样贴在搜索框下面。
+        //   2026-10-30 这里是 `guard let plan = … else { restoreHome(); return }`，
+        //   于是「放得下」这条最常见的处境根本没摆结果窗 —— 用户装上 1.1.56 报
+        //   「第一次打开的搜索结果不在搜索框下方了」，证据里 `resultsWindowOrigin`
+        //   是 [0, 0]、`fieldLift` 是 0。别再让摆位有「只走一半」的分支。
+        let plan = SearchWindowLift.plan(field: NSRect(origin: home, size: panel.frame.size),
+                                         resultsHeight: results.panel.frame.height,
+                                         gap: SearchModuleLayout.moduleGap,
+                                         screen: screen)
+        // 先记账再动窗：`fieldLift` 是「此刻的位置是这一轮的临时位置」的标志，
+        // 任何一次摆位之前就得置上，之后到访的 `didMove` 才看得见它。
+        fieldLift = plan.lifted
+        var fieldFrame = panel.frame
+        fieldFrame.origin.y = plan.fieldY
+        animate(panel, to: fieldFrame)
+        var resultsFrame = results.panel.frame
+        resultsFrame.origin = NSPoint(x: fieldFrame.minX, y: plan.resultsY)
+        resultsFrame.size.width = fieldFrame.width
+        results.place(resultsFrame, animated: true)
+    }
+
+    /// 回到用户设定的位置（结果收起、切换筛选、收窗时）。
+    private func restoreHome() {
+        guard fieldLift > 0 else { return }
+        snapHome()
+        if results.panel.isVisible, !results.userMoved {
+            var resultsFrame = results.panel.frame
+            resultsFrame.origin = NSPoint(x: panel.frame.minX,
+                                          y: panel.frame.minY - SearchModuleLayout.moduleGap - resultsFrame.height)
+            results.place(resultsFrame, animated: true)
+        }
+    }
+
+    /// 立刻回到原位（不带动画）：收窗时动画看不见，只会多一次无谓的绘制。
+    private func snapHome() {
+        guard let home = homeOrigin else { return }
+        fieldLift = 0
+        guard panel.frame.origin != home else { return }
+        var frame = panel.frame
+        frame.origin = home
+        panel.setFrame(frame, display: false)
+    }
+
+    /// 记住用户把搜索框拖到了哪里。
+    ///
+    /// ★ 用的是和结果窗同一条判据（`WindowDragIntent`）：鼠标按着、且此刻的位置
+    ///   不是这一轮临时摆出来的（被抬高的位置属于这一轮，不是他设定的位置）。
+    private func rememberHome() {
+        guard panel.isVisible,
+              WindowDragIntent.isUserDrag(pointerDown: PointerButton.isDown,
+                                          autoPlaced: fieldLift > 0) else { return }
+        homeOrigin = panel.frame.origin
+    }
+
+    private func visibleFrame(for frame: NSRect) -> CGRect? {
+        (NSScreen.screens.first { $0.frame.intersects(frame) } ?? NSScreen.main)?.visibleFrame
+    }
+
+    private func animate(_ window: NSWindow, to frame: NSRect) {
+        guard window.isVisible else { window.setFrame(frame, display: false); return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(frame, display: true)
+        }
     }
 
     /// 把键盘交回搜索框。
@@ -313,9 +413,13 @@ final class SearchPanelController {
         return output
     }
 
+    /// 几个定点上「这一下会不会被当成点了外面」（真的调 `dismissIfClickOutside` 用的那条判据）。
+    private static func dismissProbe(points: [String: NSPoint]) -> [String: Bool] {
+        points.mapValues { ScreenOverlayProbe.blocksDismissal(at: $0) }
+    }
+
     /// 写一份「面板此刻真的长这样」的证据 JSON 到包外 Evidence/。
-    private func writePreviewEvidence() {
-        let root = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Evidence", isDirectory: true)
+    private func writePreviewEvidence() {        let root = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Evidence", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let screenHeight = NSScreen.screens.first?.frame.maxY ?? panel.frame.maxY
         // 截图要能同时框住两块窗口：只看搜索框那一块的话，
@@ -331,6 +435,14 @@ final class SearchPanelController {
             "resultsWindowOrigin": [results.panel.frame.minX, results.panel.frame.minY],
             "resultsWindowOffset": results.panel.frame.minY - (panel.frame.minY - SearchModuleLayout.moduleGap),
             "resultsUserMoved": results.userMoved,
+            // 「结果窗被记成用户拖过」这件事的判据：每一对 `[程序化摆位中, 鼠标按下]`。
+            // 全是 `[1,0]` / `[0,0]` 才算正常；出现 `[0,1]` 才是真拖过。
+            "resultsMoveTrace": results.moveTrace,
+            // 「抬高了多少 / 用户设定的位置在哪」：动画中途的坐标一旦漏进来，
+            // 这两个数就会和 `fieldOrigin` 对不上（2026-10-30 就是这么坏的）。
+            "fieldOrigin": [panel.frame.minX, panel.frame.minY],
+            "homeOriginY": homeOrigin?.y ?? -1,
+            "fieldLift": fieldLift,
             "windowOpaque": panel.isOpaque,
             "hostingOpaque": false,
             "material": String(describing: type(of: panel.contentView!)),
@@ -358,7 +470,17 @@ final class SearchPanelController {
             // 所以这两个量就是这条缺陷的唯一判据——截图看不出来，肉眼也看不出来。
             "dragProbes": Self.dragProbes(panel: panel, results: results.panel.isVisible ? results.panel : nil),
             "cacheRoot": AppEnvironment.previewRoot.path,
-            "networkEnabled": model.enabled
+            "networkEnabled": model.enabled,
+            "hoverForced": PreviewHover.isForced,
+            // 「此刻在这一点按下鼠标，会不会被当成点了外面」——报障 3 的唯一判据。
+            // 没有截图界面时三处必须全 false；截图选区遮罩弹起时中间那处必须为 true。
+            "dismissProbe": Self.dismissProbe(points: [
+                "screenCenter": NSPoint(x: (NSScreen.main?.frame.midX ?? 0),
+                                        y: (NSScreen.main?.frame.midY ?? 0)),
+                "desktopCorner": NSPoint(x: (NSScreen.main?.frame.minX ?? 0) + 20,
+                                         y: (NSScreen.main?.frame.minY ?? 0) + 20),
+                "fieldCenter": NSPoint(x: panel.frame.midX, y: panel.frame.midY),
+            ])
         ]
         if let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: root.appendingPathComponent("current-window.json"), options: .atomic)
@@ -371,6 +493,7 @@ final class SearchPanelController {
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver) }
         if let focusObserver { NotificationCenter.default.removeObserver(focusObserver) }
         if let hideObserver { NotificationCenter.default.removeObserver(hideObserver) }
+        if let homeObserver { NotificationCenter.default.removeObserver(homeObserver) }
         Self.tearDown(global: globalClickMonitor,
                        local: localClickMonitor,
                        marker: clickMonitor,

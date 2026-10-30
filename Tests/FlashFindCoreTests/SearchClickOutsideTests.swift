@@ -79,4 +79,46 @@ final class SearchClickOutsideTests: XCTestCase {
                                                         otherVisibleWindows: [pinned, settings]),
                        "多块钉住窗并排时，点在任意一块上都算「点自家窗口」")
     }
+
+    /// ★★ 2026-10-30 报障（用户原话）：「闪寻无法被截图，一截图就直接消失了」。
+    ///
+    /// 截图工具的选区遮罩是一块**盖满整屏、层级高于浮窗**的窗口。用 ⌘⇧5 或第三方
+    /// 截图工具时闪寻被挤成非前台，那一下鼠标按下正好落进补挂的全局监视里 ——
+    /// 浮窗在选区画到一半时被收掉，截出来的图里当然没有闪寻。
+    ///
+    /// 判据：**盖满整屏 + 层级高于浮窗**，两条同时成立才算截图遮罩。
+    /// 只判其中一条会误伤两类很常见的点击（下面两种对照就是它们）。
+    func testClickOnAScreenCoveringOverlayDoesNotDismiss() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        XCTAssertFalse(SearchClickOutside.shouldDismiss(click: CGPoint(x: 700, y: 300),
+                                                        field: field,
+                                                        otherVisibleWindows: [],
+                                                        overlayBlocksDismissal: true),
+                       "★ 点落在截图遮罩上不许收窗：否则截图工具一开，闪寻自己先没了")
+        XCTAssertTrue(SearchClickOutside.shouldDismiss(click: CGPoint(x: 700, y: 300),
+                                                       field: field,
+                                                       otherVisibleWindows: [],
+                                                       overlayBlocksDismissal: false),
+                      "对照：同一位置若底下是普通窗口，就该收窗——否则上一条断言是聋的")
+
+        // 1498 = 实测的系统截图选区遮罩层级（见 `overlayLayerFloor` 的表）。
+        XCTAssertTrue(SearchClickOutside.blocksDismissal(windowLayer: 1498,
+                                                         windowBounds: screen,
+                                                         screen: screen),
+                      "盖满整屏 + 层级在常驻元素之上 = 截图遮罩")
+        XCTAssertFalse(SearchClickOutside.blocksDismissal(windowLayer: 0,
+                                                          windowBounds: screen,
+                                                          screen: screen),
+                       "别的 App 的全屏窗口层级是 0：点它就该收窗（那是「点了外面」）")
+        XCTAssertFalse(SearchClickOutside.blocksDismissal(windowLayer: 25,
+                                                          windowBounds: CGRect(x: 0, y: 870, width: 1440, height: 30),
+                                                          screen: screen),
+                       "菜单栏那条层级虽高，但盖不满屏幕 —— 点它得照常收窗")
+        // ★ 实测撞出来的对照：程序坞有一块**常驻、铺满整屏、层级 20** 的窗口。
+        //   门槛若只按「高于浮窗（3）」判，它会一直命中 ⇒ 点击外面永远不收窗。
+        XCTAssertFalse(SearchClickOutside.blocksDismissal(windowLayer: 20,
+                                                          windowBounds: screen,
+                                                          screen: screen),
+                       "程序坞那块常驻全屏窗口（层级 20）不许被当成截图遮罩")
+    }
 }

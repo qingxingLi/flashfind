@@ -95,4 +95,41 @@ public enum SearchGlassEdge {
 
     /// 遮罩描边的线宽（比模块细一半：它跟着动，粗了会晃眼）。
     public static let lensStrokeWidth: CGFloat = 0.8
+
+    // MARK: - 遮罩的色散环与柔光（2026-10-30）
+
+    /// 遮罩边缘的**色散环**：参考图里那圈蓝青彩边。
+    ///
+    /// 用户拿 iOS 26 电话 App 的实拍对标那块玻璃，边缘不是一条白线，
+    /// 而是一圈从蓝到青的彩边——真实折射把不同波长掰到不同角度，看起来就是这个。
+    /// macOS 没有开放「把底下的内容掰弯」这个能力，**色散是唯一能手工做出的折射线索**。
+    ///
+    /// 只在结果行的遮罩上用，模块边框不用：边框要的是「分界清楚」，加了颜色反而脏。
+    /// 这里的青是这条边的**近端**（左上），远端见 `lensRimFar`。
+    ///
+    /// ★ 浅色给得比深色淡一半：浅玻璃上那圈青会变成一根霓虹灯管
+    ///   （2026-10-30 实拍对比里最扎眼的就是这一处）。
+    public static func lensRim(dark: Bool) -> Stroke {
+        Stroke(red: 0.36, green: 0.88, blue: 1.00, alpha: dark ? 0.42 : 0.18)
+    }
+
+    /// 色散环的**远端**（右下）：比近端偏蓝紫，两头一冷一暖才有「掰弯」的感觉。
+    public static func lensRimFar(dark: Bool) -> Stroke {
+        Stroke(red: 0.48, green: 0.60, blue: 1.00, alpha: dark ? 0.30 : 0.12)
+    }
+
+    /// 色散环比描边略粗：它要像**一条带子**，不能像第二根线。
+    public static let lensRimWidth: CGFloat = 1.4
+
+    /// 遮罩上那块柔光（参考图左下那点亮斑）：玻璃受光的那一下。
+    ///
+    /// 用径向渐变铺，边缘必须收到 0——留一点就会看出一个圆的轮廓，
+    /// 变成「玻璃上贴了张圆纸片」。
+    public static func lensSpecular(dark: Bool) -> Stroke {
+        dark ? .white(0.20) : .white(0.55)
+    }
+
+    /// 柔光的半径（pt）。比行高低一些，落在左下角。
+    public static let lensSpecularRadius: CGFloat = 46
 }
+

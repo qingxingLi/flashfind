@@ -310,6 +310,15 @@ final class PinnedResultsWindows {
         // 透明窗的阴影按**窗口矩形**算，会把圆角外填成一整块方影，所以关掉。
         panel.hasShadow = false
         panel.level = .floating
+        // ★★ 2026-10-30 报障（用户）：「闪寻的钉住还是伪钉住，我想要的钉住是始终显示在
+        //   屏幕的上层」。`NSPanel.hidesOnDeactivate` **默认是 true** —— 一旦你点别的
+        //   App，钉住的窗口跟着整个 App 一起隐起来，等回到闪寻才重新出现。
+        //   这跟「钉在桌面上」正好是反的：钉住的定义就是**不属于前台也要看得见**。
+        //   两块搜索浮窗早就设成 false 了，只有这里漏了（钉住比搜索窗晚出世一天）。
+        panel.hidesOnDeactivate = false
+        // ★ 这里**不要**加 `isFloatingPanel = true`：层级已经由上一行定死
+        //   「谁压谁」，再加它没有收益，反而会让这块没有标题栏的窗口丢掉
+        //   「按住背景就能拖」的可能——钉住的窗口必须能拖到用户想要的位置。
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]

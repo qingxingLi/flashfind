@@ -30,7 +30,12 @@ struct SearchResultRow: View {
     var lensPosition: CGFloat = 0
     var lensRow: Int = 0
     var lensActive = false
+    /// 遮罩在场程度（0…1）。与 `lensActive` **不是一回事**：那个还带着「不许动」
+    /// （开了「减少动态效果」时为 false），而染色是颜色不是运动——
+    /// 那种情况下字照样该变蓝，只是不再跟手渐变。共用一处会让无障碍设置把染蓝一起关掉。
+    var lensPresence: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     private var fileType: UTType { UTType(filenameExtension: (result.name as NSString).pathExtension) ?? .data }
 
@@ -65,6 +70,22 @@ struct SearchResultRow: View {
         result.sourceType == .local ? (result.localURL?.path ?? result.relativePath) : result.relativePath
     }
 
+    /// 文件名那一行。
+    ///
+    /// 玻璃方案下**只有它在变蓝**：路径与来源标签保持灰色——用户给的参考图里
+    /// 「最近通话」变蓝，下面那行「主号 手机」仍是灰的。全行都染色反而像报错。
+    @ViewBuilder private var nameLabel: some View {
+        let text = Text(result.name).ffFont(.resultName)
+            .lineLimit(1).truncationMode(.middle)
+        if style == .glass {
+            // 染色曲线在 Core（`SearchSelectionInk`），这里只把遮罩位置交给它。
+            text.resultInk(position: lensPosition, row: lensRow,
+                           presence: lensPresence, dark: colorScheme == .dark)
+        } else {
+            text.foregroundStyle(legacySelection ? Color.white : Color.primary)
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(nsImage: rowIcon)
@@ -72,9 +93,7 @@ struct SearchResultRow: View {
                 .frame(width: SearchLayout.fileIconSize, height: SearchLayout.fileIconSize)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.name).ffFont(.resultName)
-                    .foregroundStyle(legacySelection ? Color.white : Color.primary)
-                    .lineLimit(1).truncationMode(.middle)
+                nameLabel
                 if showsFullPath {
                     Text(pathText).ffFont(.resultPath)
                         .foregroundStyle(legacySelection ? Color.white.opacity(0.75) : Color.secondary)

@@ -17,10 +17,12 @@ import FlashFindCore
 ///   没有任何共享状态。
 struct SearchResultsPanelView: View {
     @ObservedObject var model: AppModel
-    /// 从「不显示」变成「显示」时叫一声：控制器据此把它摆到搜索框下方。
+    /// 这块窗口的「显示 / 收起 / 尺寸变化」都要叫一声。
     ///
-    /// ★ 只在**第一次显示**时摆：用户把它拖走后，清空关键词再搜一次不该把它拽回去。
-    let onBecameVisible: () -> Void
+    /// ★ 2026-10-30 之前只叫「从隐藏变成显示」的这一次，于是它收起之后没人负责
+    ///   把搜索框放回原位（抬上去就下不来了）。现在收、放、变高都走同一个回调，
+    ///   由控制器统一算一遍位置——**判定只有一处**。
+    let onLayoutNeeded: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -92,7 +94,7 @@ struct SearchResultsPanelView: View {
         .frame(maxWidth: .infinity)
         .frame(height: contentModuleHeight)
         .background(SearchPanelSizing(height: contentModuleHeight, animate: !reduceMotion).frame(width: 0, height: 0))
-        .background(SearchResultsPanelVisibility(visible: isVisible, onBecameVisible: onBecameVisible)
+        .background(SearchResultsPanelVisibility(visible: isVisible, onLayoutNeeded: onLayoutNeeded)
             .frame(width: 0, height: 0))
     }
 
@@ -108,10 +110,10 @@ struct SearchResultsPanelView: View {
 /// ★ 为什么不放在控制器里盯 `model.query`：可见性本身是**算出来的**
 ///   （`SearchModuleLayout.showsContentModule`），在 AppKit 那侧再算一遍
 ///   就是第二份真相，两边迟早不一致（表现为「有关键词但结果窗不出现」）。
-///   SwiftUI 算好传下来，这里只做 `orderFront/orderOut`。
+///   SwiftUI 算好传下来，这里只做 `orderFront/orderOut`，再把「变了」通知出去。
 private struct SearchResultsPanelVisibility: NSViewRepresentable {
     let visible: Bool
-    let onBecameVisible: () -> Void
+    let onLayoutNeeded: () -> Void
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
@@ -121,11 +123,13 @@ private struct SearchResultsPanelVisibility: NSViewRepresentable {
         DispatchQueue.main.async {
             guard let panel = view.window as? NSPanel else { return }
             if visible {
-                if !panel.isVisible { onBecameVisible() }
                 panel.orderFront(nil)
             } else if panel.isVisible {
                 panel.orderOut(nil)
+            } else {
+                return   // 已经是「不显示」，再通知一次没有意义
             }
+            onLayoutNeeded()
         }
     }
 }
@@ -141,11 +145,22 @@ private struct SearchResultsPanelVisibility: NSViewRepresentable {
 final class SearchResultsPanelController {
     let panel: NSPanel
     private let model: AppModel
-    /// 程序自己摆窗口时置真，避免把自己的移动记成「用户拖过」。
-    private var suppressMoveTracking = false
+    /// 正在程序化摆位。
+    ///
+    /// ★ 原来是一个「设 true → 下一拍设回 false」的抑制标志，动画一上来就失效：
+    ///   `animator().setFrame` 的通知在标志复位**之后**继续发，于是每次自动摆位都被记成
+    ///   「用户拖过」，之后的自动摆位全部停摆（首屏就把结果钉死在错误位置）。
+    ///   现在用动画的 `completionHandler` 收尾，覆盖整段动画。
+    private var isPlacing = false
     /// 用户亲手拖过没有。拖过之后就不再自动贴回搜索框下方——
     /// 用户把它放到右边是有意的，下一次搜索又拽回来等于白摆。
+    ///
+    /// ★★ 判据是「鼠标按着的时候移动了」，不是「移动过」（见 `PointerButton`）。
     private(set) var userMoved = false
+#if DEBUG
+    /// 每一条 `didMove` 的判定依据（`[isPlacing, 鼠标按下]`），只给取证用。
+    private(set) var moveTrace: [[Int]] = []
+#endif
     private var observers: [NSObjectProtocol] = []
 
     init(model: AppModel) {
@@ -174,8 +189,8 @@ final class SearchResultsPanelController {
         panel.maxSize = NSSize(width: 900, height: 620)
         panel.appearance = AppEnvironment.previewAppearance
         let host = NSHostingView(rootView: SearchResultsPanelView(model: model,
-                                                                  onBecameVisible: { [weak self] in
-            self?.handleBecameVisible()
+                                                                  onLayoutNeeded: { [weak self] in
+            self?.onLayoutNeeded?()
         }))
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
@@ -183,18 +198,12 @@ final class SearchResultsPanelController {
         observe()
     }
 
-    /// 第一次显示时由协调者摆位（它才知道搜索框在哪）。
-    var onBecameVisible: (() -> Void)?
-
-    /// 「从隐藏变成显示」。
+    /// 显示 / 收起 / 高度变化都通知协调者重排一次（它才知道搜索框在哪、屏幕有多高）。
     ///
-    /// ★ 用户**亲手拖过**就不再自动回位：把它放到右边是有意的，
-    ///   清空关键词再搜一次就把它拽回搜索框下面是抢用户的位置。
-    ///   真正该回位的是「重新唤起搜索」——那由 `beginSession()` 重置。
-    private func handleBecameVisible() {
-        guard !userMoved else { return }
-        onBecameVisible?()
-    }
+    /// ★ 用户**亲手拖过**就不再自动回位：把它放到右边是有意的，清空关键词再搜一次
+    ///   就把它拽回搜索框下面是抢用户的位置。这条判断在协调者那边（`layoutForResults`），
+    ///   因为「放不放下」和「搜索框抬不抬」是**同一个决定**，分成两处必然对不上。
+    var onLayoutNeeded: (() -> Void)?
 
     /// 新一轮搜索开始（快捷键唤起）：撤销「用户拖过」的记忆。
     func beginSession() {
@@ -214,28 +223,28 @@ final class SearchResultsPanelController {
         }
     }
 
-    /// 把这块窗口摆到搜索框那一块的下方：同左沿、同宽、上沿隔 `gap`。
+    /// 由协调者算好的位置，照搬。
     ///
+    /// ★ 位置**只在协调者那一处算**：它同时知道搜索框（可能被抬起）、屏幕可见区
+    ///   和这块窗口的高度。旧代码把「贴到搜索框下方」写在这、把「放不下时往上顶」
+    ///   也写在这，于是「结果压在搜索框上」成了唯一出路（2026-10-30 报障）。
     /// ★ 三样都得摆，不只是 y：这块窗口是 `new` 出来的，初值在 (0,0)——
-    ///   只对 y 的话它会贴在屏幕**左下角**，看起来像「结果跑到别处去了」
-    ///   （第一次跑就踩了，窗口列表里那个 x=0 就是它）。
-    /// ★ 摆过之后用户随手就能拖走，那时的位置不再被覆盖（见 `handleBecameVisible`）。
-    func align(under field: NSRect, gap: CGFloat) {
-        var frame = panel.frame
-        frame.size.width = field.width
-        frame.origin.x = field.minX
-        frame.origin.y = field.minY - gap - frame.height
-        // 高度固定成 470 之后，小屏上「搜索框下方」可能不足一块面板——
-        // 那样摆出去的下半截会掉到屏幕外（以前高度随结果缩，这个位置总是够的）。
-        // 这里只做「别掉出去」的兜底：真要压住搜索框也比看不见强。
-        if let visible = (NSScreen.screens.first { $0.frame.intersects(field) } ?? NSScreen.main)?.visibleFrame,
-           frame.minY < visible.minY + 12 {
-            frame.origin.y = visible.minY + 12
+    ///   只对 y 的话它会贴在屏幕**左下角**，看起来像「结果跑到别处去了」。
+    func place(_ frame: NSRect, animated: Bool) {
+        guard frame != panel.frame else { return }
+        isPlacing = true
+        if animated && panel.isVisible {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(frame, display: true)
+            } completionHandler: { [weak self] in
+                Task { @MainActor in self?.isPlacing = false }
+            }
+        } else {
+            panel.setFrame(frame, display: false)
+            DispatchQueue.main.async { [weak self] in self?.isPlacing = false }
         }
-        suppressMoveTracking = true
-        panel.setFrame(frame, display: false)
-        // 通知是同步投递的，下一拍再恢复就够；用异步是为了避开 setFrame 里可能的嵌套投递。
-        DispatchQueue.main.async { [weak self] in self?.suppressMoveTracking = false }
     }
 
     func show() {
@@ -255,8 +264,20 @@ final class SearchResultsPanelController {
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSWindow.didMoveNotification,
                                             object: panel, queue: .main) { [weak self] _ in
-            guard let self, !self.suppressMoveTracking else { return }
+            guard let self else { return }
+            let dragging = PointerButton.isDown
+#if DEBUG
+            self.moveTrace.append([self.isPlacing ? 1 : 0, dragging ? 1 : 0])
+            if self.moveTrace.count > 12 { self.moveTrace.removeFirst() }
+#endif
+            guard WindowDragIntent.isUserDrag(pointerDown: dragging,
+                                              autoPlaced: self.isPlacing) else { return }
             self.userMoved = true
+        })
+        // 结果条数不变但高度会变（打开失败提示条显隐）：高度一改，位置就得重算。
+        observers.append(center.addObserver(forName: NSWindow.didResizeNotification,
+                                            object: panel, queue: .main) { [weak self] _ in
+            self?.onLayoutNeeded?()
         })
         observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification,
                                             object: panel, queue: .main) { [weak self] _ in
