@@ -36,11 +36,24 @@ final class LocateExecutionTests: XCTestCase {
     ///
     /// `hang(_:)` 让前 N 次 `search` **占用槽位但不发终态**——那正是「一台不回包的
     /// 慢设备」在调度器眼里的样子（槽位被 running 占着，直到 search 返回）。
+    ///
+    /// ★ `hang` 是**闸门**（等到 `releaseHang()`），不是计时。原先写的是
+    /// `50 × 20ms` ≈ 1 秒的睡眠循环，于是「1 秒的挂」与「3 秒的预算」两条独立时间尺
+    /// 在赛跑，CI 负载高时那 50 次 sleep 会漂过预算：GUI 那条恰好在预算到期前几毫秒
+    /// 放掉槽位 → MCP 那条被 drain 出来开跑 → 紧接着预算到期 → 超时取消打中的是
+    /// **MCP 自己的查询**（正在 `running` 里），`cancelled.count` 变成 1。
+    /// 换个说法：那条用例的「红」不一定是产品坏了，可能只是机器慢。
     final class FakeProvider: SearchProvider, @unchecked Sendable {
 
         let source: SearchSource
         private let script: ([ProviderEvent]) -> [ProviderEvent]
         private var remainingHangs = 0
+
+        /// 闸门状态。`search` 在 MainActor 的 Task 里跑、`releaseHang` 从用例里调，
+        /// 但本类是 `@unchecked Sendable`，用锁把「谁先到」这件事写死，不靠调度巧合。
+        private let gate = NSLock()
+        private var hangWaiters: [CheckedContinuation<Void, Never>] = []
+        private var hangReleased = false
 
         private(set) var searchCount = 0
         private(set) var owners: [SearchOwner] = []
@@ -60,6 +73,28 @@ final class LocateExecutionTests: XCTestCase {
             return self
         }
 
+        /// 放行全部挂着的 `search`。**用例里必须 `defer` 调**：不调的话那个
+        /// Task 会永远悬在 continuation 上（用例照样绿，但留下一个跑不完的任务）。
+        func releaseHang() {
+            gate.lock()
+            hangReleased = true
+            let waiters = hangWaiters
+            hangWaiters = []
+            gate.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+
+        /// 占着槽位、一个终态都不发，直到 `releaseHang()`。
+        private func holdSlotUntilReleased() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                gate.lock()
+                let alreadyReleased = hangReleased
+                if !alreadyReleased { hangWaiters.append(continuation) }
+                gate.unlock()
+                if alreadyReleased { continuation.resume() }
+            }
+        }
+
         func search(_ text: String, queryID: UUID, owner: SearchOwner,
                     emit: @escaping @MainActor (ProviderEvent) -> Void) async {
             searchCount += 1
@@ -70,11 +105,8 @@ final class LocateExecutionTests: XCTestCase {
 
             if remainingHangs > 0 {
                 remainingHangs -= 1
-                // 占住槽位约 1 秒，然后**什么都不发**（真实慢设备的形态）。
-                for _ in 0..<50 {
-                    if Task.isCancelled { break }
-                    try? await Task.sleep(for: .milliseconds(20))
-                }
+                // 占住槽位、什么都不发（真实慢设备的形态）。**等闸门，不计时**。
+                await holdSlotUntilReleased()
                 return
             }
             // 让出一次，让并发进来的第二个请求真的排到队里（否则串行得太快，测不到排队）。
@@ -257,6 +289,7 @@ final class LocateExecutionTests: XCTestCase {
     func testATimedOutSourceIsReportedAsTimeoutNotUnavailable() async throws {
         let ok = FakeProvider(id: mac, events: events([result("Users/x/报告.pdf")]))
         let slow = FakeProvider(id: work).hang()
+        defer { slow.releaseHang() }
         let run = await run(LocateExecutor(timing: timing(budget: 0.3)), snapshot([ok, slow]))
 
         let body = try payload(run.outcome)
@@ -267,6 +300,7 @@ final class LocateExecutionTests: XCTestCase {
     /// 超预算的来源要被真的取消：否则它会在设备上继续跑、占着那一台唯一的槽位。
     func testAnOverBudgetSourceIsCancelled() async throws {
         let slow = FakeProvider(id: work).hang()
+        defer { slow.releaseHang() }
         let ok = FakeProvider(id: mac, events: events([]))
         _ = await run(LocateExecutor(timing: timing(budget: 0.2)), snapshot([ok, slow]))
         XCTAssertEqual(slow.cancelled.count, 1, "超预算的搜索没有停掉")
@@ -303,6 +337,7 @@ final class LocateExecutionTests: XCTestCase {
     /// 单一来源超时 → 最终码就是 `timeout`。
     func testASingleTimedOutSourceKeepsItsOwnCode() async {
         let slow = FakeProvider(id: work).hang()
+        defer { slow.releaseHang() }
         let run = await run(LocateExecutor(timing: timing(budget: 0.2)), snapshot([slow]))
         XCTAssertEqual(run.outcome,
                        .failure(code: "timeout", message: LocateFailureCode.timeout.message))
@@ -321,6 +356,7 @@ final class LocateExecutionTests: XCTestCase {
     /// 超时压过「连不上」：超时是「重试可能就好」，折成不可用会把人引去查设备。
     func testTimeoutOutranksUnavailableWhenEverythingFails() async {
         let slow = FakeProvider(id: work).hang()
+        defer { slow.releaseHang() }
         let dead = FakeProvider(id: archive, events: events([], state: .failed))
         let run = await run(LocateExecutor(timing: timing(budget: 0.2)), snapshot([slow, dead]))
         XCTAssertEqual(run.outcome,
@@ -459,18 +495,32 @@ final class LocateExecutionTests: XCTestCase {
     }
 
     /// MCP 的执行不许碰 GUI 那条正在跑的查询：owner 不同 → 不取消、只排队。
+    /// MCP 的**超时取消**打不到 GUI 正在跑的那条：取消只作用于自己 owner。
+    ///
+    /// ★ 断言必须落在「哪一条被取消」上，不能只看 `cancelled.count == 0`。这条用例
+    /// 在 CI 上红过一次（`cancelled.count` 由 1 变 0），当时的原因是**计数含义有歧义**：
+    /// GUI 那条一旦在预算到期前放掉槽位，被取消的是 MCP 自己那条，而文案写的是
+    /// 「MCP 把 GUI 的查询取消了」——计数为 1 根本无法区分这两种事。
+    /// 闸门（`hang` 不计时）+ 「GUI 的 queryID 不在 cancelled 里」把歧义消掉。
     func testMCPExecutionNeverCancelsTheGUIsRunningQuery() async {
-        // 第一次（GUI 那条）占住槽位，MCP 那条排到它后面。
+        // GUI 那条占住槽位（闸门不放行 = 永远占着），MCP 那条排到它后面。
         let provider = FakeProvider(id: work, events: events([result("共享/报告.pdf")])).hang()
+        defer { provider.releaseHang() }
         let scheduler = SearchScheduler(providers: [provider])
         let snapshot = self.snapshot([provider], scheduler: scheduler)
 
-        scheduler.submit(text: "gui", queryID: UUID(), owner: .ui, supersedePrevious: true) { _ in }
-        XCTAssertEqual(scheduler.runningQuery(sourceID: work) != nil, true, "GUI 那条应当占着槽位")
+        let gui = UUID()
+        scheduler.submit(text: "gui", queryID: gui, owner: .ui, supersedePrevious: true) { _ in }
+        XCTAssertEqual(scheduler.runningQuery(sourceID: work), gui, "GUI 那条应当占着槽位")
 
-        _ = await run(LocateExecutor(timing: timing()), snapshot, owner: .mcp(sessionID: "x"))
+        // 预算给短一点：这条用例要的只是「超时之后取消怎么走」，不必等 3 秒。
+        let run = await run(LocateExecutor(timing: timing(budget: 0.3)), snapshot,
+                            owner: .mcp(sessionID: "x"))
 
-        XCTAssertEqual(provider.cancelled.count, 0, "MCP 把 GUI 的查询取消了")
+        XCTAssertEqual(run.report.queries, 1, "MCP 那条根本没提交给调度器")
+        XCTAssertEqual(provider.searchCount, 1, "MCP 那条排在 GUI 后面，不该开跑")
+        XCTAssertFalse(provider.cancelled.contains(gui), "MCP 把 GUI 正在跑的那条取消了")
+        XCTAssertEqual(scheduler.runningQuery(sourceID: work), gui, "GUI 那条被从槽位上挤掉了")
         XCTAssertEqual(scheduler.rejectedCancelCount, 0)
     }
 
