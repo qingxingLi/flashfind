@@ -323,23 +323,50 @@ final class MyNASProcessBridgeTests: XCTestCase {
     /// （逼出一次真实的代次前进）；再发第二条请求，这时已经是新一代核心，
     /// 它照样要把请求走完。
     ///
-    /// ★ 退出不能「回完就退」（CI 首跑就是栽在这里）：
-    /// 回完立刻退出会和「记下当前代次」赛跑——退出通知若先被处理，代次已经前进、
-    /// 进程也已经没了，后面再怎么等都不会有人推进，5 秒后必然断言失败。
-    /// 本机调度快、通知总是后到，于是一直是绿的；GitHub 的 arm64 runner 慢一截，
-    /// 这个顺序就翻了过来。改成「测试写完代次再放行退出」，顺序确定。
+    /// ★ **两台核心都必须「等测试放行」才退出，谁都不许回完就退**（CI 栽过两次）。
+    ///
+    /// 第一次栽在**第一台**：回完立刻退出会和「记下当前代次」赛跑 —— 退出通知若先被
+    /// 处理，代次已经前进、进程也已经没了，后面再怎么等都不会有人推进。
+    /// 上一次把它改成「先记代次、后放行退出」，只修了第一台。
+    ///
+    /// 第二次栽在**第二台**（2026-10-30，1.1.54 之后的 CI）：脚本里只有一道闸门，
+    /// 而那一刻闸门文件**已经存在**，于是第二台核心 `printf` 完立刻 exit()。
+    /// 读循环还没来得及把那一行交给 MainActor，进程就退了 ⇒ `failed()` →
+    /// `abortAll` 把仍在 pending 的第二个请求整体抛掉，用例以**抛出错误**结束，
+    /// 而不是断言失败（CI 日志里是 `caught error: CancellationError()`，位置还报在
+    /// 别的 await 上，极难认）。本机核多、调度快，这个顺序几乎翻不过来。
+    ///
+    /// 所以脚本按「第几次启动」分两支（标记文件区分，不能用环境变量 —— 子进程的
+    /// 环境是白名单 PATH/LANG/FF2_TRUST_DIR），两台各自等到自己的闸门再退出。
+    /// 顺带把看门狗压到 5 秒：这条是**哨兵**，万一闸门退化成断路，5 秒就以
+    /// 「没有响应」报出来，而不是干等默认的 180 秒。
     func testNewCoreOutputIsStillAcceptedAfterGenerationBump() async throws {
         // 用 expectedCoreRevision 插值而不是写死 6：协议修订号是**单一出处**，
         // 写死的话哪天升号，这条测试会以「版本不一致」的形态红掉，误导半天。
-        let answer = "id=$(printf '%s' \"$line\" | sed -n 's/.*\"requestID\":\"\\([^\"]*\\)\".*/\\1/p')\n"
-            + "printf '{\"protocolVersion\":1,\"coreRevision\":\(MyNASProcessBridge.expectedCoreRevision),"
+        let idExtract = "id=$(printf '%s' \"$line\" | sed -n 's/.*\"requestID\":\"\\([^\"]*\\)\".*/\\1/p')\n"
+        let reply = "printf '{\"protocolVersion\":1,\"coreRevision\":\(MyNASProcessBridge.expectedCoreRevision),"
             + "\"requestID\":\"%s\",\"sourceID\":\"src\",\"queryID\":\"none\",\"event\":\"capabilities\"}\\n' \"$id\"\n"
-        // 退出闸门：文件出现前核心一直活着。路径写进脚本，不靠环境变量——
-        // 子进程的环境是白名单（PATH/LANG/FF2_TRUST_DIR），传不进别的东西。
+        // 退出闸门：文件出现前核心一直活着。路径写进脚本，不靠环境变量。
         let gate = scratch.appendingPathComponent("exit-now")
-        let body = answer + "while [ ! -f \"\(gate.path)\" ]; do sleep 0.05; done"
+        let gate2 = scratch.appendingPathComponent("exit-now-2")
+        let mark = scratch.appendingPathComponent("first-run-done")
+        let body = idExtract
+            + "if [ -f \"\(mark.path)\" ]; then\n"
+            + reply
+            + "while [ ! -f \"\(gate2.path)\" ]; do sleep 0.05; done\n"
+            + "else\n"
+            + ": > \"\(mark.path)\"\n"
+            + reply
+            + "while [ ! -f \"\(gate.path)\" ]; do sleep 0.05; done\n"
+            + "fi"
         let binary = try fakeCore(body, waitsForStdin: true, linger: false)
-        let bridge = MyNASProcessBridge(executable: binary, stateDirectory: scratch)
+        let bridge = MyNASProcessBridge(executable: binary, stateDirectory: scratch, watchdogSeconds: 5)
+        // 断言怎么失败都要把两台核心收尾掉，别把 shell 进程留在后面。
+        defer {
+            try? Data().write(to: gate)
+            try? Data().write(to: gate2)
+            bridge.shutdown()
+        }
 
         let first = try await bridge.command("discover", sourceID: "src")
         XCTAssertEqual(first["event"] as? String, "capabilities", "前置：第一代核心要能正常应答")
@@ -357,7 +384,6 @@ final class MyNASProcessBridgeTests: XCTestCase {
         let second = try await bridge.command("discover", sourceID: "src")
         XCTAssertEqual(second["event"] as? String, "capabilities",
                        "★ 代次前进后就不认新一代的核心输出 —— 闸门做成了断路，请求只会石沉大海")
-        bridge.shutdown()
     }
 }
 
