@@ -1767,6 +1767,51 @@ final class AppLayerStructureTests: XCTestCase {
                       "钉住的行要能打开：解析入口必须是快照版（不要求还在 results 里）")
     }
 
+    /// ★★ 钉住窗放不下时要**收行**，不许把窗口顶上去压住搜索框。
+    ///
+    /// 2026-11-01 用户原话：「钉住的时候应该是搜索的数量变多了，导致钉住的内容
+    /// 钻到搜索框下方了」（截图里钉住窗只剩半截，题头与类型条整块不见）。
+    ///
+    /// 旧代码的三条路（下方 / 上方 / 退回下方）里没有「开矮一点」，退回之后
+    /// `clamped()` 又把窗口夹回屏幕内 —— 上沿正好落在搜索框身上。
+    /// 所以这里锁两件事：摆位必须走 Core 的 `PinnedWindowPlacement`（可测），
+    /// 且**纵向不许再夹**（夹一次就把「放不下」悄悄改成「压住搜索框」）。
+    func testPinnedWindowPlacementNeverCoversTheField() throws {
+        let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
+        XCTAssertTrue(pinned.contains("PinnedWindowPlacement.plan("),
+                      "★ 摆位必须走 Core：高度、落点、错开量在一起算，App 层不许再自己写一遍")
+        XCTAssertTrue(pinned.contains("height: plan.height"),
+                      "窗口高度要用 plan 收过行之后的值，否则摆位算 7 行、窗口还是 9 行")
+        XCTAssertFalse(pinned.contains("clamped("),
+                       "★★ 纵向夹取会静默把「下方放不下」改成「往上顶、压住搜索框」——那是本 bug 的成因")
+        XCTAssertTrue(pinned.contains("clampedX("), "横向还是要夹，别钉到屏幕外")
+
+        // 锚点只认搜索框**用户设定的位置**：钉住那一刻它常被抬升着，
+        // 而钉住会立刻清空这一轮 ⇒ 按抬起的位置摆，正好落在它要回去的地方。
+        let modelCode = try appModelCode()
+        let pin = try XCTUnwrap(braceBlock(after: "func pinCurrentResults()", in: modelCode))
+        XCTAssertTrue(pin.contains("homeFieldFrame?()"),
+                      "★★ 锚点要用 home（设定位置）：用抬升中的 frame 会正好被回位的搜索框压住")
+    }
+
+    /// 横向夹取选屏必须拿**整块窗口矩形**，不能只拿 x。
+    ///
+    /// 2026-11-01 自查抓到的第一版：`clampedX` 只收 x，拼矩形时把 y 硬写成 `0`。
+    /// 那条 `y: 0` 是**主屏底边**，副屏与主屏纵向错开（副屏在上/下）时永远不相交
+    /// ⇒ 回落到 `NSScreen.main`，于是副屏上的钉住窗被横向夹回主屏。
+    ///
+    /// 单屏下两种写法结果完全一样（`y 0..高` 一定与主屏相交），所以这条只能钉形状：
+    /// 谁再把 y 硬写成 0，这里就红。
+    func testHorizontalClampPicksScreenByTheWholeWindowFrame() throws {
+        let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
+        let body = try XCTUnwrap(braceBlock(after: "private func clampedX(", in: pinned),
+                                  "取不到 clampedX() 的函数体，本条断言失去意义")
+        XCTAssertTrue(body.contains("y: y"), "选屏要用真实 y 拼矩形：\(body)")
+        XCTAssertFalse(body.contains("y: 0"),
+                       "★ 别再把 y 硬写成 0 —— 副屏纵向错开时选屏会回落到主屏，窗口被拉走")
+        XCTAssertTrue(body.contains("NSScreen.screens"), "候选屏来自 NSScreen.screens")
+    }
+
     /// ★★ 结果展开时**抬搜索框**，而不是把结果顶上去压住它。
     ///
     /// 2026-10-30 用户原话：「把搜索框拉到屏幕下方，输入文字闪寻的搜索框会直接被搜索结果
@@ -4009,5 +4054,47 @@ final class AppLayerStructureTests: XCTestCase {
                       + "`enclosingScrollView` 会拿到 nil（第一版就是这么没生效的）")
         XCTAssertFalse(settings.contains(".scrollIndicators(.hidden)"),
                        "不许用「隐藏指示器」糊过去：那是把「还能往下滚」的唯一提示也删了")
+    }
+
+    // MARK: - 2026-11-01：并发隔离与「记 home」的两条复发性回归
+
+    /// 结果窗的四个通知闭包必须各自声明「我在主线程上」。
+    ///
+    /// `queue: .main` 保证运行期在主线程，但闭包类型是 `@Sendable`，编译期看不见这件事——
+    /// 2026-11-01 全量重编在这里一次抓到 **7 条**隔离违规（`moveTrace` / `isPlacing` /
+    /// `userMoved` / `onLayoutNeeded` / `setKeyFlag`）。今天不出错纯属运行期巧合，
+    /// 而 `userMoved`（结果窗还贴不贴回搜索框）与 `setKeyFlag`（↑↓/空格/回车归谁）
+    /// 都在关键路径上，不能靠巧合。
+    ///
+    /// 判据取「观察者数量 == 隔离声明数量」：谁再加一个裸闭包，这条就红。
+    func testResultsPanelObserversDeclareMainThreadIsolation() throws {
+        let panel = codeOnly(try appSource("SearchResultsPanel.swift"))
+        let observe = try XCTUnwrap(braceBlock(after: "private func observe()", in: panel),
+                                    "取不到 observe() 的函数体，本条断言失去意义")
+        let observers = observe.components(separatedBy: "addObserver(forName:").count - 1
+        let declared = observe.components(separatedBy: "MainActor.assumeIsolated").count - 1
+        XCTAssertEqual(observers, 4, "结果窗的通知观察者应当只有 4 个（新增时要一并确认隔离）")
+        XCTAssertEqual(declared, observers,
+                       "每个通知闭包都要 `MainActor.assumeIsolated`；"
+                       + "别换成 `Task { @MainActor in }` —— 多跳一拍会让 `isPlacing` 读到复位后的值")
+    }
+
+    /// 记「用户设定的位置」只认**鼠标按着**，与「这一轮是否被抬高」无关。
+    ///
+    /// 2026-11-01 修的真缺陷：原来传的是 `autoPlaced: fieldLift > 0`，于是搜索框被
+    /// `SearchWindowLift` 抬起之后，用户再拖它**记不住位置**，收窗（`snapHome`）与
+    /// 下次唤起（`show`）都按旧的 `homeOrigin` 摆位——表现就是「拖了又跳回原处」。
+    ///
+    /// 这条反过来钉死三件事：认鼠标、**不认抬高**、拖完要把这一轮的抬升账清掉。
+    func testSearchFieldHomeRecordsAnyPointerDragIncludingWhileLifted() throws {
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        let remember = try XCTUnwrap(braceBlock(after: "private func rememberHome()", in: controller),
+                                     "取不到 rememberHome() 的函数体，本条断言失去意义")
+        XCTAssertTrue(remember.contains("PointerButton.isDown"),
+                      "记 home 的唯一判据是「鼠标按着」：\(remember)")
+        XCTAssertFalse(remember.contains("autoPlaced"),
+                       "★ 一旦把 `autoPlaced: fieldLift > 0` 加回来，「抬起之后的人手拖动」就又被吞掉")
+        XCTAssertTrue(remember.contains("fieldLift = 0"),
+                      "★ 用户接管位置后要清掉本轮抬升账，否则 restoreHome() 会按旧 home 把他拖到的位置拉回去")
     }
 }

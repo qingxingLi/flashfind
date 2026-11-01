@@ -75,7 +75,7 @@ extension AppModel {
     ///   不交还的话他接着打字一个字都进不去。
     func pinCurrentResults() {
         guard let snapshot = currentPinnedResults() else { return }
-        // 锚点**只能是搜索框那一块**。
+        // 锚点**只能是搜索框那一块**，而且只能是它**用户设定的位置**。
         //
         // ★ 2026-10-28 报障「钉住的位置会随机跳一下」，一半原因在这里：
         //   原来回落成 `NSApp.keyWindow?.frame`，而 key window 此刻可能是**结果窗**
@@ -83,7 +83,13 @@ extension AppModel {
         //   从不同的窗口钉出去，落点就不同，看起来就是「随机跳」。
         //   拿不到搜索框时宁可按屏幕居中摆（`present` 里处理 nil），
         //   也不要按一个每次都不一样的东西对齐。
-        let anchor = SearchWindowRegistry.shared.fieldFrame
+        //
+        // ★★ 2026-11-01 报障（用户）：「钉住的时候应该是搜索的数量变多了，导致钉住的
+        //   内容钻到搜索框下方了」。另一半原因在这里：钉住那一刻搜索框常常正被
+        //   `SearchWindowLift` 抬着（结果多、下方放不下），而下一行 `clearSearchSession()`
+        //   会立刻把这一轮清掉、搜索框随即回到设定位置——按抬起来的位置当锚点，
+        //   钉住的窗口正好落在搜索框**要回去的地方**，被它盖掉半截。
+        let anchor = SearchWindowRegistry.shared.homeFieldFrame?() ?? SearchWindowRegistry.shared.fieldFrame
         guard PinnedResultsWindows.shared.present(snapshot, model: self, near: anchor) else { return }
         clearSearchSession()
         NotificationCenter.default.post(name: .focusFlashFindField, object: nil)

@@ -114,9 +114,9 @@ public struct PinnedResults: Identifiable, Equatable, Sendable {
     /// 不是内容撑的。
     /// ★ `rowCount` 由调用方传**筛完之后**的行数：在窗口里改类型/位置会改变行数，
     ///   高度必须跟着变，否则筛出 1 行时窗口还留着 10 行那么高。
+    /// ★ 2026-11-01：式子搬到 `PinnedWindowPlacement.height(rows:rowHeight:)`，这里只转发。
+    ///   摆位那边要用同一个式子「收行」（放不下时把窗口开矮），两处各算一次必然漂移。
     public func windowHeight(rowCount: Int, rowHeight: CGFloat) -> CGFloat {
-        let visible = min(max(rowCount, 0), SearchModuleLayout.pinnedMaximumRows)
-        let list = CGFloat(max(visible, 1)) * rowHeight + SearchModuleLayout.pinnedListPadding * 2
-        return SearchModuleLayout.pinnedHeaderHeight + SearchModuleLayout.typeBarHeight + list
+        PinnedWindowPlacement.height(rows: rowCount, rowHeight: rowHeight)
     }
 }

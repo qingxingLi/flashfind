@@ -262,30 +262,45 @@ final class SearchResultsPanelController {
 
     private func observe() {
         let center = NotificationCenter.default
+        // ★★ 四个闭包都必须自己声明「我在主线程上」。
+        //
+        // `queue: .main` 在运行期已经把这段放主线程了，但闭包类型本身是 `@Sendable`
+        // （非隔离的），编译期看不见那件事 —— 于是里面每一次读写 `@MainActor` 状态都
+        // 是一条隔离违规。2026-11-01 全量重编抓到 7 条：`moveTrace` / `isPlacing` /
+        // `userMoved` / `onLayoutNeeded` / `setKeyFlag`。而 `userMoved`（结果窗还贴不贴回
+        // 搜索框）与 `setKeyFlag`（键盘归谁的判据）都在这条线上，不能靠运气。
+        //
+        // ★ 用 `MainActor.assumeIsolated` 而**不是** `Task { @MainActor in }`：
+        //   后者要多跳一拍，而这里读的 `isPlacing` 是「此刻是不是程序在摆位」的即时值。
+        //   `didMove` 本来就比动画的 `completionHandler` 更晚（见 `WindowDragIntent` 的注释），
+        //   再多一拍就可能读到已经复位成 false 的值，把一次自动摆位记成「用户拖过」——
+        //   结果窗从此不再贴回搜索框。时序不能动，所以只声明隔离、不改变调度。
         observers.append(center.addObserver(forName: NSWindow.didMoveNotification,
                                             object: panel, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            let dragging = PointerButton.isDown
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let dragging = PointerButton.isDown
 #if DEBUG
-            self.moveTrace.append([self.isPlacing ? 1 : 0, dragging ? 1 : 0])
-            if self.moveTrace.count > 12 { self.moveTrace.removeFirst() }
+                self.moveTrace.append([self.isPlacing ? 1 : 0, dragging ? 1 : 0])
+                if self.moveTrace.count > 12 { self.moveTrace.removeFirst() }
 #endif
-            guard WindowDragIntent.isUserDrag(pointerDown: dragging,
-                                              autoPlaced: self.isPlacing) else { return }
-            self.userMoved = true
+                guard WindowDragIntent.isUserDrag(pointerDown: dragging,
+                                                  autoPlaced: self.isPlacing) else { return }
+                self.userMoved = true
+            }
         })
         // 结果条数不变但高度会变（打开失败提示条显隐）：高度一改，位置就得重算。
         observers.append(center.addObserver(forName: NSWindow.didResizeNotification,
                                             object: panel, queue: .main) { [weak self] _ in
-            self?.onLayoutNeeded?()
+            MainActor.assumeIsolated { self?.onLayoutNeeded?() }
         })
         observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification,
                                             object: panel, queue: .main) { [weak self] _ in
-            self?.setKeyFlag(true)
+            MainActor.assumeIsolated { self?.setKeyFlag(true) }
         })
         observers.append(center.addObserver(forName: NSWindow.didResignKeyNotification,
                                             object: panel, queue: .main) { [weak self] _ in
-            self?.setKeyFlag(false)
+            MainActor.assumeIsolated { self?.setKeyFlag(false) }
         })
     }
 

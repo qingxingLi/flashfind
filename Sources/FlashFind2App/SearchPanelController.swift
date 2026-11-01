@@ -37,6 +37,14 @@ final class SearchWindowRegistry {
     /// ★ 钉住时要拿它当锚点：「钉住」出来的是一块 10 行高的窗口，
     ///   按「key window 的原点」摆的话会正好盖住搜索框（第一次跑就盖住了）。
     var fieldFrame: NSRect? { field?.frame }
+
+    /// 搜索框**用户设定的位置**（抬高、贴边那些临时位移都不算）。
+    ///
+    /// ★★ 钉住要用它、不能用 `fieldFrame`（2026-11-01 报障「钉住的内容钻到搜索框下方」）：
+    ///   钉住那一刻搜索框往往正因为「结果放不下」被 `SearchWindowLift` 抬着，
+    ///   而钉住会立刻清空这一轮（`clearSearchSession`）⇒ 搜索框马上回位。
+    ///   按抬起时的位置摆，钉住的窗口就落在搜索框**将要回去的地方**，被它盖掉半截。
+    var homeFieldFrame: (@MainActor () -> NSRect?)?
 }
 
 /// 搜索框那一块窗口 + 结果那一块窗口的**协调者**。
@@ -99,6 +107,8 @@ final class SearchPanelController {
         results = SearchResultsPanelController(model: model)
         results.onLayoutNeeded = { [weak self] in self?.layoutForResults() }
         SearchWindowRegistry.shared.register(field: panel, results: results.panel)
+        // 钉住时的锚点走「用户设定的位置」，见 `homeFieldFrame` 的注释。
+        SearchWindowRegistry.shared.homeFieldFrame = { [weak self] in self?.homeFrame }
 
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
@@ -144,9 +154,14 @@ final class SearchPanelController {
         // 「浮窗回来了但点外面关不掉」这种只在某条路径上坏掉的缺陷。
         model.showPanel = { [weak self] in self?.show() }
         // 用户把搜索框拖到哪儿，「设定好的位置」就更新到哪儿。
+        //
+        // ★ 这一条**故意**不用 `Task { @MainActor in }`（本文件其余几条通知用的是它）：
+        //   `rememberHome()` 读的是 `PointerButton.isDown` 的**即时值**——「这一刻是不是
+        //   人手在拖」。多跳一拍就可能读到松开之后的 false，把拖动的最后一次位移丢掉。
+        //   它只写 `homeOrigin` / `fieldLift` 两个标量、不发任何事件，同步执行没有重入风险。
         homeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
                                                              object: panel, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.rememberHome() }
+            MainActor.assumeIsolated { self?.rememberHome() }
         }
     }
 
@@ -282,6 +297,14 @@ final class SearchPanelController {
 
     /// 搜索框「用户设定的位置」：没被抬高时的原点。收窗 / 结果收起时回到这里。
     private var homeOrigin: NSPoint?
+
+    /// 用户设定的位置配上**当前**尺寸（抬高之前的那块矩形）。钉住时当锚点用。
+    var homeFrame: NSRect? {
+        guard let homeOrigin else { return nil }
+        var frame = panel.frame
+        frame.origin = homeOrigin
+        return frame
+    }
     /// 当前为了让结果放下而抬高的量（0 = 没抬）。
     ///
     /// ★ 标志位在**动窗之前**就得置上：动画期间 `didMove` 会成串地到，
@@ -344,12 +367,23 @@ final class SearchPanelController {
 
     /// 记住用户把搜索框拖到了哪里。
     ///
-    /// ★ 用的是和结果窗同一条判据（`WindowDragIntent`）：鼠标按着、且此刻的位置
-    ///   不是这一轮临时摆出来的（被抬高的位置属于这一轮，不是他设定的位置）。
+    /// ★ 判据只有一条：**鼠标按着**。程序化摆位不可能发生在按着鼠标的时刻
+    ///   （同 `WindowDragIntent` 的论证）。
+    ///
+    /// ★★ 这里**故意不传** `autoPlaced: fieldLift > 0`（2026-11-01 修，曾是一处真缺陷）。
+    ///   传了等于说「搜索框被抬高的这一段，人手拖动也算程序摆的」，后果是：
+    ///   输入出结果后框被 `SearchWindowLift` 抬上去，此时用户再把它拖到别处也**记不住**，
+    ///   `homeOrigin` 还停在抬起前那个位置；而收窗（`hidePanel` → `snapHome`）与下次唤起
+    ///   （`show` → `snapHome`）都按 `homeOrigin` 摆位 —— 用户看到的是「拖了又跳回原处」。
+    ///
+    ///   `WindowDragIntent.isUserDrag` 里的 `autoPlaced` 那一维回答的是另一个问题：
+    ///   「这次移动要不要算作用户拖动，从而**停止自动贴回**」（结果窗在用）。
+    ///   对「记不记 home」来说它没有信息量：鼠标按着就已经排除了程序摆位。
     private func rememberHome() {
-        guard panel.isVisible,
-              WindowDragIntent.isUserDrag(pointerDown: PointerButton.isDown,
-                                          autoPlaced: fieldLift > 0) else { return }
+        guard panel.isVisible, PointerButton.isDown else { return }
+        // 用户亲手接管了位置 ⇒ 这一轮「抬高」就此作废：留在抬升位移里的账会让
+        // `restoreHome()` 在结果收起时把窗口按旧 home 拉回去，正好抵消他刚做的拖动。
+        fieldLift = 0
         homeOrigin = panel.frame.origin
     }
 

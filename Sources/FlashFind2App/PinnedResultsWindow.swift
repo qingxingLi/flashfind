@@ -221,39 +221,50 @@ final class PinnedResultsWindows {
         //   恰好筛到 1 行（或筛到空）也会得到一条玻璃缝。
         //   快照的行数才是「这一批有多少东西」；筛只是临时的探索，
         //   筛少了底下留白、筛空了居中写一句话，窗口都不该变形。
-        let height = snapshot.windowHeight(rowCount: snapshot.rows.count,
-                                           rowHeight: SearchLayout.rowHeight)
-        let panel = makePanel(for: snapshot, model: model, height: height)
-        let size = panel.frame.size
-        // ★ 摆位的三条规矩（2026-10-28 实测出来的）：
         //
-        // 1. 首选锚点那块窗口的**下方**，不是「跟它左下角对齐」——对齐左下角时
-        //    一块六百多高的结果窗会往上长，正好把搜索框盖住；
-        // 2. 下方放不下（默认位置下方只剩 628，10 行要 644）就摆到**上方**：
-        //    贴边会把窗口顶上 28pt，题头正好被搜索框压住——**连拖都拖不动**；
-        // 3. 上方也放不下才退回「贴进可见区域」，此时允许压住搜索框，
-        //    用户把它拖走就好。
-        let base: NSPoint
-        if let anchor, let visible = (NSScreen.screens.first { $0.visibleFrame.intersects(anchor) } ?? NSScreen.main)?.visibleFrame {
-            let below = anchor.minY - SearchModuleLayout.moduleGap - size.height
-            let above = anchor.maxY + SearchModuleLayout.moduleGap
-            if below >= visible.minY + 12 {
-                base = NSPoint(x: anchor.minX, y: below)
-            } else if above + size.height <= visible.maxY - 12 {
-                base = NSPoint(x: anchor.minX, y: above)
-            } else {
-                base = NSPoint(x: anchor.minX, y: below)
-            }
-        } else {
-            base = NSPoint(x: (NSScreen.main?.visibleFrame.midX ?? 600) - size.width / 2,
-                           y: (NSScreen.main?.visibleFrame.midY ?? 400))
-        }
-        // 每多一块就往下、往右错开一点：钉第二块时它不会正好盖住第一块。
+        // ★★ 这只是**理想高度**：还要按屏幕上的实际空间收行，见下面的 `PinnedWindowPlacement`。
+        let intrinsic = snapshot.windowHeight(rowCount: snapshot.rows.count,
+                                              rowHeight: SearchLayout.rowHeight)
+        // 每多一块就错开一点：钉第二块时它不会正好盖住第一块。
+        // ★ 错开量必须**计入可用空间**（plan 里做的）：它会把窗口往下推，推出去再夹回来
+        //   就又压住搜索框了——那正是 2026-11-01 那半个题头的成因之一。
         let offset = CGFloat(order.count % 6) * 26
+        let visible = anchor.flatMap { anchor in
+            (NSScreen.screens.first { $0.visibleFrame.intersects(anchor) } ?? NSScreen.main)?.visibleFrame
+        } ?? NSScreen.main?.visibleFrame
+        // ★★ 摆位交给 Core（可测）。规矩只剩一条：**先看空间，再定高度**，
+        //   放不下就按整行收，而不是把窗口顶上去盖住搜索框。
+        //   2026-11-01 报障（用户）：「钉住的时候应该是搜索的数量变多了，导致钉住的
+        //   内容钻到搜索框下方了」——条数一多窗口就高，旧代码只剩「顶回屏幕内」这一条
+        //   退路，于是上沿正好压在搜索框上，题头与类型条整块看不见。
+        var size: NSSize
+        var origin: NSPoint
+        if let anchor, let visible {
+            let plan = PinnedWindowPlacement.plan(field: anchor,
+                                                  intrinsicHeight: intrinsic,
+                                                  rowHeight: SearchLayout.rowHeight,
+                                                  offset: offset,
+                                                  screen: visible)
+            size = NSSize(width: SearchModuleLayout.pinnedWidth, height: plan.height)
+            origin = NSPoint(x: anchor.minX + offset, y: plan.originY)
+        } else if let visible {
+            // 拿不到搜索框：按屏幕居中摆（**不要**按 key window —— 那可能是结果窗或上一块钉住窗，
+            // 同一批结果从不同窗口钉出去落点就不同，用户看到的是「随机跳」）。
+            let height = min(intrinsic, visible.height - PinnedWindowPlacement.margin * 2)
+            size = NSSize(width: SearchModuleLayout.pinnedWidth, height: height)
+            origin = NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2)
+        } else {
+            size = NSSize(width: SearchModuleLayout.pinnedWidth, height: intrinsic)
+            origin = .zero
+        }
+        // ★ 只夹横向：纵向由 plan 保证（它已经把高度收到放得下）。
+        //   旧代码在这里对 y 也夹了一次，那一步会把「放不下」悄悄变成「压住搜索框」。
+        //   ★ 要把真实 y 一起传进去：选屏靠的是整块矩形（见 `clampedX` 的注释）。
+        origin.x = clampedX(origin.x, y: origin.y, size: size)
+        let panel = makePanel(for: snapshot, model: model, height: size.height)
         // ★★ 位置与尺寸**一次摆齐**，而且在 `orderFront` 之前：
-        //   先上屏再挪就是用户看到的「跳一下」。高度已经在 `height` 里定死，
+        //   先上屏再挪就是用户看到的「跳一下」。高度已经定死，
         //   视图侧不再有 `SearchPanelSizing`，所以上屏之后不会再被改一次。
-        let origin = clamped(NSPoint(x: base.x + offset, y: base.y - offset), size: size)
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
         // 让 SwiftUI 把第一帧布局跑完（`defer: false` 的窗口此刻还没有内容）：
         // 布局若在上屏后才发生，macOS 会按内容的固有尺寸再调一次窗口。
@@ -334,12 +345,21 @@ final class PinnedResultsWindows {
         return panel
     }
 
-    /// 把窗口放进当前屏幕的可见区域，别钉到屏幕外面去。
-    private func clamped(_ origin: NSPoint, size: NSSize) -> NSPoint {
-        let screen = NSScreen.screens.first { $0.visibleFrame.contains(origin) } ?? NSScreen.main
-        guard let frame = screen?.visibleFrame else { return origin }
-        return NSPoint(x: min(max(origin.x, frame.minX + 12), frame.maxX - size.width - 12),
-                       y: min(max(origin.y, frame.minY + 12), frame.maxY - size.height - 12))
+    /// 横向夹一下，别把窗口钉到屏幕外面去。
+    ///
+    /// ★ 纵向**不在这里夹**：纵向由 `PinnedWindowPlacement` 负责（它先收高度再定位）。
+    ///   2026-11-01 之前这里连 y 一起夹，于是「下方放不下」被这一步悄悄改成
+    ///   「往上顶、压住搜索框」，用户看到的是钉住窗的题头整块不见。
+    ///
+    /// ★★ 选屏必须拿**完整的窗口矩形**（真实 x / y / 宽 / 高）。第一版写成只传 x、
+    ///   y 硬写 `0`：那条 `y: 0` 落在**主屏**底边，副屏与主屏纵向错开（副屏在上/下）
+    ///   时永远不相交 ⇒ 回落到 `NSScreen.main`，于是副屏上的钉住窗被横向夹回主屏。
+    ///   单屏下两种写法结果相同，所以只能靠「形状」守住，不能靠真机偶然发现。
+    private func clampedX(_ x: CGFloat, y: CGFloat, size: NSSize) -> CGFloat {
+        let probe = NSRect(x: x, y: y, width: size.width, height: size.height)
+        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(probe) } ?? NSScreen.main
+        guard let frame = screen?.visibleFrame else { return x }
+        return min(max(x, frame.minX + 12), frame.maxX - size.width - 12)
     }
 
     /// ⌘W 关掉**当前这块**钉住的窗口。
