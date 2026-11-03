@@ -172,4 +172,72 @@ final class SMBMountCandidateTests: XCTestCase {
         XCTAssertEqual(matched.map(\.mountRoot.path), [exact.mountRoot.path],
                        "主机对上了就只认主机，不许被账号相同的另一台顶掉")
     }
+
+    // MARK: - 打开链的三档组合判据（`openCandidates`）
+
+    /// 本机真实挂载的形态：`//10.20.30.88/公司共享文档`，**没有 user 段**。
+    private func anonymousMount(host: String = "10.20.30.88",
+                                share: String = "公司共享文档") -> SMBMountCandidate {
+        let encoded = share.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
+        return SMBMountCandidate.parse(origin: "//\(host)/\(encoded)",
+                                       mountPath: "/Volumes/\(share)")!
+    }
+
+    /// ★★ 2026-11-03 真机：群晖用 DDNS 域名登录，挂载表里没有账号段 ⇒ 必须认出来走 SMB。
+    ///
+    /// 现场：来源 `nas.example.net`（账号「李青宇」），访达里挂着
+    /// `//10.20.30.88/公司共享文档`。诊断 `rowTarget=smb`、
+    /// `smbMountSharesOverlapSource=true`、`smbMountHostMatchesSource=false`、
+    /// `smbMountCount=3` ⇒ 共享名对得上、主机对不上、账号**没有**。
+    /// 旧判据把「没有账号」当成「账号不同」⇒ 返回空 ⇒ 双击打开 File Station 网页。
+    func testOpenCandidatesAcceptsAMountWithoutAUserSegment() {
+        let mount = anonymousMount()
+        XCTAssertNil(mount.username, "前提：这条挂载的 origin 里没有 user 段")
+        let matched = SMBMountCandidate.openCandidates(for: "nas.example.net",
+                                                       shares: ["公司共享文档"],
+                                                       preferredUser: "李青宇", in: [mount])
+        XCTAssertEqual(matched.map(\.mountRoot.path), [mount.mountRoot.path],
+                       "★ 缺证据不是反证据：没有账号段的挂载要按唯一共享名认（旧实现这里开网页）")
+    }
+
+    /// ★ 反面：挂载**明确写着**别的账号 ⇒ 那是相反证据，照样不认。
+    ///
+    /// 这一条保证「放宽」没有把 `testAnotherAccountOnTheSameShareIsNotThisSource`
+    /// 守的安全边界一起吃掉了。
+    func testOpenCandidatesRejectsAMountExplicitlyUsingAnotherAccount() {
+        let other = SMBMountCandidate.parse(origin: "//someone-else@10.20.30.88/公司共享文档",
+                                            mountPath: "/Volumes/公司共享文档")!
+        XCTAssertTrue(SMBMountCandidate.openCandidates(for: "nas.example.net",
+                                                       shares: ["公司共享文档"],
+                                                       preferredUser: "李青宇", in: [other]).isEmpty,
+                      "挂载写着别人的账号 ⇒ 那是另一台设备/另一个账号，宁可退回网页")
+    }
+
+    /// ★ 唯一性判据不动：同名共享挂在两台主机上 ⇒ 一条都不认，别猜。
+    func testOpenCandidatesStillRefusesTwoAnonymousHosts() {
+        let a = anonymousMount(host: "10.20.30.88")
+        let b = anonymousMount(host: "192.168.0.89")
+        XCTAssertTrue(SMBMountCandidate.openCandidates(for: "nas.example.net",
+                                                       shares: ["公司共享文档"],
+                                                       preferredUser: "李青宇", in: [a, b]).isEmpty,
+                      "两台都没账号段时更分不清是哪台，猜错就是打开另一台的同名文件")
+    }
+
+    /// 主机名对得上时，第一档直接命中，不受兜底逻辑影响。
+    func testOpenCandidatesPrefersTheExactHost() {
+        let exact = anonymousMount(host: "nas.example.net")
+        let anonymous = anonymousMount(host: "10.20.30.88")
+        let matched = SMBMountCandidate.openCandidates(for: "nas.example.net",
+                                                       shares: ["公司共享文档"],
+                                                       preferredUser: "李青宇", in: [anonymous, exact])
+        XCTAssertEqual(matched.map(\.mountRoot.path), [exact.mountRoot.path],
+                       "主机精确命中就只认它，不该再拉上同名的另一台")
+    }
+
+    /// 来源侧没有账号（飞牛授权码那种）时，兜底同样按唯一共享名认。
+    func testOpenCandidatesWorksWhenTheSourceHasNoAccountEither() {
+        let mount = anonymousMount(host: "10.60.70.2", share: "共享文档")
+        XCTAssertEqual(SMBMountCandidate.openCandidates(for: "nas.example.net", shares: ["共享文档"],
+                                                        preferredUser: nil, in: [mount]).count, 1)
+    }
 }

@@ -67,10 +67,11 @@ public enum NASResultOpening {
             guard let share = row.path.split(separator: "/").first.map(String.init) else {
                 throw FlashFindError.message("无效的共享路径")
             }
-            // 匹配规则允许来源域名与挂载地址不同，再优先选当前账号。
-            let mounts = SMBMountCandidate.matching(host: locator.host, shares: [share],
-                                                    preferredUser: locator.preferredSMBUser,
-                                                    in: smbMounts)
+            // 匹配规则允许来源域名与挂载地址不同；三档判据收在 `openCandidates`
+            // （主机精确 → 共享名 + 账号 → 唯一共享名兜底），这里只挑优先账号。
+            let mounts = SMBMountCandidate.openCandidates(for: locator.host, shares: [share],
+                                                          preferredUser: locator.preferredSMBUser,
+                                                          in: smbMounts)
                 .sorted {
                     ($0.username == locator.preferredSMBUser ? 0 : 1) < ($1.username == locator.preferredSMBUser ? 0 : 1)
                 }

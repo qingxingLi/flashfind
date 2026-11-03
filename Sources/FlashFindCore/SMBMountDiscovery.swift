@@ -68,8 +68,8 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
     ///   - host: 来源主机（可能是域名、IP 或 QuickConnect ID）。
     ///   - shares: 本来源已授权的共享名（不带前导斜杠）。
     ///   - preferredUser: 本来源的登录账号（`smbUsername`，缺省时用 DSM 账号）。
-    ///   - allowShareNameOnly: 是否允许最后一档「只按共享名认」。**只有 fnOS 传 true**
-    ///     （它没有账号证据，网页出口又只是个登录页），理由见函数体。
+    ///   - allowShareNameOnly: 是否允许最后一档「只按共享名认」。fnOS 与群晖的打开链
+    ///     传 true（各自理由见函数体），OpenList 走 WebDAV 线不用这里。
     public static func matching(host: String, shares: Set<String>,
                                 preferredUser: String?,
                                 allowShareNameOnly: Bool = false,
@@ -100,9 +100,12 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
         //   · 它的网页出口只是站点首页（桌面），浏览器没有会话时就是**登录页** ——
         //     用户点了等于没打开。真机：`/Volumes/共享文档/示例发票.pdf` 明明可读，
         //     双击打开的是飞牛登录页。
-        // 群晖 / OpenList **不进这一档**：它们的退路（File Station 网页 / WebDAV 已经
-        // 另有「唯一候选」判据）都还能用，为它们放宽只会多出「打开另一台设备上同名
+        // 群晖 / OpenList **默认不进这一档**：它们的退路（File Station 网页 / WebDAV 已经
+        // 另有「唯一候选」判据）都还能用，无条件放宽只会多出「打开另一台设备上同名
         // 文件」的风险 —— 用户会以为那是同一个文件而改错。
+        //
+        // ★ 但群晖在 `openCandidates` 里会带着**更严的候选集**进来（剔除明确挂着别的
+        //   账号的挂载）。理由见那个方法：挂载表里没有账号段是「不知道」，不是「不同」。
         guard allowShareNameOnly else { return [] }
         // 安全性靠唯一性：一台上不会有两个同名共享；两台都挂同名共享时这里返回空
         // （宁可退回网页，也不猜是哪一台）。共享名本身是**设备说的**
@@ -110,6 +113,40 @@ public struct SMBMountCandidate: Identifiable, Hashable, Sendable {
         let byShare = mounts.filter { shares.contains($0.shareName) }
         let hosts = Set(byShare.map { $0.host.lowercased() })
         return hosts.count == 1 ? byShare : []
+    }
+
+    /// 打开链要用的**整套**判据（群晖）：主机精确 → 共享名 + 账号 → 唯一共享名兜底。
+    ///
+    /// 单一出处：`NASResultOpening` 的核验与免核验兜底、`NASSearchProvider` 的
+    /// `mountCandidates` / `verifiedFileURL` / `resolve` 全调这里。那几处必须同口径——
+    /// 分开各写一份的后果是「双击能开、在访达中显示却在重新挂载」这类前后矛盾。
+    ///
+    /// ## 第三档为什么群晖也要用（2026-11-03 真机报障）
+    ///
+    /// 来源填的是 DDNS 域名（`nas.example.net`），访达里挂着
+    /// `//10.20.30.88/公司共享文档` —— **挂载表里根本没有账号段**
+    /// （macOS 把凭据存进钥匙串，`f_mntfromname` 只写 `//host/share`）。
+    /// 旧判据第二档要求「共享名 + 账号相同」，于是「不知道账号」被当成「账号不同」
+    /// ⇒ 返回空 ⇒ 双击打开网页。现场诊断：`rowTarget=smb`、
+    /// `smbMountSharesOverlapSource=true`、`smbMountHostMatchesSource=false`。
+    ///
+    /// ★ **缺证据 ≠ 反证据**：挂载侧没写账号是「不知道」，挂载侧写着别的账号才是
+    ///   「不是这台」。后者在这一档里继续排除（`testAnotherAccountOnTheSameShareIsNotThisSource`）。
+    /// ★ 唯一性判据不动：同名共享挂了两台 ⇒ 一条都不认，宁可退回网页。
+    ///
+    /// - Parameter shares: 本来源已授权的共享名。多位置来源传整个集合。
+    public static func openCandidates(for host: String, shares: Set<String>, preferredUser: String?,
+                                      in mounts: [SMBMountCandidate]) -> [SMBMountCandidate] {
+        let direct = matching(host: host, shares: shares, preferredUser: preferredUser, in: mounts)
+        if !direct.isEmpty { return direct }
+        // 兜底候选：剔掉「明确挂着别的账号」的挂载，其余（含没有账号段的）保留。
+        let mine = preferredUser?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let plausible = mounts.filter { mount in
+            guard let mounted = mount.username, let mine, !mine.isEmpty else { return true }
+            return mounted.caseInsensitiveCompare(mine) == .orderedSame
+        }
+        return matching(host: host, shares: shares, preferredUser: nil,
+                        allowShareNameOnly: true, in: plausible)
     }
 
     public static func discover() throws -> [SMBMountCandidate] {

@@ -291,6 +291,46 @@ final class NASResultOpeningTests: XCTestCase {
         }
     }
 
+    /// ★★ 2026-11-03 真机：群晖用 DDNS 域名登录，挂载表里**没有账号段** ⇒ 仍要本地打开。
+    ///
+    /// 现场诊断（`nas-search-events.jsonl`）：
+    /// `vendor=synology rowTarget=smb smbMountSharesOverlapSource=true
+    ///  smbMountShareNameInPath=true smbMountHostMatchesSource=false smbMountCount=3`
+    /// —— 共享名对上了、主机对不上（DDNS 域名 vs 局域网 IP）、挂载表里**没有账号**。
+    /// 旧判据第二档要求「共享名 + 账号相同」，把「没写账号」当成「账号不同」⇒ 空
+    /// ⇒ 双击打开 File Station 网页。用户原话：「默认打开了网页 没有通过 SMB 打开文件」。
+    func testSynologyDomainSourceOpensAmountWithoutAUserSegment() throws {
+        let share = "公司共享文档"
+        let mountParent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let mountRoot = mountParent.appendingPathComponent(share)
+        try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: mountParent) }
+        let file = "示例文档.pdf"
+        try Data().write(to: mountRoot.appendingPathComponent(file))
+
+        let encoded = try XCTUnwrap(share.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed))
+        let mount = try XCTUnwrap(SMBMountCandidate.parse(origin: "//10.20.30.88/" + encoded,
+                                                          mountPath: mountRoot.path))
+        XCTAssertNil(mount.username, "前提：这条挂载的 origin 里没有 user 段（macOS 把凭据放在钥匙串）")
+
+        var result = SearchResult(id: "r", name: file, relativePath: "/\(share)/\(file)",
+                                  sourceID: "source", sourceName: "公司NAS", kind: "file",
+                                  size: nil, localURL: nil)
+        var smb = URLComponents()
+        smb.scheme = "smb"; smb.host = "10.20.30.88"; smb.path = "/\(share)/\(file)"
+        result.openTarget = .smbLocation(try XCTUnwrap(smb.url))
+
+        let domainLocator = NASLocator(sourceID: "source", host: "nas.example.net",
+                                       shares: [share], scopePrefixes: ["/\(share)/"],
+                                       preferredSMBUser: "李青宇")
+        guard case .mountedFile(let url) = try NASResultOpening.target(
+            for: result, vendor: .synology, origin: origin, locator: domainLocator,
+            smbMounts: [mount], webDAVMounts: []) else {
+            return XCTFail("★ 缺证据不是反证据：没有账号段的挂载要按唯一共享名认（旧实现开网页）")
+        }
+        XCTAssertEqual(url.lastPathComponent, file)
+    }
+
     /// ★ 两台主机都满足「同名共享 + 同账号」⇒ 不许猜，退回网页。
     func testSameAccountOnTwoHostsFallsBackToWebInsteadOfGuessing() throws {
         let mountRoot = root.appendingPathComponent("A0003")
@@ -390,12 +430,19 @@ final class NASResultOpeningTests: XCTestCase {
             smbMounts: [wrong], webDAVMounts: []) else {
             return XCTFail("共享名不符时不得当成挂载")
         }
-        let foreign = try XCTUnwrap(SMBMountCandidate.parse(origin: "//other.example.com/A0003",
+        // ★ 2026-11-03 收窄（原为「主机不符就不得当成挂载」）：主机不符**且挂载明确
+        //   写着别的账号**时仍然不认。而「主机不符 + 挂载表里没有账号段」现在会按
+        //   唯一共享名认 —— 真机就是这样：来源 `nas.example.net`，
+        //   本机挂 `//10.20.30.88/公司共享文档`，mount 表里没有 user 段。
+        //   安全边界改由「唯一性 + 相反账号证据 + 文件存在」三条一起守：
+        //   `SMBMountCandidateTests.testOpenCandidates*` 与
+        //   `testSynologyDomainSourceOpensAmountWithoutAUserSegment`。
+        let foreign = try XCTUnwrap(SMBMountCandidate.parse(origin: "//someone-else@other.example.com/A0003",
                                                             mountPath: root.appendingPathComponent("A0003").path))
         guard case .webURL = try NASResultOpening.unverifiedFallbackTarget(
             for: row(), vendor: .synology, origin: origin, locator: locator,
             smbMounts: [foreign], webDAVMounts: []) else {
-            return XCTFail("主机不符时不得当成挂载")
+            return XCTFail("主机不符且挂着别人的账号时，不得当成挂载")
         }
         for path in ["/A0003/../secret", "/A0003/./file", "/A0003//file"] {
             XCTAssertThrowsError(try NASResultOpening.unverifiedFallbackTarget(

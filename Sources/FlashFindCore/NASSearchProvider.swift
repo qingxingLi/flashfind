@@ -1094,18 +1094,19 @@ import Foundation
 
     /// 本来源可用的 SMB 挂载候选。
     ///
-    /// 判定只有一处：`SMBMountCandidate.matching`（主机精确优先，其次「共享名 + 登录账号
-    /// 且只落在一台主机上」）。**不要在调用点自己写 `host ==` 过滤**——来源填域名、
-    /// Finder 里用局域网 IP 挂是真实存在的组合（2026-10-29 报障），只比主机名会把它判成
-    /// 「没挂载」，然后静默改用浏览器打开。
+    /// 判定只有一处：`SMBMountCandidate.openCandidates`（主机精确优先，其次「共享名 + 登录账号
+    /// 且只落在一台主机上」，最后按「共享名只挂在一台主机上」兜底）。**不要在调用点自己写
+    /// `host ==` 过滤**——来源填域名、Finder 里用局域网 IP 挂是真实存在的组合（2026-10-29 报障），
+    /// 只比主机名会把它判成「没挂载」，然后静默改用浏览器打开；
+    /// 而挂载表里常常**没有账号段**（凭据在钥匙串），只比账号同样会误判（2026-11-03 报障）。
     ///
     /// 这些方法全部是 `nonisolated`：路径核验在后台线程执行，
     /// 只能读一份不可变的配置快照，不能碰 MainActor 上的 Provider 状态。
     nonisolated func mountCandidates() -> [SMBMountCandidate] {
         let snapshot = locatorSnapshot
-        return SMBMountCandidate.matching(host: snapshot.host, shares: snapshot.shares,
-                                          preferredUser: snapshot.preferredSMBUser,
-                                          in: (try? SMBMountCandidate.discover()) ?? [])
+        return SMBMountCandidate.openCandidates(for: snapshot.host, shares: snapshot.shares,
+                                                preferredUser: snapshot.preferredSMBUser,
+                                                in: (try? SMBMountCandidate.discover()) ?? [])
     }
 
     /// 定位并返回可打开的本地 URL。
@@ -1262,9 +1263,9 @@ import Foundation
         // 安全校验必须在**挂载之前**完成：不属于本来源、或路径含穿越形态的结果，
         // 绝不能因为「先挂上再说」而去动用户的文件系统。
         try Self.validate(row: row, against: snapshot)
-        let mounts = prioritized(SMBMountCandidate.matching(host: snapshot.host, shares: snapshot.shares,
-                                                            preferredUser: snapshot.preferredSMBUser,
-                                                            in: (try? SMBMountCandidate.discover()) ?? []),
+        let mounts = prioritized(SMBMountCandidate.openCandidates(for: snapshot.host, shares: snapshot.shares,
+                                                                  preferredUser: snapshot.preferredSMBUser,
+                                                                  in: (try? SMBMountCandidate.discover()) ?? []),
                                  by: snapshot.preferredSMBUser)
         // 已挂载时直接解析，不必打扰用户。
         if let mounted = try? resolve(row, in: mounts, snapshot: snapshot) { return mounted }
@@ -1317,9 +1318,9 @@ import Foundation
         guard snapshot.exposesSMBShares else {
             throw FlashFindError.message("这个来源的文件在网页上，没有本地路径")
         }
-        let mounts = prioritized(SMBMountCandidate.matching(host: snapshot.host, shares: snapshot.shares,
-                                                            preferredUser: snapshot.preferredSMBUser,
-                                                            in: (try? SMBMountCandidate.discover()) ?? []),
+        let mounts = prioritized(SMBMountCandidate.openCandidates(for: snapshot.host, shares: snapshot.shares,
+                                                                  preferredUser: snapshot.preferredSMBUser,
+                                                                  in: (try? SMBMountCandidate.discover()) ?? []),
                                  by: snapshot.preferredSMBUser)
         return try resolve(row, in: mounts, snapshot: snapshot)
     }
@@ -1340,14 +1341,14 @@ import Foundation
         // 同样要剥掉 dropFirst 残留的前导斜杠。
         let inside = RelativePath.relative(row.path, under: root)
         try RelativePath.validate(inside)
-        // ★ 「这台 NAS 的这个共享」只有 `matching` 一处判定。`mounts` 是调用方给的，
+        // ★ 「这台 NAS 的这个共享」只有 `openCandidates` 一处判定。`mounts` 是调用方给的，
         //   可能是整张挂载表（直接调用点 / 测试），所以这里按同一规则再筛一次——
         //   判据重写一份的后果是「canOpen 说有、打开却说没有」这类前后矛盾。
         let share = locator.owningShare(root: root)
-        let scoped = SMBMountCandidate.matching(host: locator.host,
-                                                shares: Set([share].compactMap { $0 }),
-                                                preferredUser: locator.preferredSMBUser,
-                                                in: mounts)
+        let scoped = SMBMountCandidate.openCandidates(for: locator.host,
+                                                      shares: Set([share].compactMap { $0 }),
+                                                      preferredUser: locator.preferredSMBUser,
+                                                      in: mounts)
         for mount in scoped {
             let mountRoot = mount.mountRoot.resolvingSymlinksInPath().standardizedFileURL
             let target = mountRoot.appendingPathComponent(inside).resolvingSymlinksInPath().standardizedFileURL
