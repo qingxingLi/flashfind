@@ -148,6 +148,32 @@ final class SearchQueryParserTests: XCTestCase {
         XCTAssertEqual(parse("备份 zip").extensions, ["zip"])
     }
 
+    // MARK: - 歧义裸词（2026-11-06）
+
+    /// ★ 用户原话：「在公司 nas 这个服务器搜索 pps 找不到」，文件名
+    /// `1.CL.017-PPS(黑色)原料-A2.pdf`。`PPS` 在这里是物料代号缩写，
+    /// 不是「只要 .pps / .ppsx 文件」。裸写必须按名字关键词处理，
+    /// 想按格式筛请用 `ext:pps` 或类型条。
+    func testAmbiguousPPSStaysANameKeyword() {
+        let q = parse("pps")
+        XCTAssertEqual(q.terms, ["pps"], "裸写 pps 必须留作名字关键词")
+        XCTAssertEqual(q.keywords, "pps")
+        XCTAssertTrue(q.extensions.isEmpty, "裸写 pps 不该变成格式过滤")
+        XCTAssertFalse(q.hasFormatFilter)
+        XCTAssertTrue(q.matches("1.CL.017-PPS(黑色)原料-A2.pdf"),
+                      "名字含 PPS 的 PDF 不能被格式过滤删掉")
+        XCTAssertEqual(parse("PPS").terms, ["PPS"], "大写同样按名字关键词")
+    }
+
+    /// 反向守卫：不能为了修 pps 把所有格式词都放开。
+    func testExplicitPPSAndOtherFormatWordsStillMeanFormat() {
+        XCTAssertEqual(parse("ext:pps").extensions, ["pps", "ppsx"], "显式前缀仍按格式")
+        XCTAssertEqual(parse("报告.pps").extensions, ["pps", "ppsx"], "带点写法仍是显式格式意图")
+        XCTAssertEqual(parse("报告 ppt").extensions, ["ppt", "pptx"], "类型条用的 ppt 不受影响")
+        XCTAssertEqual(parse("演示").extensions, ["ppt", "pptx", "pps", "ppsx", "key"])
+        XCTAssertEqual(parse("pdf").extensions, ["pdf"], "普通格式词行为不变")
+    }
+
     // MARK: - 词汇表自洽
 
     func testEveryFamilyKeyIsKnownExtension() {

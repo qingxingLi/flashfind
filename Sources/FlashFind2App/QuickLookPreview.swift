@@ -28,7 +28,7 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
 
         guard let panel = QLPreviewPanel.shared() else {
             // 系统关闭了 Quick Look：退回打开文件，至少不静默无响应。
-            if !NSWorkspace.shared.open(url) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            if !NSWorkspace.shared.open(url) { FileViewerRevealer.reveal(url) }
             return
         }
         if panel.isVisible, sameItem {

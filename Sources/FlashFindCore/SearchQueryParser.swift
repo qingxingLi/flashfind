@@ -131,6 +131,22 @@ public enum FileFormatVocabulary {
         "archive": ["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"],
     ]
 
+    /// ★ 既是扩展名、又是常见业务缩写的词：**裸写时按名字关键词**处理。
+    ///
+    /// 2026-11-06 用户反馈：在「公司NAS」搜 `pps` 找不到
+    /// `1.CL.017-PPS(黑色)原料-A2.pdf`。`PPS` 在这里是物料代号（聚苯硫醚），
+    /// 而 `pps` / `ppsx` 是 97-2003 时代 PowerPoint 放映格式的扩展名。
+    /// 旧逻辑把裸写的 `pps` 译成「只看 .pps/.ppsx」：下发给设备的名字模式
+    /// 变成 `*`，客户端又按扩展名把别的文件全部删光 ⇒ 名字里含 PPS 的
+    /// PDF / XLSX 一个都搜不到。真机对照：搜名字中间的子串「原料」「黑色」
+    /// 都能命中该文件，所以问题在客户端解析，不在设备侧搜索。
+    ///
+    /// 判据：**只影响裸写**。词汇表本身一个字不改，因此 `ext:pps`
+    /// （显式前缀）、`报告.pps`（带点写法）、`ppt` 类型条、类别词「演示」
+    /// 仍按格式处理，`knownExtensions` 与既有断言全部保持。
+    /// 想按格式筛 `.pps` 文件，写 `ext:pps` 即可。
+    public static let ambiguousBareWords: Set<String> = ["pps"]
+
     /// 所有已知扩展名（连带族的两侧 + 单条）。用于白名单判定。
     public static var knownExtensions: Set<String> {
         var out = singles
@@ -178,6 +194,13 @@ public enum SearchQueryParser {
                 continue
             }
             let lower = token.lowercased()
+            // ★ 歧义裸词留作名字关键词（见 FileFormatVocabulary.ambiguousBareWords）。
+            // 必须排在 extensions(for:) 之前；`ext:pps` 已在上面被显式前缀拦下，
+            // `报告.pps` 这种带点写法依旧走下面的显式格式分支。
+            if FileFormatVocabulary.ambiguousBareWords.contains(lower) {
+                terms.append(token)
+                continue
+            }
             if let hit = FileFormatVocabulary.extensions(for: lower) {
                 append(hit, to: &extensions)
                 continue

@@ -25,14 +25,52 @@ extension AppModel {
 
     func sourceStatus(_ id: String) -> NASSourceStatus { nasSourceStatus[id] ?? NASSourceStatus() }
 
+    /// 最近一次探活的证据（只读转发）。设置页诊断、来源行都从这里取。
+    var deviceEvidence: [String: DeviceReachability.Evidence] { wizard.deviceEvidence }
+
     /// 「搜索来源」列表里一行的呈现与操作，全部由 Core 判定。
     ///
     /// 视图不再自己拼「已连接 / 无法连接 / 要不要给按钮」——那套判定一旦散在
     /// 视图里，就会出现「状态说有问题、却不给入口」这种不一致。
     func sourceRow(_ id: String) -> NASSourceRowModel? {
         guard let source = nasSources.first(where: { $0.id == id }) else { return nil }
+        // ★ `ready` 只代表登录会话；「设备不可达」要看最近一次探活的证据。
+        //   两者一起交给 Core 的单一判据，界面不自己拼状态文案。
         return NASSourceRowModel.make(config: source, status: sourceStatus(id),
-                                      ready: nativeProviders[id]?.ready == true)
+                                      ready: nativeProviders[id]?.ready == true,
+                                      evidence: wizard.deviceEvidence[id] ?? .unknown)
+    }
+
+    /// 按需探测所有「显示已连接」的来源，确认设备此刻真的在线。
+    ///
+    /// 触发点只有三处：打开设置页、点「运行连接诊断…」、唤起搜索窗。
+    /// 没有后台心跳；冷却窗口内的重复入口由 `DeviceReachability.shouldProbe` 挡掉。
+    ///
+    /// ★ 结果只写进 `deviceEvidence`（显示层证据）：**不改 ready、不注销、不拆会话**。
+    ///   设备回来之后下一次探活拿到响应，界面自动恢复「已连接」。
+    /// ★ 字典整体重新赋值，才驱动 `@Published` 刷新。
+    func probeDevicePresence() {
+        let candidates = nasSources.filter { source in
+            let ready = nativeProviders[source.id]?.ready == true
+            return DevicePresenceProbe.shared.shouldProbe(config: source, ready: ready)
+        }
+        guard !candidates.isEmpty else { return }
+        Task { [weak self] in
+            await withTaskGroup(of: (String, DeviceReachability.Evidence).self) { group in
+                for source in candidates {
+                    group.addTask {
+                        let evidence = await DevicePresenceProbe.shared.probe(config: source)
+                        return (source.id, evidence)
+                    }
+                }
+                for await (id, evidence) in group {
+                    guard let self else { continue }
+                    var snapshot = self.wizard.deviceEvidence
+                    snapshot[id] = evidence
+                    self.wizard.deviceEvidence = snapshot
+                }
+            }
+        }
     }
 
     /// 行上那个按钮的唯一入口：按 Core 判定出的动作分派。
@@ -65,6 +103,9 @@ extension AppModel {
     /// 是否真的连上，看随后显示的诊断摘要。
     func runConnectionDiagnostics() {
         refreshStatuses()
+        // ★ 诊断要报「设备此刻在不在线」，先发起一次按需探活（异步、不阻塞界面）。
+        //   结果回来后诊断摘要会跟着刷新；不编造探针结论。
+        probeDevicePresence()
         guard !AppEnvironment.isPreview || fixtureMode else { return }
         for source in nasSources where source.enabled && source.isConnectConfigured && source.rememberPassword {
             reconnectUsingStoredCredential(source.id)

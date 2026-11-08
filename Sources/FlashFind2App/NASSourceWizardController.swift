@@ -19,6 +19,14 @@ final class NASSourceWizardController: ObservableObject {
     @Published var nativeProviders: [String: NASSearchProvider] = [:]
     @Published var selectedSourceID: String?
 
+    /// 来源 ID → 最近一次按需探活的「设备在线证据」。
+    ///
+    /// ★ 字典的 `@Published` 不观察 value 内部变化：写入时必须整份重新赋值
+    ///   （见 `AppModel.probeDevicePresence`），否则界面「数据变了却不刷新」。
+    /// ★ 与 `nasSourceStatus` 放在同一个 `ObservableObject` 里，AppModel 已经桥接过
+    ///   它的 `objectWillChange`，不用再接一根线。
+    @Published var deviceEvidence: [String: DeviceReachability.Evidence] = [:]
+
     // MARK: - 向导这一次会话的状态
 
     /// 密码框与 OTP 框。连接成功后由成功路径清空（见 `finishLogin`），

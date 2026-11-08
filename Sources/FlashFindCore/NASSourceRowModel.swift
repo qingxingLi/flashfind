@@ -69,10 +69,23 @@ public struct NASSourceRowModel: Equatable, Sendable {
     /// - Parameters:
     ///   - config: 来源配置。
     ///   - status: 该来源的界面状态（含 `requiredAction`）。
-    ///   - ready: Provider 是否已连接。
-    public static func make(config: NASSourceConfig, status: NASSourceStatus, ready: Bool) -> NASSourceRowModel {
+    ///   - ready: Provider 是否已连接（**会话**就绪，不等于设备此刻在线）。
+    ///   - evidence: 最近一次按需探活拿到的设备在线证据。默认 `.unknown`：
+    ///     还没探过时保持原有呈现，不把「不知道」说成「设备离线」。
+    public static func make(config: NASSourceConfig, status: NASSourceStatus, ready: Bool,
+                            evidence: DeviceReachability.Evidence = .unknown) -> NASSourceRowModel {
         let title = config.displayName
         let locations = config.scopes.map(scopeDisplayName).joined(separator: "、")
+
+        // ⓪ ★ 2026-11-08：会话还在，但设备明确没有回应。
+        //    旧实现只看 ready —— 登录成功后设备掉线，这一行仍写「已连接」。
+        //    这里只撤显示：不动 ready、不注销、不删凭据，设备回来自动恢复。
+        if DeviceReachability.display(ready: ready, evidence: evidence) == .deviceOffline {
+            return NASSourceRowModel(title: title,
+                                     detail: config.vendor.shortTitle + " · " + DeviceReachability.offlineDetail,
+                                     locations: locations, action: .retry, enabled: true,
+                                     health: .offline)
+        }
 
         // ① 用户主动关掉：不搜索、不删除、不注销账号。不给按钮。
         if !config.enabled {

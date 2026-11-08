@@ -55,6 +55,10 @@ struct SettingsView: View {
         }
         .onAppear {
             model.refreshLaunchAtLogin()
+            // ★ 「已连接」只是登录会话的粘性标志。打开设置页时按需验一次设备在不在线，
+            //   否则设备掉线后这一页会一直写着「已连接」（2026-11-08 报障）。
+            //   异步、短超时、有冷却，不阻塞界面。
+            model.probeDevicePresence()
             // 本机搜索的提示只在打开设置时才有意义，检查也就在这时候做。
             // 少了这一句，「Spotlight 索引被关掉」这类必须让用户知道的提醒
             // 永远不会出现，本机那一段会变成一行等不到结果的「正在检查本机搜索状态」。
@@ -828,7 +832,8 @@ struct SettingsView: View {
                             ForEach(ConnectionDiagnostics.summary(
                                 config: source,
                                 status: model.sourceStatus(source.id),
-                                ready: model.nativeProviders[source.id]?.ready == true), id: \.title) { line in
+                                ready: model.nativeProviders[source.id]?.ready == true,
+                                evidence: model.deviceEvidence[source.id] ?? .unknown), id: \.title) { line in
                                 HStack(spacing: 6) {
                                     Image(systemName: line.ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                                         .font(.caption2)

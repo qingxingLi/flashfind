@@ -8,9 +8,11 @@ import FlashFindCore
 ///
 /// 用户：「钉住前后的搜索框和搜索结果都应该可以单独移动」。同一个窗口里的两块
 /// 只能一起动，所以结果那一块搬出来单独一窗。拆开之后：
-/// * 拖动互不影响（用户选的「完全不跟」）；
-/// * 「钉住」与不钉住是同一个窗口的两种命运——钉住只是把它复制一份留在桌面上，
-///   原来这块继续跟着搜索走。
+/// * 2026-10-28 起的旧规则是「拖动互不影响（完全不跟）」；
+/// * ★★ 2026-11-08 用户改了主意：**未固定时两块联动**，拖任一块另一块保持相对
+///   位置一起走；只有点图钉生成的快照窗才是独立、可任意拖的（见 `LinkedWindowFollower`）。
+/// * 因此「独立窗口」依然是必须的：两块各自画自己的玻璃、中间留真实空隙，
+///   联动靠通知同步 frame，不是把它们塞回同一个窗口。
 ///
 /// ★ 这一块的高度与宽度都由内容算：高度给 `SearchPanelSizing`（上沿固定、向下长），
 ///   宽度取窗口宽度。它不再参与「搜索窗总高」的加法，页面与 `SearchView` 之间
@@ -138,9 +140,13 @@ private struct SearchResultsPanelVisibility: NSViewRepresentable {
 ///
 /// 三件它必须自己管、别人管不了的事：
 /// 1. **拖动**：`isMovableByWindowBackground`（表面不吞 `hitTest` 才真的能动，见 `SearchModuleSurface`）；
-/// 2. **摆放**：第一次显示时贴到搜索框下方 10pt；用户拖过之后不再自动摆；
+/// 2. **摆放**：由协调者按 `SearchWindowLift` 算好传进来；
 /// 3. **谁是 key**：点进来之后 `model.resultsWindowIsKey` 要为真，
 ///    否则键盘路由会以为「焦点还在输入框」，↑↓ 与空格全部落空。
+///
+/// ★★ 2026-11-08 契约反转：未固定时两块窗**联动**。拖这块窗不再是「两块互不相干」，
+///   而是通过 `onUserMoved` 让协调者把搜索框按同样的位移带走（用户：「结果窗和搜索框
+///   保持一起移动」）。真正独立可任意拖的是点图钉生成的**快照窗**（`PinnedResultsWindow`）。
 @MainActor
 final class SearchResultsPanelController {
     let panel: NSPanel
@@ -152,9 +158,11 @@ final class SearchResultsPanelController {
     ///   「用户拖过」，之后的自动摆位全部停摆（首屏就把结果钉死在错误位置）。
     ///   现在用动画的 `completionHandler` 收尾，覆盖整段动画。
     private var isPlacing = false
-    /// 用户亲手拖过没有。拖过之后就不再自动贴回搜索框下方——
-    /// 用户把它放到右边是有意的，下一次搜索又拽回来等于白摆。
+    /// 这一轮用户亲手拖过没有。
     ///
+    /// ★ 2026-11-08 起它**不再**是「停止自动摆位」的理由：联动语义下拖这块窗会把
+    ///   搜索框一起带走，两块仍保持相对位置，协调者照样可以重摆。
+    ///   保留这个字段只用于「本轮发生过人手拖动」的记录与取证。
     /// ★★ 判据是「鼠标按着的时候移动了」，不是「移动过」（见 `PointerButton`）。
     private(set) var userMoved = false
 #if DEBUG
@@ -200,10 +208,16 @@ final class SearchResultsPanelController {
 
     /// 显示 / 收起 / 高度变化都通知协调者重排一次（它才知道搜索框在哪、屏幕有多高）。
     ///
-    /// ★ 用户**亲手拖过**就不再自动回位：把它放到右边是有意的，清空关键词再搜一次
-    ///   就把它拽回搜索框下面是抢用户的位置。这条判断在协调者那边（`layoutForResults`），
-    ///   因为「放不放下」和「搜索框抬不抬」是**同一个决定**，分成两处必然对不上。
+    /// ★ 「放不放下」和「搜索框抬不抬」是**同一个决定**，所以摆位只在协调者那一处算。
     var onLayoutNeeded: (() -> Void)?
+
+    /// 用户按住这块窗拖动时通知协调者，让它把搜索框按同样的位移带走。
+    /// 由 `didMove` 观察者里那条 `WindowDragIntent.isUserDrag` 判据触发：
+    /// 程序化摆位（`isPlacing`）与同步联动（`isSyncing`）都不算人手拖动。
+    var onUserMoved: (() -> Void)?
+
+    /// 是否正在程序化摆位。协调者判断「这次移动要不要联动」时要读。
+    var isAutoPlacing: Bool { isPlacing }
 
     /// 新一轮搜索开始（快捷键唤起）：撤销「用户拖过」的记忆。
     func beginSession() {
@@ -287,6 +301,8 @@ final class SearchResultsPanelController {
                 guard WindowDragIntent.isUserDrag(pointerDown: dragging,
                                                   autoPlaced: self.isPlacing) else { return }
                 self.userMoved = true
+                // ★ 2026-11-08：未固定时两窗联动——拖结果窗要把搜索框一起带走。
+                self.onUserMoved?()
             }
         })
         // 结果条数不变但高度会变（打开失败提示条显隐）：高度一改，位置就得重算。

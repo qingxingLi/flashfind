@@ -183,7 +183,11 @@ extension AppModel {
         // （位置限定让它可能只有一两个来源，但判据的形式不变。）
         let requested = plan.sourceIDs
         var completion = SearchCompletionTracker(requested: requested)
-        searchTask=Task {
+        // ★ 外层显式弱捕获，与内层回调的 `[weak self]` 同口径：Swift 6 下
+        //   两层捕获强弱不一致会报 `#ImplicitStrongCapture`（全量重编时才暴露）。
+        //   `guard let self` 之后，闭包内仍可省略 `self.`（SE-0269）。
+        searchTask=Task { [weak self] in
+            guard let self else { return }
             // 本机立即出结果；NAS 走 Coordinator 的 600ms 防抖，
             // 避免用户输入过程中产生多次无谓的远端请求。
             // 依据： 间隔对照实验，四档间隔均为 100%，

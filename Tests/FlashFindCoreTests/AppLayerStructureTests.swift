@@ -140,8 +140,95 @@ final class AppLayerStructureTests: XCTestCase {
         }
 
         let controller = codeOnly(try appSource("ResultActionController.swift"))
-        XCTAssertTrue(controller.contains("activateFileViewerSelecting"))
+        // 2026-11-06 起强制访达的调用收进共享执行器：controller 只发「定位」意图，
+        // 用访达还是第三方由 Core 判据决定。
+        XCTAssertFalse(controller.contains("activateFileViewerSelecting"),
+                       "controller 不该再直连访达，判定与执行都归 FileViewerRevealer")
         XCTAssertTrue(controller.contains("QuickLookPreview.present"))
+        let revealer = codeOnly(try appSource("FileViewerRevealer.swift"))
+        XCTAssertTrue(revealer.contains("activateFileViewerSelecting"),
+                      "访达那条路要保留「打开并选中文件」的能力")
+    }
+
+    /// ★ 「在文件管理器中显示」不许再硬绑访达（2026-11-06 用户：默认文件管理器是 Path Finder）。
+    ///
+    /// `activateFileViewerSelecting` 的文档写死 "Activates the Finder"，它不看用户偏好。
+    /// 三处「定位」曾各写一次这个调用，只要留一处，就会出现「⌘↩ 认偏好、
+    /// 下载到…却不认」这种前后矛盾。所以判定下沉 Core，执行收进一个共享入口。
+    func testRevealRespectsTheUsersDefaultFileViewer() throws {
+        let controller = codeOnly(try appSource("ResultActionController.swift"))
+        let routing = codeOnly(try coreSource("FileViewerRouting.swift"))
+        XCTAssertTrue(routing.contains("enum FileViewerRouting"), "判定不在 Core")
+        XCTAssertFalse(routing.contains("NSWorkspace") || routing.contains("UserDefaults"),
+                       "Core 判定层不许碰 AppKit / 偏好，否则又变成不可测")
+
+        let revealBlock = try XCTUnwrap(braceBlock(after: "if reveal", in: controller),
+                                        "ResultActionController 找不到 reveal 分支")
+        XCTAssertTrue(revealBlock.contains("FileViewerRevealer.reveal(url)"),
+                      "reveal 必须走共享执行器，由 Core 路由决定用访达还是第三方")
+        XCTAssertFalse(revealBlock.contains("activateFileViewerSelecting"),
+                       "reveal 分支直接强制访达会绕过用户的默认文件管理器")
+
+        let download = try XCTUnwrap(braceBlock(after: "func downloadToFolder(", in: controller),
+                                     "找不到「下载到…」动作")
+        XCTAssertTrue(download.contains("FileViewerRevealer.reveal(dest)"),
+                      "下载到…完成后的定位要与 reveal 同口径")
+        XCTAssertFalse(download.contains("activateFileViewerSelecting"))
+
+        let quickLook = codeOnly(try appSource("QuickLookPreview.swift"))
+        XCTAssertTrue(quickLook.contains("FileViewerRevealer.reveal(url)"),
+                      "Quick Look 失败兜底也要走同一个执行器")
+        XCTAssertFalse(quickLook.contains("activateFileViewerSelecting"))
+
+        // 执行器必须真的向 Core 问路，而不是自己另写一份偏好判定。
+        let revealer = codeOnly(try appSource("FileViewerRevealer.swift"))
+        XCTAssertTrue(revealer.contains("FileViewerRouting.route(for:"),
+                      "执行器必须调用 Core 的单一判据")
+        XCTAssertTrue(revealer.contains("withApplicationAt:"),
+                      "第三方那条路要显式把所在目录交给用户选的 App")
+    }
+
+    /// ★ 双击打开**文件夹**也要认用户的默认文件管理器（2026-11-06 第二轮报障）。
+    ///
+    /// 第一轮只修了 reveal（⌘↩ /「在 Finder 中显示」），双击打开仍走
+    /// `NSWorkspace.open(目录URL)`。那条路问的是 Launch Services 的
+    /// `public.folder` handler —— 本机实测是 `com.apple.finder`，即使
+    /// `NSFileViewer` 已指向 Path Finder。所以两条链必须共用 Core 判据，
+    /// 且「双击」分支不许再直连系统打开。
+    func testOpeningAFolderRespectsTheUsersDefaultFileViewer() throws {
+        let controller = codeOnly(try appSource("ResultActionController.swift"))
+        let routing = codeOnly(try coreSource("FileViewerRouting.swift"))
+        let revealer = codeOnly(try appSource("FileViewerRevealer.swift"))
+        let openBody = try XCTUnwrap(braceBlock(after: "func open(", in: controller),
+                                     "ResultActionController 里找不到 func open(")
+
+        // 判定必须在 Core，且不许碰 AppKit / 偏好（碰了就等于不可测）。
+        XCTAssertTrue(routing.contains("enum FileViewerOpenRoute"), "双击打开的判据不在 Core")
+        // 函数定义写的是 `openingRoute(for url: URL`，冒号只出现在**调用点**上；
+        // 断言按定义形态写，别拿调用形态去找定义（那样会得到一条假红）。
+        XCTAssertTrue(routing.contains("func openingRoute("), "Core 缺双击打开的路由")
+        XCTAssertTrue(routing.contains("preferredViewerBundleIdentifier"),
+                      "reveal 与双击打开必须共用「谁是用户偏好」这唯一出处")
+        XCTAssertFalse(routing.contains("NSWorkspace") || routing.contains("UserDefaults"),
+                       "Core 判定层不许碰 AppKit / 偏好")
+
+        // ★ 按调用点枚举而不是全局搜字符串：`func open` 里保留的那一次
+        //   系统打开是**网页兜底**（webURL 分支），与本地文件/文件夹无关。
+        //   改码前这里有两次（网页 + 双击），改码后只允许一次。
+        XCTAssertEqual(openBody.components(separatedBy: "NSWorkspace.shared.open(").count - 1, 1,
+                       "func open 里只允许网页兜底那一次系统打开；双击必须走共享执行器")
+        XCTAssertTrue(openBody.contains("FileViewerRevealer.open(url, itemKind: row.kind)"),
+                      "双击要把结果行的 kind 一并交给执行器，才能区分文件夹与普通文件")
+
+        // 执行器两条链都向 Core 问路；第三方打开要真的置前、真的判成功。
+        XCTAssertTrue(revealer.contains("FileViewerRouting.route(for:"),
+                      "reveal 链必须调用 Core 的单一判据")
+        XCTAssertTrue(revealer.contains("FileViewerRouting.openingRoute(for:"),
+                      "双击打开链必须调用同一份 Core 判据，不许另写一份判定")
+        XCTAssertTrue(revealer.contains("activates = true"),
+                      "第三方文件管理器必须显式置前，否则窗口开在后面用户仍以为开的是访达")
+        XCTAssertTrue(revealer.contains("error == nil"),
+                      "第三方打开要用异步回调的真实结果，不许无条件 return true")
     }
 
     /// ★ 直接打开文件成功后浮窗必须自动收起，且不许把焦点抢回闪寻。
@@ -159,10 +246,12 @@ final class AppLayerStructureTests: XCTestCase {
         let controller = codeOnly(try appSource("ResultActionController.swift"))
         let openBody = try XCTUnwrap(braceBlock(after: "func open(", in: controller),
                                      "ResultActionController 里找不到 func open(")
-        // 锁住「打开成功」分支本身：这里面必须有收起浮窗的调用。
+        // ★ 锚点必须跟着实现走：2026-11-06 双击打开改走共享执行器后，
+        //   `func open` 里剩下的那句 `NSWorkspace.shared.open(url)` 是**网页兜底**，
+        //   继续锚它会被网页分支满足，成为一条假绿。改成锚双击的完成回调块。
         let successBlock = try XCTUnwrap(
-            braceBlock(after: "NSWorkspace.shared.open(url)", in: openBody),
-            "func open 里找不到 NSWorkspace.shared.open 的花括号块")
+            braceBlock(after: "FileViewerRevealer.open(url, itemKind: row.kind)", in: openBody),
+            "func open 里找不到双击打开的完成回调块")
         XCTAssertTrue(successBlock.contains("onHidePanel()"),
                       "打开文件成功后必须收起浮窗（onHidePanel）")
         // reveal 分支早有结论：动作之后再 activate 会把焦点抢回闪寻。
@@ -1837,8 +1926,11 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertTrue(snap.contains("panel.setFrame(frame, display: false)"),
                       "回位不用动画：收窗时那一段动画根本看不见")
         let layout = try XCTUnwrap(braceBlock(after: "private func layoutForResults()", in: controller))
-        XCTAssertTrue(layout.contains("results.userMoved"),
-                      "结果被用户拖走过就不许再摆：两块互不相干是他 2026-10-28 定的")
+        // ★★ 2026-11-08 契约反转：未固定时两块窗联动（用户：「结果窗和搜索框保持
+        //   一起移动」），拖过结果窗**不再**是「两块互不相干」的理由。旧断言写的是
+        //   2026-10-28 的「完全不跟」，这里必须跟着改口，否则新行为会被旧守卫挡回去。
+        XCTAssertFalse(layout.contains("!results.userMoved"),
+                       "★ 未固定时两窗联动，不许再用 userMoved 阻止自动摆位（2026-11-08 新契约）")
         // ★★ 摆位只有一条路。2026-10-30 这里曾经是
         //   `guard let plan = SearchWindowLift.plan(…) else { restoreHome(); return }`，
         //   于是「结果放得下」这条最常见的处境根本没有摆结果窗：用户报
@@ -4096,5 +4188,81 @@ final class AppLayerStructureTests: XCTestCase {
                        "★ 一旦把 `autoPlaced: fieldLift > 0` 加回来，「抬起之后的人手拖动」就又被吞掉")
         XCTAssertTrue(remember.contains("fieldLift = 0"),
                       "★ 用户接管位置后要清掉本轮抬升账，否则 restoreHome() 会按旧 home 把他拖到的位置拉回去")
+    }
+
+    /// ★★ 2026-11-08：「已连接」必须有设备在线的真实证据。
+    ///
+    /// 现场：`10.20.30.96` 走代理隧道，裸 TCP connect 全部秒开（假证据），
+    /// 真实 HTTP 请求却全部超时。任何把 TCP 结果当在线的写法都会原样保留这个 bug。
+    /// 这组断言在**未接探活的旧源码**上必须整体变红，红的是行为缺口而不是注释。
+    func testConnectedLabelRequiresAnApplicationRoundTrip() throws {
+        let reachability = codeOnly(try coreSource("DeviceReachability.swift"))
+        XCTAssertTrue(reachability.contains("func evidence(statusCode:"),
+                      "Core 必须把「有没有拿到 HTTP 响应行」作为证据判据")
+        XCTAssertTrue(reachability.contains("func display(ready:"),
+                      "Core 必须有唯一的展示判据，别在视图里另拼一套")
+
+        let row = codeOnly(try coreSource("NASSourceRowModel.swift"))
+        XCTAssertTrue(row.contains("DeviceReachability.display("),
+                      "★ 来源行必须问 Core 的在线判据，不能只凭 ready 就写「已连接」")
+        XCTAssertTrue(row.contains("DeviceReachability.offlineDetail"),
+                      "设备不可达时要有明确文案，且只有一个出处")
+
+        let diagnostics = codeOnly(try coreSource("ConnectionDiagnostics.swift"))
+        XCTAssertTrue(diagnostics.contains("DeviceReachability"),
+                      "诊断摘要的「连接」一行也必须带在线证据，不能只报会话状态")
+
+        guard let rawProbe = try? appSource("DevicePresenceProbe.swift") else {
+            XCTFail("缺少按需探活执行器 DevicePresenceProbe.swift")
+            return
+        }
+        let probe = codeOnly(rawProbe)
+        XCTAssertTrue(probe.contains("URLSession"), "★ 必须走应用层往返，不能用裸 socket")
+        XCTAssertTrue(probe.contains("data(for:"), "★ 判据是收到 HTTP 响应，不是 connect 成功")
+        XCTAssertTrue(probe.contains("serverTrust") || probe.contains("didReceive challenge"),
+                      "★ 必须允许自签证书，否则在线设备会被 TLS 失败误判离线")
+        XCTAssertFalse(probe.contains("smbPortReachable"),
+                       "★ 445 探活是打开文件用的，不许拿来判来源在线")
+        for forbidden in ["markReadyOnCurrentCore(false)", "resetCoreSource", "disconnectOne("] {
+            XCTAssertFalse(probe.contains(forbidden),
+                           "★ 探活失败只改显示，不许清登录会话：\(forbidden)")
+        }
+
+        let actions = codeOnly(try appSource("AppModel+SourceActions.swift"))
+        XCTAssertTrue(actions.contains("deviceEvidence"),
+                      "sourceRow 必须把探活证据交给 Core 行模型")
+        XCTAssertTrue(actions.contains("probeDevicePresence"),
+                      "运行连接诊断时要顺带验一次设备在不在线")
+
+        let settings = codeOnly(try appSource("SettingsView.swift"))
+        XCTAssertTrue(settings.contains("probeDevicePresence()"),
+                      "★ 打开设置页要按需触发一次探活，否则「已连接」仍是没验过的粘性标志")
+
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        XCTAssertTrue(controller.contains("probeDevicePresence()"),
+                      "唤起搜索窗时也要按需验一次，侧边栏副标题才不会骗人")
+    }
+
+    /// ★★ 2026-11-08 契约反转：未固定时两块窗联动，钉住窗仍独立。
+    func testUnpinnedWindowsMoveTogetherAndPinnedWindowStaysIndependent() throws {
+        let controller = codeOnly(try appSource("SearchPanelController.swift"))
+        XCTAssertTrue(controller.contains("LinkedWindowFollower."),
+                      "★ 联动判定必须在 Core；App 层不许另写一套位移计算")
+        let remember = try XCTUnwrap(braceBlock(after: "private func rememberHome()", in: controller),
+                                     "取不到 rememberHome() 的函数体")
+        XCTAssertTrue(remember.contains("followFromFieldDrag"),
+                      "★ 拖搜索框时要按 Core 判据同步结果窗")
+        XCTAssertTrue(controller.contains("onUserMoved"),
+                      "★ 拖结果窗时要有回调把搜索框一起带走")
+        XCTAssertTrue(controller.contains("isSyncing"),
+                      "★ 必须有同步标志掐断 A→B→A 的反馈循环")
+
+        let results = codeOnly(try appSource("SearchResultsPanel.swift"))
+        XCTAssertTrue(results.contains("onUserMoved"),
+                      "结果窗的 didMove 必须把「用户拖动」交给协调者")
+
+        let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
+        XCTAssertTrue(pinned.contains("isMovableByWindowBackground = true"),
+                      "钉住的快照窗保持独立可任意拖，不受联动影响")
     }
 }

@@ -99,25 +99,36 @@ final class ResultActionController: ObservableObject {
                 }
                 // 网络路径已在后台核验；这里再次 stat 会把等待带回主线程。
                 if reveal {
-                    // 系统默认的文件查看器可能是 Path Finder，这里显式要 Finder。
-                    // activateFileViewerSelecting(_:) 走 Launch Services 而不是
-                    // Apple Event：无需用户授权「控制 Finder」，命令行与 GUI 行为一致。
+                    // 判定在 Core `FileViewerRouting`：用户把 Path Finder / ForkLift
+                    // 设为默认文件管理器时，定位交给它，而不是硬开访达。第三方没有
+                    // 通用的「选中文件」接口，那条路由打开的是文件所在目录。
                     //
-                    // ★ 此后不能再来一句 NSApp.activate：它会把焦点从访达抢回闪寻，
-                    // 表现为「访达打开了，但闪寻又弹回前台」，等于定位没生效。
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                    onHidePanel()
+                    // ★ 此后不能再来一句 NSApp.activate：它会把焦点从文件管理器抢回
+                    // 闪寻，表现为「打开了，但闪寻又弹回前台」，等于定位没生效。
+                    FileViewerRevealer.reveal(url) { succeeded in
+                        if succeeded {
+                            self.onStatus("")
+                            self.onHidePanel()
+                        } else {
+                            self.onStatus("系统无法打开此文件所在文件夹")
+                        }
+                    }
                 } else {
-                    if NSWorkspace.shared.open(url) {
-                        // 成功打开才收起浮窗：失败时要留着浮窗显示错误提示。
-                        // 与 reveal 分支同一教训：打开动作之后闪寻必须让位，
-                        // NSWorkspace.open 自己会激活目标 App，不许再抢焦点。
-                        onHidePanel()
-                    } else {
-                        onStatus("系统无法打开此文件，请检查文件权限和关联应用")
+                    // ★ 双击打开也要问同一份 Core 判据：直接 NSWorkspace.open(目录URL)
+                    //   只会落到 Launch Services 的 public.folder handler（访达），
+                    //   完全不认 NSFileViewer。普通文件仍由 Core 判回系统默认应用。
+                    FileViewerRevealer.open(url, itemKind: row.kind) { succeeded in
+                        if succeeded {
+                            // 成功打开才收起浮窗：失败时要留着浮窗显示错误提示。
+                            // 打开动作之后闪寻必须让位，目标 App 自己会置前，
+                            // 不许再来一句 NSApp.activate 抢焦点。
+                            self.onStatus("")
+                            self.onHidePanel()
+                        } else {
+                            self.onStatus("系统无法打开此文件，请检查文件权限和关联应用")
+                        }
                     }
                 }
-                onStatus("")
             } catch {
                 let banner = OpenFailureText.banner(error)
                 failure = Failure(message: banner.message, smbURL: banner.smbURL)
@@ -185,9 +196,14 @@ final class ResultActionController: ObservableObject {
                     throw error
                 }
                 onStatus("")
-                // 与「在访达中显示」同一教训：走 Launch Services，不抢焦点。
-                NSWorkspace.shared.activateFileViewerSelecting([dest])
-                onHidePanel()
+                // 与「在 Finder 中显示」同一教训：走共享执行器，不抢焦点。
+                FileViewerRevealer.reveal(dest) { succeeded in
+                    if succeeded {
+                        self.onHidePanel()
+                    } else {
+                        self.onStatus("下载完成，但系统无法打开所在文件夹")
+                    }
+                }
             } catch {
                 failure = Failure(message: OpenFailureText.banner(error).message)
                 onStatus("")

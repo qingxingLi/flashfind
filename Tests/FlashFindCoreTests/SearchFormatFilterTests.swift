@@ -102,6 +102,29 @@ final class SearchFormatFilterTests: XCTestCase {
         XCTAssertEqual(Set(out.names), ["测试报告.ppt", "测试报告.docx"])
     }
 
+    /// ★ 回归（2026-11-06 用户反馈）：在「公司NAS」搜 `pps` 找不到
+    /// `1.CL.017-PPS(黑色)原料-A2.pdf`。设备按名字子串返回结果之后，
+    /// 客户端不能再用「只看 .pps/.ppsx」把它删掉。
+    /// 真机对照：搜 `原料` / `黑色`（名字中间的子串）都能命中该 PDF，
+    /// 搜 `pps` 为 0 条 ⇒ 问题在客户端解析，不在设备。
+    func testPPSBareWordKeepsFilesWhoseNameContainsPPS() async throws {
+        let target = "1.CL.017-PPS(黑色)原料-A2.pdf"
+        let legacy = "旧放映.pps"
+        let files = [row(target), row("测试报告.pptx"), row(legacy)]
+        let out = try await search("pps", files: files)
+        XCTAssertEqual(out.fields["query"] as? String, "pps",
+                       "裸写 pps 该按名字关键词下发，不能变成 *")
+        XCTAssertTrue(out.names.contains(target), "名字含 PPS 的 PDF 必须留在结果里")
+        XCTAssertTrue(out.names.contains(legacy), "真正的 .pps 文件也不能丢")
+    }
+
+    /// 反向守卫：修 pps 不能顺手把普通格式词的收敛行为改掉。
+    func testOrdinaryFormatWordStillFilters() async throws {
+        let out = try await search("pdf", files: [row("测试报告.pdf"), row("测试报告.docx")])
+        XCTAssertEqual(out.fields["query"] as? String, "*")
+        XCTAssertEqual(Set(out.names), ["测试报告.pdf"])
+    }
+
     func testRankUsesStrippedKeywords() async throws {
         // 拿整串「测试报告 ppt」算相关度的话，没有文件名匹配得上，结果掉到最后一档（4）。
         // 用剥离后的关键词「测试报告」则是**同名**命中（0）。
