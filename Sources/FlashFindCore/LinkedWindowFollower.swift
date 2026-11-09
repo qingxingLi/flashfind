@@ -68,4 +68,36 @@ public enum LinkedWindowFollower {
         let dy = moverAfter.y - moverBefore.y
         return CGPoint(x: companionBefore.x + dx, y: companionBefore.y + dy)
     }
+
+    /// ★★ 2026-11-08 真机录屏报障（用户：「整体掉帧，没有做到同步移动，
+    /// 很明显不是一个整体的移动」）：`companionOrigin` 用「增量 delta」，
+    /// 只有**每一帧的 didMove 都准时到达**才对。丢一帧、或被自动摆位插进来改了
+    /// 基线，另一块窗就永久错位；再加上 `place()` 的动画，看起来就是两块各走各的。
+    ///
+    /// 改为在**拖动开始那一刻**记下观测到的相对偏移（`relativeOffset`），
+    /// 之后每一帧都按「mover 的当前原点 + 固定偏移」把另一块**对齐**过去。
+    /// 这是对位置的绝对值收敛，不依赖累计，也不怕中间漏一帧。
+    ///
+    /// - `offset` 恒为 `results − field`（`relativeOffset(field:results:)` 的结果）。
+    /// - `moving == .field` 时求结果窗原点；`moving == .results` 时求搜索框原点。
+    public static func alignedOrigin(moving: Moved,
+                                     moverOrigin: CGPoint,
+                                     offset: CGVector) -> CGPoint {
+        switch moving {
+        case .field:
+            return CGPoint(x: moverOrigin.x + offset.dx, y: moverOrigin.y + offset.dy)
+        case .results:
+            return CGPoint(x: moverOrigin.x - offset.dx, y: moverOrigin.y - offset.dy)
+        }
+    }
+
+    /// 拖动期间**不许**自动重排。
+    ///
+    /// `layoutForResults()` 会启动两段 0.18s 动画（搜索框 + 结果窗），并把结果窗
+    /// 重新贴回搜索框下沿。拖动时它若被 `onLayoutNeeded` 反复触发，动画会被自己
+    /// 不断打断、刚同步好的位置也被覆盖 —— 这就是「动画卡顿」的来源。
+    /// 拖动结束后由协调者补一次**无动画**重排，把抬升量结算掉。
+    public static func shouldDeferAutoLayout(pointerDown: Bool, isSyncing: Bool) -> Bool {
+        pointerDown || isSyncing
+    }
 }

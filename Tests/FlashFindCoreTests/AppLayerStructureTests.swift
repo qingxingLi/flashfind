@@ -341,7 +341,8 @@ final class AppLayerStructureTests: XCTestCase {
         // ★ 2026-10-30 改口：摆位入口从 `placeResultsBelowField` 换成 `layoutForResults`
         //   （放不下时要抬搜索框）。间距仍由 Core 的 `moduleGap` 决定，只是改由
         //   `SearchWindowLift.plan` 的 `gap:` 参数传进去。
-        let place = try XCTUnwrap(braceBlock(after: "private func layoutForResults()", in: controller),
+        // ★ 锚点只钉函数名：2026-11-08 起签名多了 animated / allowDefer 两个参数。
+        let place = try XCTUnwrap(braceBlock(after: "private func layoutForResults(", in: controller),
                                   "找不到 layoutForResults")
         XCTAssertTrue(place.contains("gap: SearchModuleLayout.moduleGap"),
                       "两块窗口之间那道空白仍由 Core 的 moduleGap 决定（现在是窗口间距）")
@@ -1606,12 +1607,17 @@ final class AppLayerStructureTests: XCTestCase {
         XCTAssertFalse(resultsPage.contains("SearchFieldModule("),
                        "两块窗口各住各的模块，不许互相装")
 
-        // 两块窗口各自能拖、各自没有表面、各自上沿固定。
+        // ★★ 2026-11-08 第三次真机反馈（用户）：「只有固定以后才能拖动，否则就是整体移动」。
+        //   搜索框是唯一把手；未固定结果窗的拖动能力由 Core 判据关掉。
         let controller = codeOnly(try appSource("SearchPanelController.swift"))
         let resultsController = codeOnly(try appSource("SearchResultsPanel.swift"))
+        XCTAssertTrue(controller.contains("panel.isMovableByWindowBackground = true"),
+                      "★ 搜索框仍是唯一能带动整体移动的把手")
+        XCTAssertTrue(resultsController.contains("WindowGroupPolicy.mayDragResultsWindowIndependently"),
+                      "★ 结果窗能不能拖必须由 Core 判据决定")
+        XCTAssertFalse(resultsController.contains("isMovableByWindowBackground = true"),
+                       "★ 未固定结果窗不许声明背景可拖")
         for source in [controller, resultsController] {
-            XCTAssertTrue(source.contains("isMovableByWindowBackground = true"),
-                          "两块窗口都要能单独拖（用户：「都应该可以单独移动」）")
             XCTAssertTrue(source.contains("hasShadow = false"),
                           "透明窗口的阴影按窗口矩形画，会把圆角糊成方的")
         }
@@ -1790,8 +1796,8 @@ final class AppLayerStructureTests: XCTestCase {
                       "★★ 钉住的窗口不许跟着 App 一起藏起来（NSPanel 默认会藏）")
         XCTAssertTrue(pinned.contains(".canJoinAllSpaces"),
                       "切 Space 时也要跟着，否则「钉住」只在当前桌面成立")
-        XCTAssertTrue(pinned.contains("isMovableByWindowBackground = true"),
-                      "钉住的窗口要能拖（用户：「并且拖动」）")
+        XCTAssertTrue(pinned.contains("WindowGroupPolicy.mayDragResultsWindowIndependently"),
+                      "★ 钉住后的快照窗是唯一允许独立拖的结果窗，判据走 Core")
         XCTAssertTrue(pinned.contains("charactersIgnoringModifiers?.lowercased() == \"w\""),
                       "⌘W 必须真的被处理：无标题栏窗口的 performClose 只会响一声")
         XCTAssertTrue(pinned.contains("close(id)"), "⌘W 要关掉当前那块窗口本身")
@@ -1925,7 +1931,7 @@ final class AppLayerStructureTests: XCTestCase {
         let snap = try XCTUnwrap(braceBlock(after: "private func snapHome()", in: controller))
         XCTAssertTrue(snap.contains("panel.setFrame(frame, display: false)"),
                       "回位不用动画：收窗时那一段动画根本看不见")
-        let layout = try XCTUnwrap(braceBlock(after: "private func layoutForResults()", in: controller))
+        let layout = try XCTUnwrap(braceBlock(after: "private func layoutForResults(", in: controller))
         // ★★ 2026-11-08 契约反转：未固定时两块窗联动（用户：「结果窗和搜索框保持
         //   一起移动」），拖过结果窗**不再**是「两块互不相干」的理由。旧断言写的是
         //   2026-10-28 的「完全不跟」，这里必须跟着改口，否则新行为会被旧守卫挡回去。
@@ -4243,26 +4249,29 @@ final class AppLayerStructureTests: XCTestCase {
                       "唤起搜索窗时也要按需验一次，侧边栏副标题才不会骗人")
     }
 
-    /// ★★ 2026-11-08 契约反转：未固定时两块窗联动，钉住窗仍独立。
-    func testUnpinnedWindowsMoveTogetherAndPinnedWindowStaysIndependent() throws {
+    /// ★★ 2026-11-08 二次修正：未固定时两块窗是 **AppKit 父子窗口组**，联动交给
+    /// WindowServer，不再靠 `didMove` 追赶（追赶的两窗永远差一帧）。钉住窗仍独立。
+    func testUnpinnedWindowsFormAnAppKitWindowGroupAndPinnedWindowStaysIndependent() throws {
         let controller = codeOnly(try appSource("SearchPanelController.swift"))
-        XCTAssertTrue(controller.contains("LinkedWindowFollower."),
-                      "★ 联动判定必须在 Core；App 层不许另写一套位移计算")
-        let remember = try XCTUnwrap(braceBlock(after: "private func rememberHome()", in: controller),
-                                     "取不到 rememberHome() 的函数体")
-        XCTAssertTrue(remember.contains("followFromFieldDrag"),
-                      "★ 拖搜索框时要按 Core 判据同步结果窗")
-        XCTAssertTrue(controller.contains("onUserMoved"),
-                      "★ 拖结果窗时要有回调把搜索框一起带走")
-        XCTAssertTrue(controller.contains("isSyncing"),
-                      "★ 必须有同步标志掐断 A→B→A 的反馈循环")
+        XCTAssertTrue(controller.contains("WindowGroupPolicy."),
+                      "★ 挂/解绑判据必须在 Core；App 层不许另写一套")
+        XCTAssertTrue(controller.contains("addChildWindow("),
+                      "★ 未固定时结果窗要挂成搜索框的 child window")
+        XCTAssertTrue(controller.contains("removeChildWindow("),
+                      "★ 结果窗隐藏 / 整组收起时要解绑")
+        XCTAssertFalse(controller.contains("isSyncing"),
+                      "★ 父子组生效后不许再留 didMove 追赶与跨帧同步标志")
 
         let results = codeOnly(try appSource("SearchResultsPanel.swift"))
-        XCTAssertTrue(results.contains("onUserMoved"),
-                      "结果窗的 didMove 必须把「用户拖动」交给协调者")
+        XCTAssertFalse(results.contains("performDrag(with:"),
+                       "★ 1.1.69：跨窗口转发整条删掉 —— 真机证明它挡不住结果窗被单独拖走")
+        XCTAssertTrue(results.contains("WindowGroupPolicy.mayDragResultsWindowIndependently"),
+                      "★ 结果窗的拖动能力由 Core 判据决定")
+        XCTAssertFalse(results.contains("isMovableByWindowBackground = true"),
+                       "★ 未固定结果窗不许单独拖动，只能跟搜索框整体走")
 
         let pinned = codeOnly(try appSource("PinnedResultsWindow.swift"))
-        XCTAssertTrue(pinned.contains("isMovableByWindowBackground = true"),
-                      "钉住的快照窗保持独立可任意拖，不受联动影响")
+        XCTAssertTrue(pinned.contains("WindowGroupPolicy.mayDragResultsWindowIndependently"),
+                      "★ 钉住后的快照窗保持独立可任意拖，不受联动影响")
     }
 }

@@ -25,6 +25,9 @@ struct SearchResultsPanelView: View {
     ///   把搜索框放回原位（抬上去就下不来了）。现在收、放、变高都走同一个回调，
     ///   由控制器统一算一遍位置——**判定只有一处**。
     let onLayoutNeeded: () -> Void
+    /// ★ 1.1.68：可见性**真翻转**时通知协调者同步 AppKit 父子窗口关系。
+    /// 只在 `if changed` 里发，拖动期间 SwiftUI 反复重算 body 不会每帧触发。
+    let onVisibilityChanged: (Bool) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -96,7 +99,9 @@ struct SearchResultsPanelView: View {
         .frame(maxWidth: .infinity)
         .frame(height: contentModuleHeight)
         .background(SearchPanelSizing(height: contentModuleHeight, animate: !reduceMotion).frame(width: 0, height: 0))
-        .background(SearchResultsPanelVisibility(visible: isVisible, onLayoutNeeded: onLayoutNeeded)
+        .background(SearchResultsPanelVisibility(visible: isVisible,
+                                                onLayoutNeeded: onLayoutNeeded,
+                                                onVisibilityChanged: onVisibilityChanged)
             .frame(width: 0, height: 0))
     }
 
@@ -116,10 +121,22 @@ struct SearchResultsPanelView: View {
 private struct SearchResultsPanelVisibility: NSViewRepresentable {
     let visible: Bool
     let onLayoutNeeded: () -> Void
+    let onVisibilityChanged: (Bool) -> Void
 
+    /// ★★ 2026-11-08：原来**每次** `updateNSView` 都无条件 `onLayoutNeeded()`。
+    ///   SwiftUI 在拖动期间会反复重算 body，于是每帧都排一次 `layoutForResults()`
+    ///   —— 两段 0.18s 动画被不断打断，正是「拖动时明显的动画卡顿」的第二条链。
+    ///   用 coordinator 记住上一次的值，只在可见性真的翻转时通知。
+    final class Coordinator {
+        var lastVisible: Bool?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSView { NSView() }
 
     func updateNSView(_ view: NSView, context: Context) {
+        let changed = context.coordinator.lastVisible != visible
+        context.coordinator.lastVisible = visible
         // 延到下一拍：`updateNSView` 可能在布局过程中被调用，
         // 此时改窗口的显隐会触发重入（表现为窗口闪烁或半张图）。
         DispatchQueue.main.async {
@@ -131,7 +148,11 @@ private struct SearchResultsPanelVisibility: NSViewRepresentable {
             } else {
                 return   // 已经是「不显示」，再通知一次没有意义
             }
-            onLayoutNeeded()
+            if changed {
+                // ★ 1.1.68：先同步父子窗口关系，再算位置。
+                onVisibilityChanged(visible)
+                onLayoutNeeded()
+            }
         }
     }
 }
@@ -139,14 +160,18 @@ private struct SearchResultsPanelVisibility: NSViewRepresentable {
 /// 结果那一块窗口的控制器。
 ///
 /// 三件它必须自己管、别人管不了的事：
-/// 1. **拖动**：`isMovableByWindowBackground`（表面不吞 `hitTest` 才真的能动，见 `SearchModuleSurface`）；
+/// 1. **拖动开关**：未固定时这块是 child window，**不是把手**（`isMovableByWindowBackground`
+///    由 Core `WindowGroupPolicy` 判为 false）；唯一把手是搜索框，整体移动交给 WindowServer。
+///    只有点图钉生成的快照窗才允许按住背景任意拖；
 /// 2. **摆放**：由协调者按 `SearchWindowLift` 算好传进来；
 /// 3. **谁是 key**：点进来之后 `model.resultsWindowIsKey` 要为真，
 ///    否则键盘路由会以为「焦点还在输入框」，↑↓ 与空格全部落空。
 ///
-/// ★★ 2026-11-08 契约反转：未固定时两块窗**联动**。拖这块窗不再是「两块互不相干」，
-///   而是通过 `onUserMoved` 让协调者把搜索框按同样的位移带走（用户：「结果窗和搜索框
-///   保持一起移动」）。真正独立可任意拖的是点图钉生成的**快照窗**（`PinnedResultsWindow`）。
+/// ★★ 2026-11-08 第三次真机反馈（用户原话）：「只有固定以后才能拖动，否则就是整体移动」。
+///   1.1.68 曾让结果窗自己可拖、再靠 `sendEvent` 把背景 mouseDown 转发给父窗，
+///   结果帧日志出现两段 `FIELD_DID_MOVE=0 / RESULTS_DID_MOVE=27、26`：点到结果行或
+///   筛选条时事件被 AppKit 交给窗口自身，结果窗被单独拖走、父窗一帧没动。
+///   转发链因此整条删除，改为从源头关掉这块窗的拖动能力。
 @MainActor
 final class SearchResultsPanelController {
     let panel: NSPanel
@@ -190,7 +215,11 @@ final class SearchResultsPanelController {
         panel.hasShadow = false
         panel.level = .floating
         panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = true
+        // ★★ 用户契约「只有固定以后才能拖动，否则就是整体移动」：未固定的结果窗
+        //   是 child window，**不许**自己被拖走。判据只在 Core 一处，App 不另写一套。
+        //   1.1.68 这里写 true，配合跨窗口事件转发，真机被单独拖走（帧日志 27/26 帧）。
+        panel.isMovableByWindowBackground =
+            WindowGroupPolicy.mayDragResultsWindowIndependently(isPinnedSnapshot: false)
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.minSize = NSSize(width: 640, height: SearchModuleLayout.typeBarHeight)
@@ -199,6 +228,8 @@ final class SearchResultsPanelController {
         let host = NSHostingView(rootView: SearchResultsPanelView(model: model,
                                                                   onLayoutNeeded: { [weak self] in
             self?.onLayoutNeeded?()
+        }, onVisibilityChanged: { [weak self] visible in
+            self?.onVisibilityChanged?(visible)
         }))
         host.wantsLayer = true
         host.layer?.backgroundColor = NSColor.clear.cgColor
@@ -211,10 +242,9 @@ final class SearchResultsPanelController {
     /// ★ 「放不放下」和「搜索框抬不抬」是**同一个决定**，所以摆位只在协调者那一处算。
     var onLayoutNeeded: (() -> Void)?
 
-    /// 用户按住这块窗拖动时通知协调者，让它把搜索框按同样的位移带走。
-    /// 由 `didMove` 观察者里那条 `WindowDragIntent.isUserDrag` 判据触发：
-    /// 程序化摆位（`isPlacing`）与同步联动（`isSyncing`）都不算人手拖动。
-    var onUserMoved: (() -> Void)?
+    /// ★ 1.1.68：可见性真翻转时让协调者挂/解绑 child window。
+    /// 联动本身由 WindowServer 负责，这里不再有「拖结果窗通知协调者追赶」的回调。
+    var onVisibilityChanged: ((Bool) -> Void)?
 
     /// 是否正在程序化摆位。协调者判断「这次移动要不要联动」时要读。
     var isAutoPlacing: Bool { isPlacing }
@@ -289,8 +319,10 @@ final class SearchResultsPanelController {
         //   `didMove` 本来就比动画的 `completionHandler` 更晚（见 `WindowDragIntent` 的注释），
         //   再多一拍就可能读到已经复位成 false 的值，把一次自动摆位记成「用户拖过」——
         //   结果窗从此不再贴回搜索框。时序不能动，所以只声明隔离、不改变调度。
+        // ★ 2026-11-08：同步投递（`queue: nil`），别让搜索框慢一帧。
+        //   didMove 由 AppKit 在主线程 post，`MainActor.assumeIsolated` 仍成立。
         observers.append(center.addObserver(forName: NSWindow.didMoveNotification,
-                                            object: panel, queue: .main) { [weak self] _ in
+                                            object: panel, queue: nil) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let dragging = PointerButton.isDown
@@ -298,11 +330,17 @@ final class SearchResultsPanelController {
                 self.moveTrace.append([self.isPlacing ? 1 : 0, dragging ? 1 : 0])
                 if self.moveTrace.count > 12 { self.moveTrace.removeFirst() }
 #endif
-                guard WindowDragIntent.isUserDrag(pointerDown: dragging,
-                                                  autoPlaced: self.isPlacing) else { return }
-                self.userMoved = true
-                // ★ 2026-11-08：未固定时两窗联动——拖结果窗要把搜索框一起带走。
-                self.onUserMoved?()
+                // ★★ 1.1.68：这里**不再联动**。父子窗口组由 WindowServer 整体移动；
+                //   再在 didMove 里 setFrame 另一块就是第二次提交，必然差一帧。
+                //   只保留「本轮发生过人手拖动」的记录与取证。
+                if WindowDragIntent.isUserDrag(pointerDown: dragging, autoPlaced: self.isPlacing) {
+                    self.userMoved = true
+                }
+                if dragging {
+                    DragFrameTrace.record("RESULTS_DID_MOVE",
+                                          results: self.panel.frame.origin,
+                                          note: "attached=\(self.panel.parent != nil)")
+                }
             }
         })
         // 结果条数不变但高度会变（打开失败提示条显隐）：高度一改，位置就得重算。
@@ -335,7 +373,25 @@ final class SearchResultsPanelController {
 }
 
 /// 无标题栏的结果窗口：能成为 key（否则键盘路由收不到事件）。
+///
+/// ★★ 1.1.69：这里**只记日志、绝不转发事件**。用户要的是「未固定时结果窗根本
+/// 不能单独拖」，所以拖动能力已由 Core 判据关掉；1.1.68 那条把 mouseDown 转发给
+/// 父窗的路子已被真机帧日志否掉（结果窗被单独拖走 27/26 帧，父窗一帧没动）。
+/// 保留覆写只为给诊断包留下「用户确实按过结果窗」的时间戳：拖它时应出现
+/// `RESULTS_MOUSE_DOWN` 而**不出现** `RESULTS_DID_MOVE`。
+/// 事件一律原样交回 `super`，点结果行 / 筛选条 / 按钮的行为完全不变。
 private final class SearchResultsPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown {
+            MainActor.assumeIsolated {
+                DragFrameTrace.record("RESULTS_MOUSE_DOWN",
+                                      results: self.frame.origin,
+                                      note: "movable=\(self.isMovableByWindowBackground)")
+            }
+        }
+        super.sendEvent(event)
+    }
 }

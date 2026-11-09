@@ -51,17 +51,21 @@ final class SearchWindowRegistry {
 ///
 /// ## 2026-10-28：一块拆成两块
 ///
-/// 用户：「钉住前后的搜索框和搜索结果都应该可以单独移动」。同一个窗口里两块
-/// 只能一起动，所以这里从此管**两**个 `NSPanel`：
+/// 历史契约（2026-10-28）：「钉住前后的搜索框和搜索结果都应该可以单独移动」。
+/// 同一个窗口里两块只能一起动，所以这里从此管**两**个 `NSPanel`：
 /// * 搜索框那一块（`SearchView`）：固定高，只由「有没有键位提示」决定；
 /// * 结果那一块（`SearchResultsPanelView`）：有内容才出现，高度随结果变；
 ///   第一次出现时贴在搜索框下方 10pt。
 ///
-/// ★★ 2026-11-08 契约反转（用户：「未固定时随搜索框拖动而移动，固定后可任意拖动位置」，
-///   追问拖结果窗时明确「结果窗和搜索框保持一起移动」）：**未固定 = 两块联动**，
-///   拖任一块，另一块按同样的位移跟上，相对位置保持不变；点图钉生成的快照窗
-///   （`PinnedResultsWindow`）才是独立、可任意拖的那一块。
-///   判据在 Core `LinkedWindowFollower`，这里只负责把通知接到两块窗口上。
+/// ★★ 2026-11-08 契约经三次真机反馈定稿：
+///   1.1.67 的「各自 `didMove` 追赶」被否（两窗永远差一帧）；
+///   1.1.68 改成 **AppKit 父子窗口组** —— 搜索框当父、结果窗当子，由 WindowServer
+///   作为一个实体整体移动，这一条真机确认有效（「动画拖动搜索框部分是可以了」）。
+///   但 1.1.68 仍让结果窗自己可拖、并把背景 mouseDown 转发给父窗，真机又出现
+///   「单独拖动搜索结果还是可以的」。用户随即把契约说死：
+///   「**只有固定以后才能拖动，否则就是整体移动**」。
+///   ⇒ 1.1.69：未固定的结果窗**不是把手**（拖动能力由 Core `WindowGroupPolicy`
+///   关掉），唯一把手是搜索框；只有钉住后的快照窗（`PinnedResultsWindow`）独立可拖。
 ///
 /// ★ 两块窗口都**没有任何表面**：玻璃由各自的模块画（`SearchModuleSurface`），
 ///   中间那道 10pt 是两块窗口之间的真实空隙——桌面从里面透过来。
@@ -78,6 +82,8 @@ final class SearchPanelController {
     private var toggleObserver: NSObjectProtocol?
     private var focusObserver: NSObjectProtocol?
     private var homeObserver: NSObjectProtocol?
+    /// 松手监视器：拖动期间跳过的重排在 `leftMouseUp` 这一刻补一次（无动画）。
+    private var dragEndMonitor: Any?
 
     init(model: AppModel) {
         self.model = model
@@ -112,8 +118,11 @@ final class SearchPanelController {
 
         results = SearchResultsPanelController(model: model)
         results.onLayoutNeeded = { [weak self] in self?.layoutForResults() }
-        // ★ 2026-11-08：拖结果窗也要把搜索框一起带走（用户：「保持一起移动」）。
-        results.onUserMoved = { [weak self] in self?.followFromResultsDrag() }
+        // ★ 1.1.68：可见性真翻转时同步 AppKit 父子窗口关系。
+        //   联动由 WindowServer 负责，这里不再有「拖结果窗通知协调者追赶」的回调。
+        results.onVisibilityChanged = { [weak self] visible in
+            self?.syncWindowGroup(resultsVisible: visible)
+        }
         SearchWindowRegistry.shared.register(field: panel, results: results.panel)
         // 钉住时的锚点走「用户设定的位置」，见 `homeFieldFrame` 的注释。
         SearchWindowRegistry.shared.homeFieldFrame = { [weak self] in self?.homeFrame }
@@ -155,6 +164,9 @@ final class SearchPanelController {
             self?.snapHome()
             self?.panel.orderOut(nil)
             self?.results.hide()
+            // ★ 父子组必须先解绑：父窗 orderOut 会连带子窗，收起/再次唤起时
+            //   系统会把 child 自动重新显示，造成「结果凭空冒出来」。
+            self?.syncWindowGroup(resultsVisible: false)
         }
         // 与上一句成对：关掉设置/向导后若屏幕上没有别的窗口，由这里把浮窗放回来。
         // 走 `show()` 而不是 `orderFront`，是为了和「按快捷键唤起」完全同一条路径——
@@ -167,9 +179,32 @@ final class SearchPanelController {
         //   `rememberHome()` 读的是 `PointerButton.isDown` 的**即时值**——「这一刻是不是
         //   人手在拖」。多跳一拍就可能读到松开之后的 false，把拖动的最后一次位移丢掉。
         //   它只写 `homeOrigin` / `fieldLift` 两个标量、不发任何事件，同步执行没有重入风险。
+        // ★★ 1.1.68：这一条只做「记 home」与帧日志，**不再摆另一块窗**。
+        //   父子窗口组由 WindowServer 整体移动；在这里 setFrame 就是第二次提交，
+        //   必然把它刚做好的同帧拆成两帧。1.1.67 的真机失败正是这么来的。
         homeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
-                                                             object: panel, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rememberHome() }
+                                                             object: panel, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.rememberHome()
+                guard PointerButton.isDown else { return }
+                DragFrameTrace.record("FIELD_DID_MOVE",
+                                      field: self.panel.frame.origin,
+                                      results: self.results.panel.frame.origin,
+                                      note: "attached=\(self.windowGroupAttached)")
+                DragFrameTrace.sampleWindowServer(fieldNumber: self.panel.windowNumber,
+                                                 resultsNumber: self.results.panel.windowNumber)
+            }
+        }
+        // 松手后结算：拖动期间被 `shouldDeferAutoLayout` 挡下的重排在这里补一次，
+        // 并把本轮帧日志一次落盘（拖动期间只拼字符串，不做磁盘 I/O）。
+        dragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.settleLayoutAfterDrag()
+                DragFrameTrace.record("MOUSE_UP")
+                DragFrameTrace.flush()
+            }
+            return event
         }
     }
 
@@ -288,6 +323,9 @@ final class SearchPanelController {
         //   用户上一轮把结果拖到哪儿都翻篇。
         results.beginSession()
         results.refreshVisibility(hasContent: model.hasSearchContent)
+        // ★ 结果窗是「唤起时就有内容」这条路径，不会经过 SwiftUI 的可见性翻转，
+        //   父子关系要在这里补挂；`syncWindowGroup` 幂等，重复调没有副作用。
+        syncWindowGroup(resultsVisible: model.hasSearchContent)
         layoutForResults()
         panel.invalidateShadow()
         // ★ 唤起搜索窗时按需验一次设备在不在线（异步、短超时、有冷却，不阻塞显示）。
@@ -306,83 +344,56 @@ final class SearchPanelController {
 #endif
     }
 
-    // MARK: - 未固定时两窗联动（2026-11-08）
+    // MARK: - 未固定时两窗是一个 AppKit 父子窗口组（2026-11-08 二次修正）
 
-    /// 正在因为另一块窗而同步自己：只挡同步块内的重入。
-    /// 真正掐断 A→B→A 的是下面「同步后立刻刷新基线」这一步。
-    private var isSyncing = false
-    /// 上一次看到的两块窗口原点。联动靠「这一刻谁变了」，不写死 `gap + 高度`——
-    /// `SearchWindowLift` 把结果窗夹在屏幕底边时那个距离并不是常量。
-    private var lastKnownFieldOrigin: NSPoint?
-    private var lastKnownResultsOrigin: NSPoint?
+    /// 结果窗此刻是否真的挂在搜索框上。
+    /// ★ 以 AppKit 的实际关系为准，不另存一份布尔真相（两份状态迟早会不一致）。
+    private var windowGroupAttached: Bool { results.panel.parent === panel }
 
-    private func resetLinkedOrigins() {
-        lastKnownFieldOrigin = panel.frame.origin
-        lastKnownResultsOrigin = results.panel.frame.origin
-    }
+    /// 拖动期间被挡下的重排：松手时补一次无动画结算。
+    private var deferredLayout = false
 
-    /// 搜索框被拖了：把结果窗按同样的位移带走。
-    private func followFromFieldDrag() { handleLinkedMove() }
-
-    /// 结果窗被拖了：把搜索框按同样的位移带走。
-    private func followFromResultsDrag() { handleLinkedMove() }
-
-    /// 两条 `didMove` 路径共用的唯一判定。
-    private func handleLinkedMove() {
-        let fieldNow = panel.frame.origin
-        let resultsNow = results.panel.frame.origin
-        let fieldBefore = lastKnownFieldOrigin ?? fieldNow
-        let resultsBefore = lastKnownResultsOrigin ?? resultsNow
-        let fieldDelta = NSPoint(x: fieldNow.x - fieldBefore.x, y: fieldNow.y - fieldBefore.y)
-        let resultsDelta = NSPoint(x: resultsNow.x - resultsBefore.x, y: resultsNow.y - resultsBefore.y)
-
-        guard LinkedWindowFollower.shouldFollow(pointerDown: PointerButton.isDown,
-                                                resultsVisible: results.panel.isVisible,
-                                                isProgrammaticPlacement: results.isAutoPlacing,
-                                                isSyncing: isSyncing) else {
-            // 程序化摆位 / 鼠标松开 / 同步中：只把基线更新到当前事实，不跟着动。
-            resetLinkedOrigins()
-            return
+    /// 按可见性挂 / 解绑 child window。
+    ///
+    /// ★ 父 = 搜索框、子 = 结果窗。Apple 文档 `addChildWindow(_:ordered:)`：
+    ///   附着生效时移动父窗会带动子窗，两块由 WindowServer 作为一个实体提交；
+    ///   移动子窗不会带动父窗 —— 所以 1.1.69 起**结果窗根本不许被拖**，
+    ///   拖动能力由 Core `WindowGroupPolicy` 关掉，唯一把手是搜索框。
+    ///   （1.1.68 试过把结果窗的 mouseDown 转发给父窗，真机仍被单独拖走。）
+    /// ★ 结果窗隐藏时要解绑：父窗 `orderOut` 会连带 child，收起/再次唤起时
+    ///   系统可能把 child 自动重新显示。判据在 Core，这里不另写一套。
+    private func syncWindowGroup(resultsVisible: Bool) {
+        let attached = windowGroupAttached
+        if WindowGroupPolicy.shouldAttach(resultsVisible: resultsVisible, isAttached: attached) {
+            panel.addChildWindow(results.panel, ordered: .above)
+            DragFrameTrace.record("ATTACH",
+                                  field: panel.frame.origin,
+                                  results: results.panel.frame.origin,
+                                  note: "ok=\(windowGroupAttached)")
+        } else if WindowGroupPolicy.shouldDetach(resultsVisible: resultsVisible, isAttached: attached) {
+            panel.removeChildWindow(results.panel)
+            DragFrameTrace.record("DETACH",
+                                  field: panel.frame.origin,
+                                  results: results.panel.frame.origin)
         }
-
-        let fieldMoved = fieldDelta.x != 0 || fieldDelta.y != 0
-        let resultsMoved = resultsDelta.x != 0 || resultsDelta.y != 0
-        if fieldMoved && !resultsMoved {
-            let target = LinkedWindowFollower.companionOrigin(moving: .field,
-                                                             moverBefore: fieldBefore,
-                                                             moverAfter: fieldNow,
-                                                             companionBefore: resultsNow)
-            syncResults(to: target)
-        } else if resultsMoved && !fieldMoved {
-            let target = LinkedWindowFollower.companionOrigin(moving: .results,
-                                                             moverBefore: resultsBefore,
-                                                             moverAfter: resultsNow,
-                                                             companionBefore: fieldNow)
-            syncField(to: target)
+        // 挂不上时不假装成功，也不退回按帧追赶（那正是被真机否掉的旧路）：
+        // 如实记一行，让帧日志能解释「为什么这两块没一起走」。
+        if resultsVisible, !windowGroupAttached {
+            DragFrameTrace.record("ATTACH_FAILED",
+                                  note: "fallbackAllowed=\(WindowGroupPolicy.shouldFollowByNotification(isAttached: false))")
         }
-        // ★★ 同步之后立刻把基线更新到「两块都在的新位置」：随后异步到达的对方
-        //    didMove 会看到两个 delta 都是 0，于是什么都不做。这才是防反馈循环
-        //    真正生效的地方；`isSyncing` 只负责挡住同步块内的重入。
-        resetLinkedOrigins()
     }
 
-    private func syncResults(to origin: NSPoint) {
-        isSyncing = true
-        var frame = results.panel.frame
-        frame.origin = origin
-        // 拖动要跟手：这里不能带动画，否则另一块慢半拍。
-        results.place(frame, animated: false)
-        isSyncing = false
-    }
-
-    private func syncField(to origin: NSPoint) {
-        isSyncing = true
-        var frame = panel.frame
-        frame.origin = origin
-        panel.setFrame(frame, display: false)
-        // 这次 setFrame 触发的 didMove 会走 rememberHome()，把「用户设定的位置」
-        // 一起更新到新位置——联动移动本来就是用户在摆整个组合。
-        isSyncing = false
+    /// 松手后补一次**无动画**重排：拖动期间被 `shouldDeferAutoLayout` 挡下的
+    /// 抬升量在这里结算，绝不启动 0.18s 动画（那会再「滑一段」）。
+    private func settleLayoutAfterDrag() {
+        guard deferredLayout else { return }
+        deferredLayout = false
+        DragFrameTrace.record("SETTLE",
+                              field: panel.frame.origin,
+                              results: results.panel.frame.origin,
+                              note: "attached=\(windowGroupAttached)")
+        layoutForResults(animated: false, allowDefer: false)
     }
 
     /// 搜索框「用户设定的位置」：没被抬高时的原点。收窗 / 结果收起时回到这里。
@@ -407,8 +418,17 @@ final class SearchPanelController {
     ///   盖住；聚焦搜索是随着结果变大逐渐往上走，关闭时跳回设定好的位置。」
     ///   旧代码把**结果窗**往上顶到屏幕底边，于是它压在搜索框身上——几何判定搬到了
     ///   `SearchWindowLift`（Core，可测），这里只负责把两块的 frame 摆上去。
-    private func layoutForResults() {
+    private func layoutForResults(animated: Bool = true, allowDefer: Bool = true) {
+        // ★★ 2026-11-08：拖动期间一律不重排，松手由 `settleLayoutAfterDrag()` 无动画结算。
+        //   两段 0.18s 动画会在拖动中被自己反复打断，而且重排会改两块窗的 frame。
+        if allowDefer && WindowGroupPolicy.shouldDeferAutoLayout(pointerDown: PointerButton.isDown) {
+            deferredLayout = true
+            return
+        }
         guard panel.isVisible, let screen = visibleFrame(for: panel.frame) else { return }
+        // ★ 摆位前先把父子关系对齐到「此刻该有的状态」：SwiftUI 的可见性通知是
+        //   异步派发的，收起/唤起这条路径可能还没走到 `syncWindowGroup`。
+        syncWindowGroup(resultsVisible: results.panel.isVisible)
         // ★ 2026-11-08 契约反转：未固定时两块联动，拖过结果窗**不再**阻止重摆。
         //   那时搜索框已经在 `syncField` 里跟着一起走、homeOrigin 也更新了，
         //   按新 home 重算出来的正是用户最后放的位置。
@@ -428,13 +448,18 @@ final class SearchPanelController {
         fieldLift = plan.lifted
         var fieldFrame = panel.frame
         fieldFrame.origin.y = plan.fieldY
-        animate(panel, to: fieldFrame)
+        if animated {
+            animate(panel, to: fieldFrame)
+        } else {
+            panel.setFrame(fieldFrame, display: false)
+        }
         var resultsFrame = results.panel.frame
         resultsFrame.origin = NSPoint(x: fieldFrame.minX, y: plan.resultsY)
-        resultsFrame.size.width = fieldFrame.width
-        results.place(resultsFrame, animated: true)
-        // 程序化摆位之后刷新联动基线：下一次人手拖动从这一刻的位置算位移。
-        resetLinkedOrigins()
+        // ★ 宽度只在真不同时才写：无谓的 `didResize` 会再触发一次 `onLayoutNeeded`。
+        if abs(resultsFrame.size.width - fieldFrame.width) > 0.5 {
+            resultsFrame.size.width = fieldFrame.width
+        }
+        results.place(resultsFrame, animated: animated)
     }
 
     /// 回到用户设定的位置（结果收起、切换筛选、收窗时）。
@@ -447,18 +472,16 @@ final class SearchPanelController {
                                           y: panel.frame.minY - SearchModuleLayout.moduleGap - resultsFrame.height)
             results.place(resultsFrame, animated: true)
         }
-        resetLinkedOrigins()
     }
 
     /// 立刻回到原位（不带动画）：收窗时动画看不见，只会多一次无谓的绘制。
     private func snapHome() {
         guard let home = homeOrigin else { return }
         fieldLift = 0
-        guard panel.frame.origin != home else { resetLinkedOrigins(); return }
+        guard panel.frame.origin != home else { return }
         var frame = panel.frame
         frame.origin = home
         panel.setFrame(frame, display: false)
-        resetLinkedOrigins()
     }
 
     /// 记住用户把搜索框拖到了哪里。
@@ -481,10 +504,8 @@ final class SearchPanelController {
         // `restoreHome()` 在结果收起时把窗口按旧 home 拉回去，正好抵消他刚做的拖动。
         fieldLift = 0
         homeOrigin = panel.frame.origin
-        // ★ 2026-11-08：记完 home 立刻把结果窗按同样的位移带走。
-        //   放在 rememberHome 里而不是另挂一个通知，是为了复用「鼠标按着」这一条
-        //   即时判据（多跳一拍就可能读到松手后的 false，丢掉最后一次位移）。
-        followFromFieldDrag()
+        // ★★ 1.1.68：这里**只记账**。结果窗是 child window，父窗一动
+        //   WindowServer 自然把它带走；任何额外的 setFrame 都会拆掉同帧。
     }
 
     private func visibleFrame(for frame: NSRect) -> CGRect? {
@@ -628,6 +649,7 @@ final class SearchPanelController {
         if let focusObserver { NotificationCenter.default.removeObserver(focusObserver) }
         if let hideObserver { NotificationCenter.default.removeObserver(hideObserver) }
         if let homeObserver { NotificationCenter.default.removeObserver(homeObserver) }
+        if let dragEndMonitor { NSEvent.removeMonitor(dragEndMonitor) }
         Self.tearDown(global: globalClickMonitor,
                        local: localClickMonitor,
                        marker: clickMonitor,

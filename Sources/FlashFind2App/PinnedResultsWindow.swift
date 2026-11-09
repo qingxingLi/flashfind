@@ -327,10 +327,11 @@ final class PinnedResultsWindows {
         //   这跟「钉在桌面上」正好是反的：钉住的定义就是**不属于前台也要看得见**。
         //   两块搜索浮窗早就设成 false 了，只有这里漏了（钉住比搜索窗晚出世一天）。
         panel.hidesOnDeactivate = false
-        // ★ 这里**不要**加 `isFloatingPanel = true`：层级已经由上一行定死
-        //   「谁压谁」，再加它没有收益，反而会让这块没有标题栏的窗口丢掉
-        //   「按住背景就能拖」的可能——钉住的窗口必须能拖到用户想要的位置。
-        panel.isMovableByWindowBackground = true
+        // ★★ 用户契约（2026-11-08 22:19）：「只有固定以后才能拖动，否则就是整体移动」。
+        //   这一块是**钉住后的快照窗**，正是唯一允许按住背景任意拖的结果窗；
+        //   判据与未固定的结果窗共用 Core 一处，避免契约分叉。
+        panel.isMovableByWindowBackground =
+            WindowGroupPolicy.mayDragResultsWindowIndependently(isPinnedSnapshot: true)
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.appearance = AppEnvironment.previewAppearance

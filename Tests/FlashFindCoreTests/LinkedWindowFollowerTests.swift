@@ -83,4 +83,49 @@ final class LinkedWindowFollowerTests: XCTestCase {
         XCTAssertFalse(LinkedWindowFollower.shouldFollow(pointerDown: true, resultsVisible: true,
                                                          isProgrammaticPlacement: false, isSyncing: true))
     }
+
+    // MARK: - 2026-11-08 真机录屏：「整体掉帧，不是一个整体的移动」
+
+    /// 拖动期间 / 同步期间一律不许自动重排；两个都没有才放行。
+    func testAutoLayoutIsDeferredWhileDraggingOrSyncing() {
+        XCTAssertTrue(LinkedWindowFollower.shouldDeferAutoLayout(pointerDown: true, isSyncing: false))
+        XCTAssertTrue(LinkedWindowFollower.shouldDeferAutoLayout(pointerDown: false, isSyncing: true))
+        XCTAssertTrue(LinkedWindowFollower.shouldDeferAutoLayout(pointerDown: true, isSyncing: true))
+        XCTAssertFalse(LinkedWindowFollower.shouldDeferAutoLayout(pointerDown: false, isSyncing: false))
+    }
+
+    /// 按拖动开始那一刻的观测偏移对齐，而不是逐帧累计 delta。
+    func testAlignedOriginUsesTheObservedOffset() {
+        let offset = LinkedWindowFollower.relativeOffset(field: field, results: results)  // (0, -480)
+        let fieldAfter = CGPoint(x: 520, y: 665)
+        let companion = LinkedWindowFollower.alignedOrigin(moving: .field,
+                                                           moverOrigin: fieldAfter,
+                                                           offset: offset)
+        XCTAssertEqual(companion.x, 520, accuracy: 0.0001)
+        XCTAssertEqual(companion.y, 185, accuracy: 0.0001)
+    }
+
+    /// 拖结果窗时反算搜索框，偏移方向不能写反。
+    func testAlignedOriginReversesTheOffsetForTheResults() {
+        let offset = LinkedWindowFollower.relativeOffset(field: field, results: results)
+        let resultsAfter = CGPoint(x: 310, y: 280)
+        let companion = LinkedWindowFollower.alignedOrigin(moving: .results,
+                                                           moverOrigin: resultsAfter,
+                                                           offset: offset)
+        XCTAssertEqual(companion.x, 310, accuracy: 0.0001)
+        XCTAssertEqual(companion.y, 760, accuracy: 0.0001)
+    }
+
+    /// ★★ 这是「增量 delta」会输的那条：中间漏一帧 / 基线被刷新之后，
+    /// 用绝对偏移算出来的位置仍然正确，另一块窗不会永久错位。
+    func testAlignedOriginRecoversAfterAMissedFrame() {
+        let offset = LinkedWindowFollower.relativeOffset(field: field, results: results)
+        let fieldAfterTwoFrames = CGPoint(x: 400 + 37, y: 700 - 11)   // 两帧位移合在一起
+        let companion = LinkedWindowFollower.alignedOrigin(moving: .field,
+                                                           moverOrigin: fieldAfterTwoFrames,
+                                                           offset: offset)
+        let still = LinkedWindowFollower.relativeOffset(field: fieldAfterTwoFrames, results: companion)
+        XCTAssertEqual(still.dx, offset.dx, accuracy: 0.0001)
+        XCTAssertEqual(still.dy, offset.dy, accuracy: 0.0001)
+    }
 }
