@@ -26,7 +26,9 @@ enum SearchScope: String, CaseIterable, Identifiable {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ★ 凭据后端必须赶在 `model` 之前装配：存储属性按声明顺序初始化，
-    /// 默认后端必须在模型初始化前确定；启动不再读取真实钥匙串。
+    /// 默认后端必须在模型初始化前确定。
+    /// 1.1.70 起 `applicationDidFinishLaunching` 会做**一次**启动解锁（只填 vault 缓存），
+    /// 但 `model` 的 init 仍然不碰真实钥匙串、也不跑迁移链。
     /// 不写进 `init` 是因为 init 的函数体在所有属性初始化**之后**才跑。
     private let credentialBackendInstalled: Void = {
         // GUI 的默认后端是**系统钥匙串**：密码不再以任何形式落到 ~/Library 下的明文文件。
@@ -79,13 +81,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 外观要在任何窗口出现之前应用：用户上次选了深色，重启后第一帧就得是深色，
         // 不能先闪一下浅色再变。启动路径上漏这一句，设置页里选了也不生效——
         // 那种缺陷编译能过、运行也不报错。
+        // 长按 ⌘Q 才能退出：事件监视器要尽早装，别让启动过程中的一次误触把 App 关掉。
+        QuitHoldController.shared.install()
         model.applyAppearance()
         // 读凭据时若弹过钥匙串授权框，框一关系统就把激活还给别的 App，
         // 设置窗口会被压在它后面 —— 用户看到的是「点完允许界面一下就没了」。
         // 订阅点放在 Core 里（`CredentialStore.onInteractiveRead`），因为它认得出
         // 「这次读允许系统交互」；窗口怎么救只有 App 层知道，所以在这里接上。
-        CredentialStore.onInteractiveRead = {
-            Task { @MainActor in bringPreferencesForwardAfterSystemPrompt() }
+        CredentialStore.onInteractiveRead = { [weak self] in
+            Task { @MainActor in
+                bringPreferencesForwardAfterSystemPrompt()
+                // 1.1.70：手动登录一台之后钥匙串就解锁了，其余「记住密码」的来源
+                // 一起带起来，别让用户逐台点一遍登录。
+                self?.model.replayAfterInteractiveRead()
+            }
         }
         // AI 助手的 IPC 监听。放在这儿而不是 onboarding 之后：引导页可能停留很久，
         // 而 `flashfind-mcp` 可能在用户还没点完引导时就被客户端拉起来了。
@@ -116,6 +125,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         searchPanel = SearchPanelController(model: model)
+        // 1.1.71：系统授权框前后的界面救援由本类执行（它才持有面板），
+        // AppModel 只负责发起读、把「之前可不可见」传回来。
+        model.searchPanelVisibilityBeforeSystemPrompt = { [weak self] in
+            guard let panel = self?.searchPanel else { return .unknown }
+            return panel.isVisible ? .visible : .hidden
+        }
+        model.onSystemPromptFinished = { [weak self] before in
+            Task { @MainActor in self?.recoverAfterSystemPrompt(before: before) }
+        }
         // 预览构建照旧：直接显示搜索浮窗（截图/点验用），不弹引导。
         if AppEnvironment.isPreview {
             // `FF_UI_APPEARANCE=dark|light`：强制本次运行的外观。
@@ -185,6 +203,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.configureShortcutRegistrar { [weak self] spec in
             guard let self else { return "快捷键注册器不可用，请重新打开闪寻" }
             return self.hotkeyRegistrar.replace(with: spec)
+        }
+        // 1.1.70：启动后解锁钥匙串并补跑「记住密码」的来源（A/C），
+        // 同时开始监听网络恢复（B）——断网回来不再需要手动逐台点一次登录。
+        model.startNetworkRecoveryMonitor()
+        // 1.1.71：别在启动那一帧就弹系统钥匙串授权框。先让搜索框画出来、拿到焦点，
+        // 用户先看见界面，再看见密码框，才知道那是「恢复已保存连接」要的授权，
+        // 而不是「软件一打开就要求密码、然后什么都没了」。
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds:
+                UInt64(SystemPromptFocusPolicy.startupUnlockDelay * 1_000_000_000))
+            self.model.unlockCredentialsAndReplay()
+        }
+    }
+
+    /// 系统授权框关掉之后把界面找回来（1.1.71）。
+    ///
+    /// 这条专门补启动解锁的缺口：`primeVaultCache()` 不触发
+    /// `CredentialStore.onInteractiveRead`，所以 `bringPreferencesForwardAfterSystemPrompt()`
+    /// 在那条路径上**根本没被调用**；而框一关，系统把激活还给先前那个 App，
+    /// `LSUIElement` 的闪寻不会自己回前台。判据在 Core，这里只取现状与执行。
+    private func recoverAfterSystemPrompt(before: SystemPromptFocusPolicy.VisibilityBeforePrompt) {
+        applySystemPromptRecovery(actionForSystemPrompt(before: before))
+        // 激活交接是异步的：框关掉之后系统才把激活还给那个 App，它的窗口会重新压上来。
+        // 隔一拍按**当时**的可见性再判一次（与 WindowRestore 同口径，两次都幂等）。
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            self.applySystemPromptRecovery(self.actionForSystemPrompt(before: before))
+        }
+    }
+
+    private func actionForSystemPrompt(
+        before: SystemPromptFocusPolicy.VisibilityBeforePrompt
+    ) -> SystemPromptFocusPolicy.Recovery {
+        SystemPromptFocusPolicy.recovery(
+            visibilityBeforePrompt: before,
+            isVisibleAfterPrompt: searchPanel?.isVisible ?? false,
+            hasPreferencesWindow: !presentedPreferencesWindows().isEmpty,
+            onboardingVisible: OnboardingWindow.shared.isVisible)
+    }
+
+    private func applySystemPromptRecovery(_ action: SystemPromptFocusPolicy.Recovery) {
+        switch action {
+        case .none:
+            if !presentedPreferencesWindows().isEmpty {
+                bringPreferencesForwardAfterSystemPrompt()
+            } else if OnboardingWindow.shared.isVisible {
+                // 引导页也会被压到后面：只把整组窗口带回来，不把搜索框顶到引导前面。
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        case .activateOnly:
+            searchPanel?.bringForward(showIfHidden: false)
+        case .showAndActivate:
+            searchPanel?.bringForward(showIfHidden: true)
         }
     }
 

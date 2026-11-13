@@ -145,6 +145,21 @@ public struct KeychainSecretStore: SecretStore {
     /// 条目布局。迁移代码用它确认「对面那个实例确实是老式的一 account 一条」。
     public var entryLayout: Layout { layout }
 
+    /// 合并条目是否已进缓存。老式 perAccount 布局没有 vault 缓存可言，视为已就绪。
+    public var isVaultPrimed: Bool { layout != .vault || vaultCache.value != nil }
+
+    /// 启动期一次性解锁：只把整份合并条目读进缓存。
+    ///
+    /// ★ 必须绕开 `CredentialStore.read(allowInteraction:)`：那条路在返回 nil 时会
+    /// 连带跑「明文迁移 → 归档合并 → 层级升迁」，每台来源各弹一次系统授权框，
+    /// 而且会写钥匙串。这里只做一次 `decodedVault()`，与传哪个 account 无关
+    /// （`CredentialVault.itemAccount` 固定是 "vault"）。
+    @discardableResult
+    public func primeVaultCache() -> Bool {
+        guard layout == .vault else { return true }
+        return decodedVault() != nil
+    }
+
     // MARK: - 读写
 
     public func save(_ value: String, account: String) throws {

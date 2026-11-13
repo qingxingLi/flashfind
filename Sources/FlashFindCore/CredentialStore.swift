@@ -57,6 +57,23 @@ public enum CredentialStore {
         return FileSecretStore.defaultDirectory.appendingPathComponent("credentials.json")
     }
 
+    // MARK: - 启动期解锁（1.1.70）
+
+    /// 冷启动时 `vaultCache` 必空 ⇒ 所有「记住密码」的来源都读不到凭据、落成「需要登录」。
+    /// 判据用「有没有缓存」，不猜「密码在不在」——钥匙串不能枚举，也不该在启动时枚举。
+    public static var vaultNeedsUnlock: Bool {
+        lock.lock(); let store = backend; lock.unlock()
+        return !store.isVaultPrimed
+    }
+
+    /// 只把合并条目读进进程内缓存，之后 `SecureStorage.read` 的非交互路径就能命中。
+    /// 不走 `read(allowInteraction:)`，因此不触发 `onInteractiveRead`、不跑迁移链。
+    @discardableResult
+    public static func unlockVaultForStartup() -> Bool {
+        lock.lock(); let store = backend; lock.unlock()
+        return store.primeVaultCache()
+    }
+
     // MARK: - 变更审计
 
     /// 一次**真实落盘**的凭据变更（没写进去就不算，例如删一条本来就不存在的）。

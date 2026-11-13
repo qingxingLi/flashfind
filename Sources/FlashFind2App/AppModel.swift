@@ -220,6 +220,21 @@ final class AppModel: ObservableObject {
     /// 每个来源正在跑的静默连接任务。断开时连同意图一起取消。
     var connectTasks: [String: Task<Void, Never>] = [:]
 
+    /// 网络恢复监听（1.1.70）。存储属性只能放主文件：extension 不允许有。
+    /// 用 `Any?` 存 `NWPathMonitor`，主文件就不必 import Network（桥接在 Recovery 分区）。
+    var networkPathMonitor: Any?
+    var networkRecoveryQueue: DispatchQueue?
+    /// `nil` = 还没收到第一次路径回调；首次回调只记基线，不算「恢复」。
+    var networkWasSatisfied: Bool?
+    var lastRecoveryReplayAt: Date?
+
+    /// 系统授权框发起前，由 AppDelegate 报上来的搜索浮窗可见性（1.1.71）。
+    /// AppModel 不持有面板，只读这个探针；拿不到就是 `.unknown`，不许当成「用户收起了」。
+    var searchPanelVisibilityBeforeSystemPrompt: (() -> SystemPromptFocusPolicy.VisibilityBeforePrompt)?
+    /// 系统授权框读完之后，把「之前可不可见」交回 AppDelegate 决定怎么救窗口。
+    /// 启动解锁走 `primeVaultCache()`，不触发 `CredentialStore.onInteractiveRead`，
+    /// 所以既有的设置窗救援不会自己跑 —— 这条就是它的搜索浮窗对应通道。
+    var onSystemPromptFinished: ((SystemPromptFocusPolicy.VisibilityBeforePrompt) -> Void)?
 
     // MARK: - 向导转发（实现在 AppModel+Wizard.swift）
     //
@@ -240,6 +255,7 @@ final class AppModel: ObservableObject {
     }
 
     func closeSearchProviders() {
+        stopNetworkRecoveryMonitor()
         providerCoordinator?.cancel()
         wizard.discardPendingProvider()
         sharedBridge?.shutdown()
@@ -528,7 +544,9 @@ final class AppModel: ObservableObject {
             stored: defaults.object(forKey: ExperimentalSources.storageKey) as? Bool)
         loadNativeSources()
         ensureProviderCoordinator()
-        // 启动不访问真实钥匙串；已保存的来源等待用户主动登录授权。
+        // init 不访问真实钥匙串、不跑迁移：这里只走已解锁的进程内缓存。
+        // 1.1.70 的启动解锁在 applicationDidFinishLaunching 里（解锁后补跑其余来源），
+        // 放在那里是为了让系统授权框出现时 App 已经起完、界面已经就位。
         autoConnectSavedSources()
     }
 

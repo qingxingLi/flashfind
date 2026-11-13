@@ -51,12 +51,21 @@ public protocol SecretStore: Sendable {
     /// 条目是否存在（判断「删了一条不存在的」要不要算变更）。
     /// 钥匙串后端返回 `nil` 表示不查：宁可不报变更，也不额外弹一次窗。
     func existsForAudit(_ account: String) -> Bool?
+
+    /// 合并条目（vault）是否已经读进进程内缓存。
+    /// 非钥匙串后端没有「解锁」这一步，恒为 true。
+    var isVaultPrimed: Bool { get }
+    /// 启动期的一次性解锁：把合并条目读进进程内缓存，**不跑任何迁移**。
+    /// 返回 true = 缓存已就绪（含「条目本来就不存在」的空表）。
+    @discardableResult func primeVaultCache() -> Bool
 }
 
 public extension SecretStore {
     func read(account: String, allowInteraction: Bool) -> String? {
         read(account: account)
     }
+    var isVaultPrimed: Bool { true }
+    @discardableResult func primeVaultCache() -> Bool { true }
 }
 
 /// 进程内后端。测试用，也是未装配任何后端时的默认落点。

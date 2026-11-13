@@ -27,16 +27,63 @@ public enum SearchClickOutside {
     public static func shouldDismiss(click point: CGPoint,
                                      field: CGRect,
                                      otherVisibleWindows: [CGRect],
-                                     overlayBlocksDismissal: Bool = false) -> Bool {
+                                     overlayBlocksDismissal: Bool = false,
+                                     systemPromptBlocksDismissal: Bool = false) -> Bool {
         // ★ 2026-10-30 报障：「闪寻无法被截图，一截图就直接消失了」。
         //   截图工具的选区遮罩是一块**盖满整屏、层级高于浮窗**的窗口。用 ⌘⇧5 或
         //   第三方截图工具时，它一启动就把闪寻挤成「非前台」，那一下鼠标按下正好
         //   落进下面的全局监视里 —— 于是浮窗在选区画到一半时被收掉，截出来的图里
         //   自然没有闪寻。判据见 `blocksDismissal`：点在这种遮罩上不算「点了外面」。
         if overlayBlocksDismissal { return false }
+        // ★ 2026-11-13 报障：「第一次打开，弹出输入钥匙串密码后，输入后闪寻的
+        //   搜索框直接关闭了」。系统授权框属于 SecurityAgent，用户点它里面任何一处
+        //   （密码输入框、「始终允许」）在屏幕坐标上都落在闪寻窗口之外；而框一弹出
+        //   闪寻就失去前台，全局点击监视恰好在这时被补挂上 —— 那一下被判成「点外部」。
+        //   保护期由 `SystemPromptFocusPolicy` 判定，快照里带的是事件时刻的结论。
+        if systemPromptBlocksDismissal { return false }
         if field.contains(point) { return false }
         for frame in otherVisibleWindows where frame.contains(point) { return false }
         return true
+    }
+
+    /// 事件到达那一刻的判定输入。
+    ///
+    /// ## 为什么必须是快照（2026-11-13 报障）
+    /// 用户原话：「拖动搜索框移动时有时候会直接关闭」。
+    /// 原实现在 `leftMouseDown` 回调里 `Task { @MainActor in dismissIfClickOutside() }`，
+    /// 判定却在 Task 真正执行时**重新读** `NSEvent.mouseLocation` 与 `panel.frame`。
+    /// AppKit 的窗口拖动跟踪循环会把这个 Task 推迟到松手附近，而松手的
+    /// `settleLayoutAfterDrag()` 又会 `setFrame` 重新摆位 —— 于是「按下时明明在窗口内」
+    /// 被换成「松手后落在窗口外的指针」，`field.contains(point)` 变 false，浮窗被收起。
+    /// 判据因此必须取**按下那一刻**的坐标与 frame；异步只允许消费这份快照。
+    public struct Snapshot: Sendable {
+        public let click: CGPoint
+        public let field: CGRect
+        public let otherVisibleWindows: [CGRect]
+        public let overlayBlocksDismissal: Bool
+        /// 这一下按下时，是不是正处在系统授权框及其刚结束的宽限期内。
+        /// 必须进快照：异步判定再读一次「现在」会把宽限期读没，界面照样消失。
+        public let systemPromptBlocksDismissal: Bool
+
+        public init(click: CGPoint, field: CGRect,
+                    otherVisibleWindows: [CGRect],
+                    overlayBlocksDismissal: Bool,
+                    systemPromptBlocksDismissal: Bool = false) {
+            self.click = click
+            self.field = field
+            self.otherVisibleWindows = otherVisibleWindows
+            self.overlayBlocksDismissal = overlayBlocksDismissal
+            self.systemPromptBlocksDismissal = systemPromptBlocksDismissal
+        }
+    }
+
+    /// 用事件时刻的快照判定。判定口径与逐参版本完全一致，只是输入不许再被时间改写。
+    public static func shouldDismiss(_ snapshot: Snapshot) -> Bool {
+        shouldDismiss(click: snapshot.click,
+                      field: snapshot.field,
+                      otherVisibleWindows: snapshot.otherVisibleWindows,
+                      overlayBlocksDismissal: snapshot.overlayBlocksDismissal,
+                      systemPromptBlocksDismissal: snapshot.systemPromptBlocksDismissal)
     }
 
     /// 这一点是不是落在**截图遮罩**上（盖满整屏、且层级高于所有常驻界面元素）。

@@ -74,6 +74,9 @@ final class SearchPanelController {
     private let panel: NSPanel
     private let results: SearchResultsPanelController
     var isKeyWindow: Bool { panel.isKeyWindow }
+    /// 系统授权框前后用它判「浮窗还在不在」。判据在
+    /// `SystemPromptFocusPolicy.VisibilityBeforePrompt`，这里只报真实窗口状态。
+    var isVisible: Bool { panel.isVisible }
     private let model: AppModel
 #if DEBUG
     private var hasValidatedPreview = false
@@ -235,8 +238,16 @@ final class SearchPanelController {
     /// 只监听 `leftMouseDown`：判断成本极低，且不需要辅助功能权限。
     private func installClickOutsideMonitor() {
         guard clickMonitor == nil else { return }
+        // ★★ 2026-11-13 报障：「拖动搜索框移动时有时候会直接关闭」。
+        // 判定输入必须在**事件到达这一刻**拍下来，不能在异步 Task 里重新读。
+        // AppKit 的窗口拖动跟踪循环会把那个 Task 推迟到松手附近，而松手的
+        // `settleLayoutAfterDrag()` 又会 `setFrame` 重新摆位；于是「按下时明明在窗口内」
+        // 被换成「松手后落在窗口外的指针」，`field.contains(point)` 变 false ⇒ 浮窗被收起。
         let handle: (NSEvent) -> Void = { [weak self] _ in
-            Task { @MainActor in self?.dismissIfClickOutside() }
+            MainActor.assumeIsolated {
+                guard let snapshot = self?.makeClickOutsideSnapshot() else { return }
+                Task { @MainActor in self?.dismissIfClickOutside(snapshot) }
+            }
         }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown], handler: handle)
         localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
@@ -252,6 +263,28 @@ final class SearchPanelController {
         refreshGlobalMonitor()
     }
 
+    /// 把「这一下按下」的判定输入一次性拍好。**只有这里**读实时坐标与实时 frame。
+    private func makeClickOutsideSnapshot() -> SearchClickOutside.Snapshot {
+        let point = NSEvent.mouseLocation
+        // 点在自己这几块窗口之内一律不关（含「按住浮窗空白处拖动」）。
+        // 豁免列表只能收**此刻可见**的窗口：`orderOut` 不清 frame，隐藏窗口留在
+        // 原地的矩形会变成一片看不见的禁点区（2026-10-28 报障）。
+        // `canBecomeKey` 再收一道：菜单、提示、状态栏这类辅助窗口弹出瞬间
+        // `isVisible` 也为真，把它们算成「自家窗口」会误豁免点击。
+        let ownVisibleFrames = NSApp.windows
+            .filter { $0 !== panel && $0.isVisible && $0.canBecomeKey }
+            .map(\.frame)
+        return SearchClickOutside.Snapshot(
+            click: point,
+            field: panel.frame,
+            otherVisibleWindows: ownVisibleFrames,
+            overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal(at: point),
+            // ★ 系统钥匙串授权框（SecurityAgent）弹出时闪寻已失去前台，
+            //   用户点授权框里的任何一处，在屏幕坐标上都落在闪寻窗口之外。
+            //   保护期结论必须在**事件到达这一刻**拍下来，异步再读会被读没。
+            systemPromptBlocksDismissal: SystemPromptGuard.shared.blocksDismissal)
+    }
+
     /// 失去前台时补挂、回到前台时摘掉全局监视。
     ///
     /// 全局事件监视不是免费的：挂着时每次点击都会进一次回调。
@@ -261,35 +294,16 @@ final class SearchPanelController {
         if let existing = globalClickMonitor { NSEvent.removeMonitor(existing); globalClickMonitor = nil }
         guard !NSApp.isActive else { return }
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.dismissIfClickOutside() }
+            MainActor.assumeIsolated {
+                guard let snapshot = self?.makeClickOutsideSnapshot() else { return }
+                Task { @MainActor in self?.dismissIfClickOutside(snapshot) }
+            }
         }
     }
 
-    private func dismissIfClickOutside() {
+    private func dismissIfClickOutside(_ snapshot: SearchClickOutside.Snapshot) {
         guard panel.isVisible else { return }
-        // 点在自己这几块窗口之内一律不关。这一条同时覆盖三件事：
-        // 「点结果行 / 输入框」「按住浮窗空白处拖动」以及 2026-10-28 之后
-        // **点在那块独立的结果窗口上**——两块窗不再是同一个窗口，只判一个 frame 就会
-        // 出现「点一下结果，两块窗口一起消失」。
-        //
-        // ★★ 豁免列表只能收**此刻可见**的窗口（2026-10-28 报障：
-        //   「搜索结果钉住后，关闭搜索结果，搜索框不再点击任意位置关闭」）。
-        //   `orderOut` **不清 frame**：结果窗被收起来之后，那块 680×470 的矩形
-        //   仍然原地不动地留在搜索框正下方，于是变成一片看不见的禁点区——
-        //   用户看着是空桌面，点下去却不收窗。而钉住的窗口关掉之后也是一样
-        //   （`isReleasedWhenClosed = false`，窗口对象与 frame 都还在）。
-        //   判定住 Core（`SearchClickOutside`，可测），这里只负责把「可见」筛对。
-        //
-        // ★ 用 `canBecomeKey` 再收一道：菜单、提示、状态栏这类辅助窗口
-        //   在弹出瞬间 `isVisible` 也为真，把它们算成「自家窗口」会误豁免点击。
-        //   搜索框、结果窗、钉住窗、设置窗都是能成为 key 的，不受影响。
-        let ownVisibleFrames = NSApp.windows
-            .filter { $0 !== panel && $0.isVisible && $0.canBecomeKey }
-            .map(\.frame)
-        guard SearchClickOutside.shouldDismiss(click: NSEvent.mouseLocation,
-                                               field: panel.frame,
-                                               otherVisibleWindows: ownVisibleFrames,
-                                               overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal(at: NSEvent.mouseLocation)) else { return }
+        guard SearchClickOutside.shouldDismiss(snapshot) else { return }
         model.hideSearch()   // 通知会顺带卸载监视，这里不用重复
     }
 
@@ -299,6 +313,22 @@ final class SearchPanelController {
         if let monitor = globalClickMonitor { NSEvent.removeMonitor(monitor) }
         if let observer = resignObserver { NotificationCenter.default.removeObserver(observer) }
         clickMonitor = nil; localClickMonitor = nil; globalClickMonitor = nil; resignObserver = nil
+    }
+
+    /// 系统授权框关掉之后把浮窗找回来。
+    ///
+    /// ★ 与 `show()` 分开：窗口还在时**只**激活 + 提回最前。
+    /// `show()` 会走 `showSearch()`（恢复上次的查询）、`snapHome()`（重新摆位）和
+    /// `installClickOutsideMonitor()`，在用户刚输完密码那一刻做这些既多余、
+    /// 又会把用户刚拖好的位置改掉。窗口真被收掉了才走完整的 `show()`。
+    func bringForward(showIfHidden: Bool) {
+        if !panel.isVisible {
+            guard showIfHidden else { return }
+            show()
+            return
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     func show() {

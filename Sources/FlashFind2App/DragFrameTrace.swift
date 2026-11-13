@@ -17,14 +17,15 @@ import QuartzCore
 /// 只用 AppKit 原点记账；要 WindowServer 真实屏幕坐标再显式开 `FF2_DRAG_TRACE_CG=1`。
 ///
 /// ★ 不套 `#if DEBUG`：本地试用包是 `--release` 构建，DEBUG 段会被整段编译掉。
-/// 正式发布前删除本文件与所有调用点，或把 `enabled` 默认改成 false。
+/// 1.1.70 起**默认关**（1.1.69 曾默认开、写日志，属未收口边界）；
+/// 正式发布仍以「删诊断代码」为终态，需要真机取证时显式打开即可。
 ///
 /// 落盘位置：`~/Library/Logs/FlashFind2/drag-trace.log`（追加）。
-/// 关掉：`FF2_DRAG_TRACE=0` 启动时传入；诊断包默认开。
+/// 打开：启动时传 `FF2_DRAG_TRACE=1`；诊断包专用，正常试用不写日志。
 @MainActor
 enum DragFrameTrace {
 
-    static let enabled: Bool = ProcessInfo.processInfo.environment["FF2_DRAG_TRACE"] != "0"
+    static let enabled: Bool = ProcessInfo.processInfo.environment["FF2_DRAG_TRACE"] == "1"
     /// ★ CGWindowListCopyWindowInfo 是跨进程调用，拖动中采样本身可能制造掉帧。
     /// 默认只记 AppKit 侧高精度时间戳；确实要 WindowServer 真实屏幕坐标时再显式打开。
     private static let sampleCG: Bool = ProcessInfo.processInfo.environment["FF2_DRAG_TRACE_CG"] == "1"

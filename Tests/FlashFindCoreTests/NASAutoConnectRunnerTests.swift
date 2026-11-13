@@ -74,6 +74,22 @@ final class NASAutoConnectRunnerTests: XCTestCase {
             FlashFindError.coreFailure(kind: "OTPRejected", reason: nil, apiCode: 403)))
     }
 
+    /// ★ 飞牛这类 OAuth 品牌要浏览器授权码：后台没人能替用户点，重试 5 次只会
+    /// 重复撞同一个挑战并加速设备限流（1.1.70）。
+    func testDoesNotRetryWhenDeviceWantsBrowserAuthorization() async {
+        let error = FlashFindError.authorizationRequired(
+            url: URL(string: "https://nas.example.com/oauth")!, validFor: 300, rejected: false)
+        var attempts = 0; var sleeps: [TimeInterval] = []
+        let runner = NASAutoConnectRunner()
+        runner.attempt = { attempts += 1; throw error }
+        runner.sleep = { sleeps.append($0) }
+
+        guard case .failed = await runner.run() else { return XCTFail("应当是 failed") }
+        XCTAssertEqual(attempts, 1, "授权挑战必须一次停手")
+        XCTAssertEqual(sleeps, [])
+        XCTAssertFalse(NASAutoConnectPolicy.shouldRetry(error))
+    }
+
     /// ★ 用户在重试间隙点了「断开」⇒ 立刻停手，不再尝试。
     func testStopsRetryingAfterUserDisconnects() async {
         var attempts = 0; var valid = true

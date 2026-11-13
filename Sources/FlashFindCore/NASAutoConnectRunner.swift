@@ -28,7 +28,12 @@ public struct NASAutoConnectPolicy: Sendable {
     /// 这种情况如实报给用户，由他点「重新登录」在弹框里填——
     /// 这正是用户确认要保留的现状，不静默重试。
     public static func shouldRetry(_ error: Error) -> Bool {
-        !ConnectionFailureText.isOTPRequired(error)
+        if ConnectionFailureText.isOTPRequired(error) { return false }
+        // ★ 飞牛这类 OAuth 品牌要的是浏览器授权码，本机凭据里没有，也没人能替用户点。
+        // 后台自动连接撞上它时按 [5,15,40,60] 重试 5 次只是重复同一个挑战，
+        // 还会加速设备侧限流；如实报「需要用户操作」即可。
+        if case .authorizationRequired = error as? FlashFindError { return false }
+        return true
     }
 }
 

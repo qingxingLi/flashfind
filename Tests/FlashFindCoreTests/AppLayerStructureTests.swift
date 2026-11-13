@@ -1652,20 +1652,29 @@ final class AppLayerStructureTests: XCTestCase {
     /// **接线**：App 层必须把「可见」筛对，并且不许再自己判某一块窗口的 frame。
     func testClickOutsideIgnoresHiddenWindowsAndDelegatesToCore() throws {
         let controller = codeOnly(try appSource("SearchPanelController.swift"))
-        let body = try XCTUnwrap(braceBlock(after: "private func dismissIfClickOutside", in: controller),
-                                 "找不到 dismissIfClickOutside")
-        XCTAssertTrue(body.contains("SearchClickOutside.shouldDismiss("),
-                      "判定必须走 Core：App 层再拼一套，两边迟早不一致")
-        XCTAssertTrue(body.contains("$0.isVisible"),
+        // ★ 1.1.70：豁免名单与遮罩探测搬进「事件时刻快照」函数 —— 拖动误关闭的
+        // 修复要求判定输入在 mouseDown 到达那一刻就拍好（见 RecoveryBehaviorTests）。
+        // 结构守卫跟着代码走，别再对着旧函数体断言（那样只会集体假绿）。
+        let snapshotBody = try XCTUnwrap(
+            braceBlock(after: "private func makeClickOutsideSnapshot", in: controller),
+            "找不到 makeClickOutsideSnapshot")
+        XCTAssertTrue(snapshotBody.contains("$0.isVisible"),
                       "★ 豁免名单必须逐窗判 isVisible：隐藏窗口的 frame 留在原地不动")
-        XCTAssertTrue(body.contains("$0.canBecomeKey"),
+        XCTAssertTrue(snapshotBody.contains("$0.canBecomeKey"),
                       "菜单/提示这类辅助窗口弹出时也「可见」，不许被当成自家窗口")
         // ★ 2026-10-30 报障「一截图就直接消失了」：截图遮罩上的那一下点击要放行。
-        XCTAssertTrue(body.contains("overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal("),
+        XCTAssertTrue(snapshotBody.contains("overlayBlocksDismissal: ScreenOverlayProbe.blocksDismissal("),
                       "★ 截图遮罩（盖满整屏的高层窗口）上不收窗：判据在 Core，探测在 ScreenOverlayProbe")
-        XCTAssertFalse(body.contains("results.panel.frame"),
+        XCTAssertTrue(snapshotBody.contains("SearchClickOutside.Snapshot("),
+                      "豁免名单必须封进快照，异步判定不许再读实时值")
+        XCTAssertFalse(snapshotBody.contains("results.panel.frame"),
                        "★ 结果窗的 frame 不许单独豁免——它收起来之后 frame 不变，"
                        + "正是这条报障的根因")
+
+        let body = try XCTUnwrap(braceBlock(after: "private func dismissIfClickOutside", in: controller),
+                                 "找不到 dismissIfClickOutside")
+        XCTAssertTrue(body.contains("SearchClickOutside.shouldDismiss(snapshot)"),
+                      "判定必须走 Core：App 层再拼一套，两边迟早不一致")
     }
 
     /// ★★ 结果区的**尺寸与边框**（2026-10-28 用户报障后的两条硬约束）。
