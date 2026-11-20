@@ -70,6 +70,11 @@ public enum AuthorityWire {
         public static let sources = "sources"
         public static let sourceID = "source_id"
         public static let name = "name"
+        /// `list_sources` 的静态装配状态：**有没有挂上可执行的 provider**。
+        /// ★ 它不是连通性检测（Agent 最容易把这两件事当成一件）。
+        public static let hasProvider = "has_provider"
+        /// `relative_path` 相对的是哪一种根。取值由 `SourcePathRootKind` 唯一决定。
+        public static let pathRootKind = "path_root_kind"
         public static let results = "results"
         public static let fileID = "file_id"
         public static let relativePath = "relative_path"

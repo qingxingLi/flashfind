@@ -98,6 +98,18 @@ public struct AuthorizedSourceSnapshot: Equatable, Sendable {
     /// 不是「按 id 现查」的结果。
     public func execution(for id: String) -> SourceExecutionHandle? { handles[id] }
 
+    /// `list_sources` 用：**这次快照里这个 id 有没有挂上可执行的 provider**。
+    ///
+    /// ★ 这是「装配状态」，不是「连不连得上」。有句柄只说明搜索能发起；
+    ///   设备离线、会话过期、重启后没自动连上，都照样会带句柄而在真正搜索时
+    ///   报 `source_unavailable`。界面上的「已连接」是内存态，不能拿来做这个判据。
+    /// ★ 只对授权范围内的 id 回答（与 `execution(for:)` 同一份 `handles`），
+    ///   未授权 id 一律 `false`，不会借这个只读口子泄露注册表内容。
+    public func hasProvider(for id: String) -> Bool {
+        guard ids.contains(id) else { return false }
+        return handles[id] != nil
+    }
+
     /// `list_sources` 用：**能配上名字的**授权来源，按 id 升序。
     ///
     /// 循环顺序跟随 `ids`（已排序），所以输出顺序与注册表顺序无关。

@@ -666,4 +666,24 @@ final class LocateExecutionTests: XCTestCase {
             XCTAssertTrue((0...1).contains(score), "分数越界：\(score)")
         }
     }
+
+    /// 错误文案要给人一条能照做的动作，且不许再把「换个手段」留在里面。
+    /// ★ Phase 11 现场：旧 "try a different source" 被 Codex 读成允许换工具，
+    ///   于是退化成两次 `rg --files` 全盘扫描。
+    func testFailureMessagesGiveAnActionAndNeverInviteAShellFallback() {
+        let unavailable = LocateFailureCode.sourceUnavailable.message
+        XCTAssertTrue(unavailable.contains("open FlashFind"))
+        XCTAssertTrue(unavailable.contains("connected and signed in"))
+        XCTAssertTrue(unavailable.contains("Do not scan the filesystem"))
+        XCTAssertFalse(unavailable.lowercased().contains("try a different source"))
+
+        XCTAssertTrue(LocateFailureCode.authRequired.message.contains("sign in"))
+        XCTAssertTrue(LocateFailureCode.timeout.message.contains("Retry once"))
+        XCTAssertTrue(LocateFailureCode.invalidArgument.message.contains("shorten it"))
+        // 六码每个都得有一句可照做的动作，不能只留一句「出错了」。
+        for code in LocateFailureCode.allCases {
+            XCTAssertGreaterThan(code.message.count, 40,
+                                 "\(code.rawValue) 的文案没有排查动作")
+        }
+    }
 }

@@ -183,4 +183,27 @@ final class ToolSchemaTests: XCTestCase {
             XCTAssertEqual(ToolCatalog.schema(named: tool.name), tool)
         }
     }
+
+    /// 描述必须自己讲清「怎么问」与「什么不算找到」。
+    /// ★ 这是「Agent 传整句 → 一堆 0 分结果」的直接防线：排序器没有语义能力，
+    ///   唯一能改变工具选择与结果解读的地方就是这段会进 Agent 上下文的文字。
+    func testDescriptionsExplainKeywordsContentScopeAndZeroScore() {
+        let locate = try! XCTUnwrap(ToolCatalog.schema(named: "locate"))
+        XCTAssertTrue(locate.summary.contains("keywords"))
+        XCTAssertTrue(locate.summary.contains("file contents are never read"))
+        XCTAssertTrue(locate.summary.contains("score of 0"))
+        let query = try! XCTUnwrap(locate.parameter(named: "query"))
+        XCTAssertTrue(query.summary.contains("Do not pass a full descriptive sentence"))
+
+        let search = try! XCTUnwrap(ToolCatalog.schema(named: "search"))
+        XCTAssertTrue(search.summary.contains("Use it FIRST"),
+                      "描述性查询要先走 search，不能让 locate 独自扛")
+
+        let list = try! XCTUnwrap(ToolCatalog.schema(named: "list_sources"))
+        XCTAssertTrue(list.summary.contains("has_provider"))
+        XCTAssertTrue(list.summary.contains("path_root_kind"))
+        XCTAssertTrue(list.summary.contains("NOT a connectivity check"),
+                      "装配状态不许被写成健康度")
+        XCTAssertTrue(list.summary.contains("Never fall back to scanning the filesystem"))
+    }
 }

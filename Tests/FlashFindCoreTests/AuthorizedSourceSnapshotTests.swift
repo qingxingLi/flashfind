@@ -150,6 +150,32 @@ final class AuthorizedSourceSnapshotTests: XCTestCase {
                      "不在快照里的 id 不许拿到任何执行句柄")
     }
 
+    /// `has_provider` 只回答「这次快照里有没有挂上 provider」，不回答「连不连得上」。
+    /// ★ 三种 false 必须分得开：授权了但没句柄、未授权、压根不存在。
+    ///   未授权 id 一律 false，不许借这个只读口子把注册表内容带出去。
+    @MainActor
+    func testHasProviderIsAStaticFactConfinedToTheAuthorizedScope() {
+        let scheduler = SearchScheduler(providers: [])
+        let snapshot = AuthorizedSourceSnapshot(
+            scope: scope(["local_mac", "src_nas_work"]),
+            registry: [
+                AuthoritySource(id: "local_mac", name: "This Mac",
+                                execution: SourceExecutionHandle(
+                                    provider: NilProvider(id: "local_mac"), scheduler: scheduler)),
+                AuthoritySource(id: "src_nas_work", name: "Work NAS"),
+                AuthoritySource(id: "src_nas_private", name: "Private Archive",
+                                execution: SourceExecutionHandle(
+                                    provider: NilProvider(id: "src_nas_private"), scheduler: scheduler))
+            ])
+
+        XCTAssertTrue(snapshot.hasProvider(for: "local_mac"))
+        XCTAssertFalse(snapshot.hasProvider(for: "src_nas_work"),
+                       "授权了但没句柄，必须如实说 false，不能当成健康")
+        XCTAssertFalse(snapshot.hasProvider(for: "src_nas_private"),
+                       "未授权 id 不许回答 true")
+        XCTAssertFalse(snapshot.hasProvider(for: "no_such_source"))
+    }
+
     // MARK: - 小工具
 
     /// 只当「身份载体」的 provider：这条用例不真的跑搜索。

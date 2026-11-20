@@ -32,19 +32,27 @@ public enum LocateFailureCode: String, Equatable, Sendable, CaseIterable {
     public var message: String {
         switch self {
         case .authRequired:
-            return "A source needs to be signed in again in FlashFind before it can be searched. "
-                 + "Ask the user to reconnect it, then try again."
+            return "A source needs to be signed in again before it can be searched. "
+                 + "Ask the user to open FlashFind, sign in to that source in Settings, then retry."
         case .sourceDenied:
-            return "None of the requested sources is available for AI access."
+            return "None of the requested sources is available for AI access. "
+                 + "Ask the user to allow the source in FlashFind > Settings > AI."
         case .invalidArgument:
-            return "No authorized source accepted this query. Try a different query."
+            return "No authorized source accepted this query. Only keywords in file names and paths "
+                 + "are matched; shorten it to one to three words and retry."
         case .timeout:
-            return "The search did not finish in time. Try again, or narrow the query."
+            return "The search did not finish in time. Retry once, or narrow the query and "
+                 + "restrict source_ids."
         case .sourceUnavailable:
-            return "The requested source is not reachable right now. "
-                 + "Ask the user to check it, or try a different source."
+            // ★ 旧文案的 "try a different source" 被 Codex 读成「换个手段」，
+            //   实测退化成两次 `rg --files` 全盘扫描（Phase 11 现场记录）。
+            //   改成「回到闪寻里重连」这一条可照做的动作，并显式堵掉 shell 兜底。
+            return "A source is not reachable right now. Ask the user to open FlashFind, check that "
+                 + "the source is connected and signed in, then retry. Do not scan the filesystem "
+                 + "with shell commands instead."
         case .internalError:
-            return "FlashFind could not complete this search."
+            return "FlashFind could not complete this search. Retry once; if it persists, "
+                 + "ask the user to restart FlashFind."
         }
     }
 }

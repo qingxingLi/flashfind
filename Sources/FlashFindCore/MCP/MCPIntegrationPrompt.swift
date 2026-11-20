@@ -77,7 +77,13 @@ public struct MCPIntegrationPrompt: Equatable, Sendable {
 
         工具就是这六个，没有别的：\(Self.toolNames.joined(separator: "、"))。
         闪寻只在用户勾选过的来源里找，不读文件内容，也不上传任何东西。
-        找不到就说找不到，不要猜路径。
+        只按文件名和路径匹配关键词，不理解整句描述：用户用长句描述需求时，先用 search
+        按几个短词广搜候选，再挑关键词用 locate 收窄。结果里 score 为 0 且 reasons 为空
+        表示没有命中，不要当成找到了。
+        relative_path 是相对各来源自己根目录的路径，不是绝对路径；跨来源比较要连
+        source_id 一起看。找不到就说找不到，不要猜路径。
+        warnings 里若提示某个来源不可用，请如实转告用户并照里面的步骤排查，
+        不要改用命令行全盘扫描兜底。
         """
     }
 }

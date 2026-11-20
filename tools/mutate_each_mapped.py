@@ -10,6 +10,11 @@
 
 用法（必须带 TOOLCHAINS，否则 require_swift_61 会先拦下来）：
     TOOLCHAINS=org.swift.612202505261a python3 tools/mutate_each_mapped.py
+
+只跑指定变异（2026-11-19 加）：
+    python3 tools/mutate_each_mapped.py --only '允许猜路径' '搜索框退回系统放大镜'
+不带参数时跑全部登记项，行为不变。`--only` 用于「全量批跑被历史锚点漂移
+挡住」时，仍能为当次改动逐条证红 —— 它只备份这几条变异涉及的文件。
 退出码 0 = 每条变异都让登记过的用例全部变红，且源码逐字节还原。
 """
 import hashlib
@@ -642,6 +647,31 @@ EXPECT = {
     # ★ 这一条在批跑里会被 ㊿₁₁₇ 掩盖，只能单跑（见 red_proof.py 的 SINGLE_ONLY）。
     '应用清单缓存永不刷新': (
         'AppSearchCoverageTests', {'testProviderRescansAfterTheCacheLifetime'}),
+
+    # ---- 2026-11-19 MCP 反馈：三条旧锚点重对齐 + 五条新守卫 ----
+    # 旧锚点因搜索框模块化（2026-10-27）与接入提示词改写而失效；重对齐后必须
+    # 重新逐条证红，不能只改路径就当作「已验过」。
+    '允许猜路径': (
+        'MCPIntegrationPromptTests', {'testThePromptForbidsGuessingPaths'}),
+    '搜索框退回系统放大镜': (
+        'AppLayerStructureTests', {'testSearchFieldShowsBrandGlyphNotSystemMagnifier'}),
+    '重新搜索按钮整个被删': (
+        'AppLayerStructureTests', {'testSearchFieldResearchButtonIsWiredForReal'}),
+    'list_sources 描述把装配状态说成连通性': (
+        'ToolSchemaTests', {'testDescriptionsExplainKeywordsContentScopeAndZeroScore'}),
+    # 原形态「删掉授权范围 guard」零效应（init 里未授权 id 根本没进 handles），
+    # 逐条实测 MISS；改成「恒 true」才真的把装配状态伪装成健康度。
+    'has_provider 不管有没有句柄都报 true': (
+        'AuthorizedSourceSnapshotTests',
+        {'testHasProviderIsAStaticFactConfinedToTheAuthorizedScope'}),
+    '提示词删掉禁止 shell 兜底': (
+        'MCPIntegrationPromptTests',
+        {'testThePromptExplainsKeywordOnlyMatchingAndSourceFailures'}),
+    'sourceUnavailable 退回 try a different source': (
+        'LocateExecutionTests',
+        {'testFailureMessagesGiveAnActionAndNeverInviteAShellFallback'}),
+    'list_sources 把 has_provider 写死为 true': (
+        'AuthorityServiceTests', {'testListSourcesReportsProviderStateAndPathRootKind'}),
 }
 
 
@@ -663,8 +693,23 @@ def main() -> int:
     if not rp.require_swift_61():
         return 1
 
-    targets = [m for m in rp.MUTATIONS if m[0] in EXPECT]
-    missing = set(EXPECT) - {m[0] for m in targets}
+    # --only <变异名>…：不带参数时行为与原来完全一致（跑全部登记项）。
+    # 带参数时只跑指定的几条，且只备份它们涉及的文件 —— 全量批跑被历史锚点
+    # 漂移挡住时，仍能为当次改动逐条证红，不必先修完所有历史欠账。
+    only = None
+    if len(sys.argv) > 1:
+        if sys.argv[1] != '--only' or len(sys.argv) < 3:
+            print('用法：python3 tools/mutate_each_mapped.py [--only <变异名> …]')
+            return 1
+        only = set(sys.argv[2:])
+        unknown = only - set(EXPECT)
+        if unknown:
+            print(f'FAIL --only 里有未登记的名字：{sorted(unknown)}')
+            return 1
+
+    targets = [m for m in rp.MUTATIONS
+               if m[0] in EXPECT and (only is None or m[0] in only)]
+    missing = (only if only is not None else set(EXPECT)) - {m[0] for m in targets}
     if missing:
         print(f'FAIL 登记了但 red_proof 里没有这些变异：{sorted(missing)}')
         return 1

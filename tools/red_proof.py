@@ -59,7 +59,10 @@ FILES = {
     'SearchCoordinator': CLIENT / 'Sources/FlashFindCore/SearchCoordinator.swift',
     'AppSearchProvider': CLIENT / 'Sources/FlashFindCore/AppSearchProvider.swift',
     'AppCatalog': CLIENT / 'Sources/FlashFindCore/AppCatalog.swift',
-    'SearchFieldView': CLIENT / 'Sources/FlashFind2App/SearchFieldView.swift',
+    # 2026-10-27 起搜索窗按模块拆文件，输入行搬进 SearchFieldModule.swift。
+    # 旧登记会让脚本在「备份哈希」阶段就 FileNotFoundError —— 一条变异都跑不到，
+    # 而输出看起来像「红证脚本启动失败」，极易被误读成产品问题。
+    'SearchFieldModule': CLIENT / 'Sources/FlashFind2App/SearchFieldModule.swift',
     'BrandGlyphMetrics': CLIENT / 'Sources/FlashFindCore/BrandGlyphMetrics.swift',
     'BuildTrial': CLIENT / 'scripts/build_trial.py',
     'BuildEntry': CLIENT / 'scripts/build.sh',
@@ -519,13 +522,12 @@ MUTATIONS = [
      'guard !parsed.hasFormatFilter, !parsed.keywords.isEmpty else {',
      'guard !parsed.keywords.isEmpty else {'),
     # ---- 搜索框前导品牌字形（2026-10-15）----
-    ('搜索框退回系统放大镜', FILES['SearchFieldView'],
-     '''            Image(nsImage: StatusIcon.searchFieldGlyph())
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)''',
-     '''            Image(systemName: "magnifyingglass")
-                .font(.system(size: 22, weight: .regular))
-                .foregroundStyle(.secondary)'''),
+    # 2026-11-19 重新对齐：图标现在是 `Button(action: openSettings)` 里的内容，
+    # 不再是旧结构里的三行装饰图。只换这一行，后面的 `.frame` / `.contentShape`
+    # 仍在，SwiftUI 照样编译得过，但两条结构断言（不许系统放大镜 / 必须品牌字形）变红。
+    ('搜索框退回系统放大镜', FILES['SearchFieldModule'],
+     '                Image(nsImage: StatusIcon.searchFieldGlyph())',
+     '                Image(systemName: "magnifyingglass")'),
     # 22pt 框偏要用状态栏那套 18/36px 素材：能编译、能跑、图标也照样出来，
     # 只是 Retina 上被放大 1.22 倍发虚——只有源码结构能锁住。
     ('搜索框复用状态栏低密度素材', FILES['FlashFind2App'],
@@ -536,8 +538,22 @@ MUTATIONS = [
      "SEARCH_GLYPH_NAMES = ('ShanXunGlyph.png', 'ShanXunGlyph@2x.png')",
      "SEARCH_GLYPH_NAMES = ('ShanXunMenuIcon.png', 'ShanXunMenuIcon@2x.png')"),
     # ── 2026-10-16：重新搜索按钮（用户报障 IncompleteResponse 时的一键重来）──
-    ('重新搜索按钮整个被删', FILES['SearchFieldView'],
-     '            // 重新搜索：放在清除按钮与「更多」菜单之间——用户报障时指的就是这一角。\n            // 图标而非文字，是为了不挤占关键词输入框的宽度；名字走 help 与读屏。\n            Button(action: research) {\n                Image(systemName: "arrow.clockwise").font(.system(size: 17))\n                    .frame(width: 28, height: 28)\n                    .contentShape(Rectangle())\n            }\n            .buttonStyle(.plain).foregroundStyle(.secondary)\n            // 关键词为空时重搜没有意义（changedQuery 会直接清空返回），\n            // 所以置灰，别给一个点了没反应的按钮。\n            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)\n            .help("重新搜索").accessibilityLabel("重新搜索")\n',
+    # 2026-11-19 重新对齐：注释改过、按钮移到输入行最右侧（清除按钮之后），
+    # 旧锚点整块已不存在。删掉整块后 HStack 里还有 TextField / 清除 / ProgressView，
+    # 仍是合法视图，编译得过 —— 由 `testSearchFieldResearchButtonIsWiredForReal` 抓。
+    ('重新搜索按钮整个被删', FILES['SearchFieldModule'],
+     '            // 重新搜索放在最右侧。\n'
+     '            // 图标而非文字，是为了不挤占关键词输入框的宽度；名字走 help 与读屏。\n'
+     '            Button(action: research) {\n'
+     '                Image(systemName: "arrow.clockwise").font(.system(size: 17))\n'
+     '                    .frame(width: 28, height: 28)\n'
+     '                    .contentShape(Rectangle())\n'
+     '            }\n'
+     '            .buttonStyle(.plain).foregroundStyle(.secondary)\n'
+     '            // 关键词为空时重搜没有意义（changedQuery 会直接清空返回），\n'
+     '            // 所以置灰，别给一个点了没反应的按钮。\n'
+     '            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)\n'
+     '            .help("重新搜索").accessibilityLabel("重新搜索")\n',
      ''),
     # 按钮还在，但动作被换成空闭包——「画了却没接线」正是本项目最典型的假状态。
     ('重新搜索按钮没接到 changedQuery', FILES['SearchView'],
@@ -2689,9 +2705,12 @@ MUTATIONS = [
      '        2. 调 locate，用一个关键词找一个文件（查找范围由勾选的来源决定，不接受路径参数）。',
      '        2. 调 locate，在我提到的目录里找一个文件。'),
     # ㊿₇₉ 改成「允许猜路径」：AI 会自己拼绝对路径去读文件，而闪寻从不给绝对路径。
+     # ★ 2026-11-19：接入提示词改写后，这句前面多了「source_id 一起看。」，
+     #   带 9 个前导空格的整行锚点不再命中（count=0 会让批跑在应用阶段退出 1）。
+     #   改成裸句子 —— 全文件唯一，且注释里那句「不要猜路径」不是这个完整句子。
      ('允许猜路径', FILES['MCPIntegrationPrompt'],
-      '        找不到就说找不到，不要猜路径。',
-      '        找不到就自己推断一下路径。'),
+      '找不到就说找不到，不要猜路径。',
+      '找不到就自己推断一下路径。'),
     # ㊿₈₀ 去掉「不上传」：这半句是隐私承诺的一部分，少一句就成了「不读内容但会上传」。
      ('去掉不上传', FILES['MCPIntegrationPrompt'],
       '        闪寻只在用户勾选过的来源里找，不读文件内容，也不上传任何东西。',
@@ -2779,6 +2798,30 @@ MUTATIONS = [
     #   `sanitize` 只改 `initialize` 报文，出站的 `result` 帧进去什么样出来什么样，
     #   于是 `testSanitizingTransportForwardsOutboundVerbatim` 永远打不红——批跑里
     #   直接记成 MISS（2026-10-22 实测）。这类变异必须撤，否则「已证红」是假的。
+
+    # ── 2026-11-19 MCP 反馈：文案层 + 结构化来源健康度的五条守卫 ──
+    # 五条都改「会进 Agent 上下文或对外报文」的产品源码，锚点各自唯一、都能编译；
+    # 逐条证红登记在 tools/mutate_each_mapped.py 的 EXPECT 里。
+    ('list_sources 描述把装配状态说成连通性', FILES['ToolSchema'],
+     '+ "path_root_kind (which root relative_path is measured from). has_provider is NOT a "',
+     '+ "path_root_kind (which root relative_path is measured from). has_provider is a "'),
+    # ★ 2026-11-19 逐条实测：原形态「删掉 guard ids.contains」是**零效应变异** ——
+    #   init 只把授权范围内的 id 放进 handles，未授权 id 本来就不在表里，
+    #   删了 guard 用例照样全绿（MISS，实际变红 []）。改成「只要授权就报 true」：
+    #   它真正推翻了「装配状态 ≠ 健康度」这条契约，且能改到用例里的可观察量
+    #   （授权但没句柄的 src_nas_work 会从 false 变成 true）。
+    ('has_provider 不管有没有句柄都报 true', FILES['AuthorizedSourceSnapshot'],
+     '        return handles[id] != nil',
+     '        return true'),
+    ('提示词删掉禁止 shell 兜底', FILES['MCPIntegrationPrompt'],
+     '        不要改用命令行全盘扫描兜底。\n',
+     ''),
+    ('sourceUnavailable 退回 try a different source', FILES['LocateExecution'],
+     '                 + "with shell commands instead."',
+     '                 + "Try a different source."'),
+    ('list_sources 把 has_provider 写死为 true', FILES['RoutingAuthorityService'],
+     '.bool(snapshot.hasProvider(for: source.id))',
+     '.bool(true)'),
 ]
 
 # ★ 只能单跑、不能进批跑的变异。
@@ -3651,6 +3694,15 @@ EXPECTED = {
     #          也就是说**没有能编译通过的变异**能打红它；
     #          「删失败不许说成已清空」这条行为由 `MCPAuthority.clearHistory`
     #          返回 `.failed` 与视图三种文案的接线断言守（源码级）。
+
+    # ---- 2026-11-19 MCP 反馈：文案层 + 结构化来源健康度的五条新守卫 ----
+    # 每条都由 MUTATIONS 末尾同批新增的一条变异打红，逐条归因见
+    # tools/mutate_each_mapped.py 的 EXPECT。
+    'testListSourcesReportsProviderStateAndPathRootKind',
+    'testHasProviderIsAStaticFactConfinedToTheAuthorizedScope',
+    'testThePromptExplainsKeywordOnlyMatchingAndSourceFailures',
+    'testDescriptionsExplainKeywordsContentScopeAndZeroScore',
+    'testFailureMessagesGiveAnActionAndNeverInviteAShellFallback',
 }
 
 # Dart 侧的期望：这些套件在对应变异下必须失败。

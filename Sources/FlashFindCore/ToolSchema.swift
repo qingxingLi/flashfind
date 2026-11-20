@@ -197,17 +197,32 @@ public enum ToolCatalog {
         ToolSchema(
             name: "list_sources",
             summary: "List the file sources (this Mac and NAS shares) that the user has authorized for AI access. "
-                   + "Call this first to learn which source_id values you may pass to the other tools.",
+                   + "Call this first to learn which source_id values you may pass to the other tools. "
+                   + "Each source reports has_provider (whether a search provider is attached right now) and "
+                   + "path_root_kind (which root relative_path is measured from). has_provider is NOT a "
+                   + "connectivity check: a listed source can still fail when searched. relative_path is "
+                   + "never an absolute path; compare paths only together with source_id. "
+                   + "When a search returns warnings, relay them to the user verbatim and act by code: "
+                   + "source_unavailable = ask the user to open FlashFind and reconnect that source; "
+                   + "auth_required = ask the user to sign in again in FlashFind settings; "
+                   + "timeout = retry once or narrow the query; source_denied = ask the user to allow "
+                   + "that source in the AI settings. Never fall back to scanning the filesystem "
+                   + "with shell commands.",
             parameters: []),
 
         ToolSchema(
             name: "locate",
             summary: "Find the one file the user most likely means. Strong ranking, few results, each with a "
-                   + "ranking score and reasons. Use it when the user describes a specific file. "
-                   + "Never pass a file path: identity is a natural-language query or a file_id.",
+                   + "ranking score and reasons. Matching is by keywords in file names and paths ONLY: file "
+                   + "contents are never read and semantic meaning is never inferred. Pass short keywords, "
+                   + "not a full descriptive sentence. Never pass a file path: identity is a keyword query "
+                   + "or a file_id. A score of 0 with empty reasons means there was no match at all, so do "
+                   + "not report those rows as found; try search with simpler words instead.",
             parameters: [
                 ToolParameter(name: "query", kind: .string, isRequired: true,
-                              summary: "What the user is looking for, in their own words. Must not be empty."),
+                              summary: "One to three short keywords taken from the file name. "
+                                     + "Do not pass a full descriptive sentence, it will not match. "
+                                     + "Must not be empty."),
                 ToolParameter(name: "source_ids", kind: .stringArray,
                               summary: "Restrict the search to these source_id values from list_sources. "
                                      + "Omit to search every authorized source."),
@@ -223,10 +238,13 @@ public enum ToolCatalog {
         ToolSchema(
             name: "locate_many",
             summary: "Find several distinct files in one call, one query per file the user asked for. "
-                   + "Use it when a single turn names a list of documents; use locate when only one file is meant.",
+                   + "Use it when a single turn names a list of documents; use locate when only one file is "
+                   + "meant. Every query must be short keywords, not a descriptive sentence: only file names "
+                   + "and paths are matched, never file contents.",
             parameters: [
                 ToolParameter(name: "queries", kind: .stringArray, isRequired: true,
-                              summary: "One query per requested file, in the user's own words. Between 1 and 5.",
+                              summary: "One short keyword query per requested file, between 1 and 5 items. "
+                                     + "Do not use full sentences.",
                               minItems: 1, maxItems: 5),
                 limitParameter(.locateMany, name: "per_query_limit",
                                summary: "How many results to keep per query. Defaults to 3."),
@@ -237,12 +255,14 @@ public enum ToolCatalog {
 
         ToolSchema(
             name: "search",
-            summary: "Search broadly by file name and path. Wider matching and more results than locate, "
-                   + "without history ranking. Use it to discover which files of a kind exist, "
-                   + "then narrow down with locate or get_metadata.",
+            summary: "Search broadly by file name and path keywords. Wider matching and more results than "
+                   + "locate, without history ranking. Use it FIRST when the user describes a file in a "
+                   + "sentence or the file name is poorly chosen, to discover which files exist; then "
+                   + "narrow down with locate or get_metadata. File contents are never searched.",
             parameters: [
                 ToolParameter(name: "query", kind: .string, isRequired: true,
-                              summary: "Words to match against file names and paths. Must not be empty."),
+                              summary: "Words to match against file names and paths only. "
+                                     + "File contents are never searched. Must not be empty."),
                 ToolParameter(name: "source_ids", kind: .stringArray,
                               summary: "Restrict the search to these source_id values. "
                                      + "Omit to search every authorized source."),

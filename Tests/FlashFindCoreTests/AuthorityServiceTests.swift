@@ -199,7 +199,34 @@ final class AuthorityServiceTests: XCTestCase {
         }
     }
 
+    /// 解析 `list_sources` 的原始返回体（含结构化字段）。
+    /// ★ 与 `listed(_:)` 分开：那个只挑出 id/name，供老用例继续按两字段精确比较；
+    ///   新增字段不能顺手把老断言改成「包含」，那会削弱原来的键闭集守卫。
+    private func listedRaw(_ outcome: ToolOutcome) throws -> [[String: Any]] {
+        guard case .success(let json) = outcome else {
+            XCTFail("不是成功结果：\(outcome)")
+            throw NotSuccess()
+        }
+        let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        let object = try XCTUnwrap(parsed as? [String: Any], "返回体不是对象：\(json)")
+        return try XCTUnwrap(object["sources"] as? [[String: Any]], "没有 sources 数组：\(json)")
+    }
+
     private struct NotSuccess: Error {}
+
+    /// `has_provider` 是装配状态、`path_root_kind` 是 `relative_path` 的坐标系。
+    /// 两者都必须是 `list_sources` 当场能验证的静态事实，绝不冒充连通性检测。
+    func testListSourcesReportsProviderStateAndPathRootKind() async throws {
+        let holder = Holder(settings: enabled([mac, work]), sources: sources([mac, work]))
+        let items = try listedRaw(await service(holder).handle(job(.listSources)))
+
+        XCTAssertEqual(items.count, 2)
+        // 夹具里的 AuthoritySource 都没挂执行句柄 ⇒ 必须如实报 false，不许编成 true。
+        XCTAssertEqual(items.compactMap { $0["has_provider"] as? Bool }, [false, false])
+        // 本机 = 文件系统根；NAS = 设备搜索根（共享名保留在路径第一段）。
+        XCTAssertEqual(items.compactMap { $0["path_root_kind"] as? String },
+                       ["filesystem_root", "device_search_root"])
+    }
 
     // MARK: - ① 总开关关闭 → mcp_disabled
 

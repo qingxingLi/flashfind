@@ -220,7 +220,25 @@ public struct RoutingAuthorityService: AuthorityServing, Sendable {
 
     // MARK: - list_sources
 
-    /// `{"sources":[{"source_id":"…","name":"…"}]}`，按 `source_id` 升序。
+    /// `relative_path` 的坐标系（§4.12 / Phase 6.3b-3）。
+    ///
+    /// 同一个字段名在两个来源上相对的是**两个不同的根**：
+    /// 本机是文件系统根 `/`（`Users/…`），NAS 是设备搜索根（`共享名/…` 或 `vol3/…`）。
+    /// 这不是可以「统一成绝对路径」的格式差异——NAS 给不出可信的本机绝对路径，
+    /// 而剥掉共享名会让 `/共享A/a.pdf` 与 `/共享B/a.pdf` 撞同一个 `file_id`。
+    /// 所以只能把坐标系**显式告诉 Agent**，让它连 `source_id` 一起比较。
+    ///
+    /// ★ 判定按**身份**（`SearchSource.local.id`），不按路径长什么样、不按字符串猜。
+    public enum SourcePathRootKind: String, Equatable, Sendable {
+        case filesystemRoot = "filesystem_root"
+        case deviceSearchRoot = "device_search_root"
+
+        public static func kind(for sourceID: String) -> SourcePathRootKind {
+            sourceID == SearchSource.local.id ? .filesystemRoot : .deviceSearchRoot
+        }
+    }
+
+    /// `{"sources":[{"source_id":"…","name":"…","has_provider":…,"path_root_kind":"…"}]}`，按 `source_id` 升序。
     ///
     /// * **只列授权来源**：叫得动它的是 `AuthorizedSourceSnapshot`——它建自
     ///   `AuthorizationScope`（已授权 ∩ 还存在），未授权来源连名字都进不来。
@@ -236,7 +254,13 @@ public struct RoutingAuthorityService: AuthorityServing, Sendable {
 
         let entries: [AuthorityWire.Value] = snapshot.namedSources.map { source in
             .object([AuthorityWire.ResponseKey.sourceID: .string(source.id),
-                     AuthorityWire.ResponseKey.name: .string(source.name)])
+                     AuthorityWire.ResponseKey.name: .string(source.name),
+                     // ★ 静态装配状态，不是连通性检测。真实故障仍由搜索时的
+                     //   `warnings` / 错误 message 带出，不在这里抢答。
+                     AuthorityWire.ResponseKey.hasProvider:
+                         .bool(snapshot.hasProvider(for: source.id)),
+                     AuthorityWire.ResponseKey.pathRootKind:
+                         .string(SourcePathRootKind.kind(for: source.id).rawValue)])
         }
 
         let payload = AuthorityWire.Value.object(

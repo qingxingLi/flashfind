@@ -124,6 +124,19 @@ final class MCPIntegrationPromptTests: XCTestCase {
         XCTAssertTrue(installed.text.contains("不上传"))
     }
 
+    /// 这五句是真机反馈里四种误用的直接防线：长句、内容检索、零分当命中、
+    /// 跨来源比路径、来源不可用时退化成 shell 全盘扫描。
+    func testThePromptExplainsKeywordOnlyMatchingAndSourceFailures() {
+        let text = installed.text
+        XCTAssertTrue(text.contains("只按文件名和路径匹配关键词"))
+        XCTAssertTrue(text.contains("先用 search"), "描述性长句要先走宽口径 search")
+        XCTAssertTrue(text.contains("score 为 0"), "零分不是命中")
+        XCTAssertTrue(text.contains("relative_path 是相对各来源自己根目录的路径"))
+        XCTAssertTrue(text.contains("warnings 里若提示某个来源不可用"))
+        XCTAssertTrue(text.contains("不要改用命令行全盘扫描兜底"),
+                      "Phase 11 现场：Codex 把 try a different source 读成换手段")
+    }
+
     // MARK: - 卫生
 
     /// ★ 这段文字是要给人复制的，绝不能带本机标识。
